@@ -181,10 +181,10 @@ func resetIn(_ hours: Double) -> String {
     return f.string(from: Date().addingTimeInterval(hours * 3600))
 }
 
-func scopedCap(_ model: String, used: Double, resetHours: Double) -> OAuthUsageLimit {
+func scopedCap(_ id: String?, _ model: String, used: Double, resetHours: Double) -> OAuthUsageLimit {
     OAuthUsageLimit(kind: "weekly_scoped", group: "weekly", percent: used,
                     resets_at: resetIn(resetHours),
-                    scope: OAuthLimitScope(model: OAuthLimitModel(id: nil, display_name: model)),
+                    scope: OAuthLimitScope(model: OAuthLimitModel(id: id, display_name: model)),
                     is_active: true)
 }
 
@@ -213,15 +213,14 @@ func makeStore(tab: DisplayTab, range: TimeRange = .week) -> UsageStore {
     s.timeRange = range
     s.subscriptionQuota = OAuthUsage(
         five_hour: OAuthUsageWindow(utilization: 18, resets_at: resetIn(3.4), label: "Gemini Models"),
-        seven_day: OAuthUsageWindow(utilization: 28, resets_at: resetIn(4.7), label: "Claude & Partner"),
+        seven_day: OAuthUsageWindow(utilization: 28, resets_at: resetIn(4.7), label: "Claude & GPT · 5h"),
         extra_usage: nil,
         seven_day_sonnet: nil,
         limits: OAuthLimitList(items: [
-            scopedCap("Gemini Hydrogen", used: 31, resetHours: 3.4),
-            scopedCap("Claude Opus 5.5", used: 74, resetHours: 4.7),
+            scopedCap("claude_partner_weekly", "Claude & GPT · Weekly", used: 12, resetHours: 132),
         ]),
         accountEmail: "jiakun@google-one.demo",
-        planTier: "Google One AI Ultra",
+        planTier: "Google AI Ultra",
         promptCredits: 1850,
         flowCredits: 4200,
         flexCredits: 950

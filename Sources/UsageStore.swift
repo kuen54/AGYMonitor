@@ -9,7 +9,16 @@ class UsageStore: ObservableObject {
     @Published var month: PeriodUsage?
     @Published var isLoading = true
     @Published var lastUpdate: Date?
-    @Published var selectedTab: DisplayTab = .cost
+    @Published var selectedTab: DisplayTab = .cost {
+        didSet {
+            guard selectedTab == .subscription, oldValue != .subscription else { return }
+            if quotaUpdatedAt == nil || Date().timeIntervalSince(quotaUpdatedAt!) > 30 {
+                DispatchQueue.main.async { [weak self] in
+                    self?.refreshQuota(force: true)
+                }
+            }
+        }
+    }
 
     // Month navigation
     @Published var viewingYear: Int

@@ -439,6 +439,73 @@ public enum AGYQuotaParser {
         return aggregateModelQuotaSamples(samples)
     }
 
+    /// Merge live buckets from `v1internal:fetchAvailableModels` (which holds Gemini's
+    /// 5h rolling quota) and `v1internal:retrieveUserQuotaSummary` (which holds 3P
+    /// "Claude and GPT models" 5h + weekly buckets) without dropping Gemini.
+    public static func mergeLiveQuotaBuckets(
+        availableModelsData: Data?,
+        quotaSummaryData: Data?
+    ) -> [AGYModelQuotaBucket] {
+        let modelBuckets = availableModelsData.map(parseAvailableModelsJSON) ?? []
+        let summaryBuckets = quotaSummaryData.map(parseAvailableModelsJSON) ?? []
+
+        var merged: [String: AGYModelQuotaBucket] = [:]
+        for bucket in modelBuckets {
+            merged[bucket.id] = bucket
+        }
+        for bucket in summaryBuckets {
+            merged[bucket.id] = bucket
+        }
+        return merged.values.sorted(by: bucketSortOrder)
+    }
+
+    // MARK: 3b) `agi` / `agy` Keychain OAuth payload (`go-keyring-base64:`)
+
+    /// Parse macOS Keychain secret stored by `agy` CLI (`service="gemini", account="antigravity"`).
+    /// Supports `zalando/go-keyring`'s `"go-keyring-base64:<b64 JSON>"` format, raw JSON, and
+    /// hex-encoded output from `/usr/bin/security ... -w`.
+    public static func parseGoKeyringAuthPayload(
+        _ raw: String
+    ) -> (accessToken: String?, expiry: Date?, email: String?)? {
+        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+
+        if let hexDecoded = decodeHexUTF8IfNeeded(text) {
+            text = hexDecoded.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        let jsonData: Data
+        let prefix = "go-keyring-base64:"
+        if text.hasPrefix(prefix) {
+            let b64 = String(text.dropFirst(prefix.count))
+            guard let decoded = decodeBase64Strict(b64) else { return nil }
+            jsonData = decoded
+        } else {
+            guard let d = text.data(using: .utf8) else { return nil }
+            jsonData = d
+        }
+
+        guard let dict = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
+            return nil
+        }
+
+        let tokenObj = dict["token"] as? [String: Any]
+        let rawToken = (tokenObj?["access_token"] as? String)
+            ?? (tokenObj?["accessToken"] as? String)
+            ?? (dict["access_token"] as? String)
+            ?? (dict["accessToken"] as? String)
+        let accessToken = nonEmptyTrimmed(rawToken)
+
+        let rawExpiry = (tokenObj?["expiry"] as? String) ?? (dict["expiry"] as? String)
+        let expiry = rawExpiry.flatMap { AppDate.parseISO8601($0) }
+
+        let rawEmail = (dict["id_token_email"] as? String) ?? (dict["email"] as? String)
+        let email = nonEmptyTrimmed(rawEmail)
+
+        guard accessToken != nil || email != nil else { return nil }
+        return (accessToken: accessToken, expiry: expiry, email: email)
+    }
+
     // MARK: 4) `~/.gemini/antigravity-cli/log/cli-*.log` account info
 
     /// Extract the newest `(email, tier)` pair logged by `agy` in `cli-*.log`.
@@ -504,9 +571,9 @@ public enum AGYQuotaParser {
               !trimmed.isEmpty else { return nil }
         let norm = trimmed.uppercased().replacingOccurrences(of: "-", with: "_")
         switch norm {
-        case "G1_PRO_TIER", "GOOGLE_ONE_AI_PRO", "GOOGLE_AI_PRO":
+        case "G1_PRO_TIER", "G1_PRO_LITE_TIER", "GOOGLE_ONE_AI_PRO", "GOOGLE_AI_PRO":
             return "Google AI Pro"
-        case "G1_ULTRA_TIER", "GOOGLE_ONE_AI_ULTRA", "GOOGLE_AI_ULTRA":
+        case "G1_ULTRA_TIER", "G1_ULTRA_LITE_TIER", "GOOGLE_ONE_AI_ULTRA", "GOOGLE_AI_ULTRA":
             return "Google AI Ultra"
         case "FREE_TIER", "STANDARD_TIER_FREE", "TEAMS_TIER_FREE", "FREE":
             return "Free"
@@ -535,6 +602,42 @@ public enum AGYQuotaParser {
     }
 
     // MARK: - Internal helpers: Base64 & UnifiedStateSync unwrapping
+
+    private static func nonEmptyTrimmed(_ s: String?) -> String? {
+        guard let t = s?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty else {
+            return nil
+        }
+        return t
+    }
+
+    private static func decodeHexUTF8IfNeeded(_ raw: String) -> String? {
+        guard !raw.hasPrefix("{"),
+              !raw.hasPrefix("go-keyring-base64:"),
+              raw.count >= 4,
+              raw.count % 2 == 0 else {
+            return nil
+        }
+        let bytes = Array(raw.utf8)
+        func hexNibble(_ b: UInt8) -> UInt8? {
+            switch b {
+            case 48...57: return b - 48         // 0-9
+            case 65...70: return b - 65 + 10    // A-F
+            case 97...102: return b - 97 + 10   // a-f
+            default: return nil
+            }
+        }
+        var out = Data()
+        out.reserveCapacity(bytes.count / 2)
+        var i = 0
+        while i < bytes.count {
+            guard let hi = hexNibble(bytes[i]), let lo = hexNibble(bytes[i + 1]) else {
+                return nil
+            }
+            out.append((hi << 4) | lo)
+            i += 2
+        }
+        return String(data: out, encoding: .utf8)
+    }
 
     private static func stripSurroundingQuotes(_ s: String) -> String {
         if s.count >= 2 && s.first == "\"" && s.last == "\"" {
@@ -896,6 +999,10 @@ public enum AGYQuotaParser {
         defaultId: String,
         entry: [String: Any]
     ) -> ModelQuotaSample? {
+        let lowerDefaultId = defaultId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if lowerDefaultId.hasPrefix("chat_") || lowerDefaultId.hasPrefix("tab_") {
+            return nil
+        }
         let displayName = (entry["displayName"] as? String)
             ?? (entry["display_name"] as? String)
             ?? (entry["label"] as? String)
@@ -935,21 +1042,28 @@ public enum AGYQuotaParser {
     }
 
     private static func parseQuotaSummaryBuckets(_ root: [String: Any]) -> [AGYModelQuotaBucket] {
-        var bucketDicts: [[String: Any]] = []
+        var entries: [(groupTitle: String, groupDesc: String, bucket: [String: Any])] = []
         if let groups = root["groups"] as? [[String: Any]] {
             for g in groups {
-                if let b = g["buckets"] as? [[String: Any]] {
-                    bucketDicts.append(contentsOf: b)
+                let gTitle = (g["displayName"] as? String) ?? (g["display_name"] as? String) ?? ""
+                let gDesc = (g["description"] as? String) ?? ""
+                if let bList = g["buckets"] as? [[String: Any]] {
+                    for b in bList {
+                        entries.append((gTitle, gDesc, b))
+                    }
                 }
             }
         }
         if let topBuckets = root["buckets"] as? [[String: Any]] {
-            bucketDicts.append(contentsOf: topBuckets)
+            for b in topBuckets {
+                entries.append(("", "", b))
+            }
         }
-        guard !bucketDicts.isEmpty else { return [] }
+        guard !entries.isEmpty else { return [] }
 
         var results: [AGYModelQuotaBucket] = []
-        for b in bucketDicts {
+        for entry in entries {
+            let b = entry.bucket
             if (b["disabled"] as? Bool) == true { continue }
             let rawId = (b["bucketId"] as? String)
                 ?? (b["bucket_id"] as? String)
@@ -971,13 +1085,43 @@ public enum AGYQuotaParser {
             let resetAt = AppDate.parseISO8601(
                 (b["resetTime"] as? String) ?? (b["reset_time"] as? String)
             )
-            let canonical = canonicalBucketMetadata(rawId: rawId, rawTitle: rawTitle, classes: [])
+            let window = ((b["window"] as? String) ?? "").lowercased()
+            let lowerId = rawId.lowercased()
+            let lowerTitle = rawTitle.lowercased()
+            let isWeekly = window.contains("week") || lowerId.contains("week") || lowerTitle.contains("week")
+            let familyProbe = "\(entry.groupTitle) \(entry.groupDesc) \(rawId) \(rawTitle)".lowercased()
+
+            let isGemini = familyProbe.contains("gemini") || lowerId.hasPrefix("1p")
+            let isClaudeOrGPT = familyProbe.contains("claude")
+                || familyProbe.contains("gpt")
+                || familyProbe.contains("partner")
+                || familyProbe.contains("anthropic")
+                || lowerId.hasPrefix("3p")
+
+            let canonicalId: String
+            let canonicalTitle: String
+            let classes: [ModelClass]
+            if isGemini && !isClaudeOrGPT {
+                canonicalId = isWeekly ? "gemini_weekly" : "gemini"
+                canonicalTitle = isWeekly ? "Gemini · Weekly" : "Gemini Models"
+                classes = [.hydrogen, .carbon, .argon, .flash]
+            } else if isClaudeOrGPT {
+                canonicalId = isWeekly ? "claude_partner_weekly" : "claude_partner"
+                canonicalTitle = isWeekly ? "Claude & GPT · Weekly" : "Claude & GPT · 5h"
+                classes = [.claude, .other]
+            } else {
+                let fallback = canonicalBucketMetadata(rawId: rawId, rawTitle: rawTitle, classes: [])
+                canonicalId = fallback.id
+                canonicalTitle = fallback.title
+                classes = fallback.defaultClasses
+            }
+
             results.append(AGYModelQuotaBucket(
-                id: canonical.id,
-                title: canonical.title,
+                id: canonicalId,
+                title: canonicalTitle,
                 remainingFraction: rem,
                 resetAt: resetAt,
-                modelClasses: canonical.defaultClasses
+                modelClasses: classes
             ))
         }
 
@@ -1079,7 +1223,9 @@ public enum AGYQuotaParser {
             switch id {
             case "gemini": return 0
             case "claude_partner": return 1
-            default: return 2
+            case "gemini_weekly": return 2
+            case "claude_partner_weekly": return 3
+            default: return 4
             }
         }
         let ra = rank(a.id), rb = rank(b.id)

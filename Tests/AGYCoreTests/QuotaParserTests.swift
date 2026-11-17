@@ -182,4 +182,104 @@ struct QuotaParserTests {
         #expect(rows[1].modelClass == .argon)
         #expect(rows[2].modelClass == .other)
     }
+
+    @Test("Parses go-keyring-base64 Keychain payload with microsecond expiry and id_token_email")
+    func parseGoKeyringKeychainPayload() throws {
+        let jsonStr = """
+        {
+          "token": {
+            "access_token": "ya29.test-access-token-123",
+            "token_type": "Bearer",
+            "refresh_token": "1//test-refresh",
+            "expiry": "2026-11-17T13:43:16.104564+08:00",
+            "expires_in": 3599
+          },
+          "auth_method": "oauth-personal",
+          "id_token_email": "dev@example.com",
+          "writer_id": "agy-cli"
+        }
+        """
+        let raw = "go-keyring-base64:" + Data(jsonStr.utf8).base64EncodedString()
+        let parsed = try #require(AGYQuotaParser.parseGoKeyringAuthPayload(raw))
+        #expect(parsed.accessToken == "ya29.test-access-token-123")
+        #expect(parsed.email == "dev@example.com")
+        let expectedExpiry = try #require(AppDate.parseISO8601("2026-11-17T13:43:16.104564+08:00"))
+        #expect(parsed.expiry == expectedExpiry)
+
+        // Hex-encoded output from `/usr/bin/security -w` is also decoded transparently
+        let hexRaw = raw.utf8.map { String(format: "%02x", $0) }.joined()
+        let parsedHex = try #require(AGYQuotaParser.parseGoKeyringAuthPayload(hexRaw))
+        #expect(parsedHex.accessToken == "ya29.test-access-token-123")
+        #expect(parsedHex.email == "dev@example.com")
+    }
+
+    @Test("Ignores chat_* / tab_* internal entries and merges fetchAvailableModels + retrieveUserQuotaSummary")
+    func mergeLiveQuotaModelsAndSummary() {
+        let availableModelsJSON = """
+        {
+          "models": {
+            "chat_20706": { "quotaInfo": { "remainingFraction": 1 } },
+            "tab_flash_lite_preview": { "quotaInfo": { "remainingFraction": 1 } },
+            "gemini-3-flash": {
+              "displayName": "Gemini 3 Flash",
+              "quotaInfo": { "remainingFraction": 0.32306847, "resetTime": "2026-11-17T04:53:55Z" }
+            },
+            "gemini-4-carbon-medium": {
+              "displayName": "Gemini 4 Carbon (Medium)",
+              "quotaInfo": { "remainingFraction": 0.36, "resetTime": "2026-11-17T04:53:55Z" }
+            },
+            "claude-opus-5-5-high": {
+              "displayName": "Claude Opus 5.5 (High)",
+              "quotaInfo": { "remainingFraction": 1, "resetTime": "2026-11-17T09:52:28Z" }
+            }
+          }
+        }
+        """
+
+        let onlyModels = AGYQuotaParser.parseAvailableModelsJSON(Data(availableModelsJSON.utf8))
+        #expect(onlyModels.count == 2)
+        #expect(onlyModels[0].id == "gemini")
+        #expect(onlyModels[0].remainingPercent == 32)
+        #expect(onlyModels[1].id == "claude_partner")
+        #expect(onlyModels[1].remainingPercent == 100)
+
+        let summaryJSON = """
+        {
+          "groups": [
+            {
+              "displayName": "Claude and GPT models",
+              "description": "Models within this group: Claude Opus 5.5, Claude Sonnet 5.5, GPT-OSS 120B",
+              "buckets": [
+                {
+                  "bucketId": "3p-weekly",
+                  "displayName": "Weekly Limit Remaining",
+                  "window": "weekly",
+                  "resetTime": "2026-11-24T04:52:30Z",
+                  "remainingFraction": 0.85
+                },
+                {
+                  "bucketId": "3p-5h",
+                  "displayName": "Five Hour Limit Remaining",
+                  "window": "5h",
+                  "resetTime": "2026-11-17T09:52:30Z",
+                  "remainingFraction": 0.92
+                }
+              ]
+            }
+          ]
+        }
+        """
+
+        let merged = AGYQuotaParser.mergeLiveQuotaBuckets(
+            availableModelsData: Data(availableModelsJSON.utf8),
+            quotaSummaryData: Data(summaryJSON.utf8)
+        )
+        #expect(merged.count == 3)
+        #expect(merged[0].id == "gemini")
+        #expect(merged[0].remainingPercent == 32)
+        #expect(merged[1].id == "claude_partner")
+        #expect(merged[1].remainingPercent == 92)
+        #expect(merged[2].id == "claude_partner_weekly")
+        #expect(merged[2].remainingPercent == 85)
+    }
 }

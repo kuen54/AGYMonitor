@@ -95,7 +95,7 @@ class TestPython39CompatibilityAndMeta(unittest.TestCase):
     def test_python39_syntax_and_version(self) -> None:
         src = SCRIPT_PATH.read_text(encoding="utf-8")
         tree = ast.parse(src, filename=str(SCRIPT_PATH))
-        self.assertEqual(au.__version__, "1.0.0")
+        self.assertEqual(au.__version__, "1.0.1")
 
         has_future_annotations = False
         for node in ast.walk(tree):
@@ -959,7 +959,7 @@ class TestActiveTimeIntervalsAndCache(unittest.TestCase):
             check=True,
         )
         out = json.loads(proc.stdout)
-        self.assertEqual(out["script_version"], "1.0.0")
+        self.assertEqual(out["script_version"], au.__version__)
         self.assertNotIn("sessions", out)
         self.assertIn("totals_by_model", out)
         self.assertIn("daily_breakdown", out)
@@ -985,7 +985,7 @@ class TestActiveTimeIntervalsAndCache(unittest.TestCase):
             check=True,
         )
         yr = json.loads(proc_yr.stdout)
-        self.assertEqual(yr["script_version"], "1.0.0")
+        self.assertEqual(yr["script_version"], au.__version__)
         self.assertEqual(yr["year"], 2026)
         self.assertEqual(yr["gap_minutes"], 10)
         self.assertEqual(len(yr["days"]), 365)

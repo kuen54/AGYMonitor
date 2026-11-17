@@ -2,7 +2,7 @@ import SwiftUI
 import AppKit
 
 // Shared view primitives: Antigravity model-class palette, localizer environment,
-// Antigravity logo shape + session-aware spinner/dot, and usage proportion bars.
+// Antigravity logo shape + session-aware levitation pulse/dot, and usage proportion bars.
 
 // MARK: - Model class UI mapping
 //
@@ -65,7 +65,8 @@ typealias AGYLogoShape = LogoShape
 
 /// Session-aware Antigravity logo shared across the compact notch pill, popover
 /// header, and menu-bar status item:
-/// - Spins 360° per 1.4s while any live session is busy (or breathes opacity on
+/// - Performs an upright zero-G levitation + upward energy shimmer + underside thruster
+///   pulse (1.8s cycle) while any live session is busy (or breathes opacity on
 ///   Reduce Motion); tears down TimelineView completely when idle for zero CPU.
 /// - Shows top-trailing attention dot: amber (`anyWaiting`) outranks green (`anyDoneUnseen`).
 struct SessionAwareLogo: View {
@@ -76,8 +77,8 @@ struct SessionAwareLogo: View {
 
     @State private var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
 
-    /// One revolution per 1.4s.
-    private static let spinDegreesPerSecond: Double = 360.0 / 1.4
+    /// Anti-gravity levitation + shimmer cycle (seconds).
+    private static let levitatePeriod: Double = 1.8
     /// Reduce-motion opacity breathe period (seconds).
     private static let breathePeriod: Double = 2.6
 
@@ -88,9 +89,44 @@ struct SessionAwareLogo: View {
     @ViewBuilder private var animatedLogo: some View {
         if sessionStore.anyBusy && !reduceMotion {
             TimelineView(.animation) { ctx in
-                let angle = (ctx.date.timeIntervalSinceReferenceDate * Self.spinDegreesPerSecond)
-                    .truncatingRemainder(dividingBy: 360)
-                logoMark.rotationEffect(.degrees(angle))
+                let t = ctx.date.timeIntervalSinceReferenceDate
+                let rawProgress = (t / Self.levitatePeriod).truncatingRemainder(dividingBy: 1.0)
+                let progress = rawProgress < 0 ? rawProgress + 1.0 : rawProgress
+                let wave = sin(2 * Double.pi * progress)
+                let yOffset = -size * 0.08 * wave
+                let scale = 1.0 + 0.04 * wave
+                let sweepY = 1.35 - 1.70 * progress
+
+                ZStack {
+                    Capsule()
+                        .fill(color.opacity(0.75 * (1.0 - progress)))
+                        .frame(
+                            width: size * 0.28 * (1.0 - 0.35 * progress),
+                            height: max(1.3, size * 0.085)
+                        )
+                        .offset(y: size * (0.28 + 0.16 * progress))
+
+                    ZStack {
+                        LogoShape().fill(color.opacity(0.82))
+                        LogoShape().fill(
+                            LinearGradient(
+                                stops: [
+                                    .init(color: .clear, location: 0.0),
+                                    .init(color: Color(red: 0.45, green: 0.88, blue: 1.0).opacity(0.85), location: 0.35),
+                                    .init(color: Color.white.opacity(0.95), location: 0.50),
+                                    .init(color: Color(red: 0.45, green: 0.88, blue: 1.0).opacity(0.85), location: 0.65),
+                                    .init(color: .clear, location: 1.0),
+                                ],
+                                startPoint: UnitPoint(x: 0.5, y: sweepY + 0.38),
+                                endPoint: UnitPoint(x: 0.5, y: sweepY - 0.38)
+                            )
+                        )
+                    }
+                    .frame(width: size, height: size)
+                    .scaleEffect(scale)
+                    .offset(y: yOffset)
+                }
+                .frame(width: size, height: size)
             }
         } else if sessionStore.anyBusy && reduceMotion {
             TimelineView(.animation) { ctx in

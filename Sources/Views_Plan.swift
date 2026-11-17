@@ -98,11 +98,11 @@ private struct PlanAccountHeader: View {
             return nil
         }
         switch raw.uppercased() {
-        case "G1_PRO_TIER":             return "Google One AI Pro"
-        case "G1_ULTRA_TIER":           return "Google One AI Ultra"
-        case "FREE_TIER":               return "Free"
-        case "ENTERPRISE_AGENT_TIER":   return "Enterprise"
-        default:                        return raw
+        case "G1_PRO_TIER", "G1_PRO_LITE_TIER":     return "Google AI Pro"
+        case "G1_ULTRA_TIER", "G1_ULTRA_LITE_TIER": return "Google AI Ultra"
+        case "FREE_TIER":                           return "Free"
+        case "ENTERPRISE_AGENT_TIER":               return "Enterprise"
+        default:                                    return raw
         }
     }
 
@@ -219,9 +219,13 @@ struct SubscriptionView: View {
         return trimmed
     }
 
-    private func primaryWindowLabel(_ window: OAuthUsageWindow, defaultKey: String, defaultEnglish: String) -> String {
+    private func primaryWindowLabel(
+        _ window: OAuthUsageWindow,
+        defaultKey: String,
+        defaultEnglishLabels: [String]
+    ) -> String {
         guard let custom = nonEmpty(window.label) else { return loc(defaultKey) }
-        if loc.language == .en || custom != defaultEnglish {
+        if loc.language == .en || !defaultEnglishLabels.contains(custom) {
             return custom
         }
         return loc(defaultKey)
@@ -245,35 +249,60 @@ struct SubscriptionView: View {
                     || nonEmpty(q.five_hour.label) != nil
                     || q.scopedModelLimits.isEmpty {
                     SubWindowRow(
-                        label: primaryWindowLabel(q.five_hour, defaultKey: "sub5hLabel", defaultEnglish: "Gemini Models"),
+                        label: primaryWindowLabel(
+                            q.five_hour,
+                            defaultKey: "sub5hLabel",
+                            defaultEnglishLabels: ["Gemini Models"]
+                        ),
                         usedPercent: q.five_hour.displayPercent,
                         resetAt: q.fiveHourResetDate,
                         accentModelClasses: [.hydrogen, .carbon, .argon, .flash]
                     )
                 }
 
-                // Secondary Claude & Partner rolling ~5h bucket
+                // Secondary Claude & GPT rolling ~5h bucket
                 if q.seven_day.resets_at != nil
                     || q.seven_day.displayPercent > 0
                     || nonEmpty(q.seven_day.label) != nil {
                     SubWindowRow(
-                        label: primaryWindowLabel(q.seven_day, defaultKey: "sub7dLabel", defaultEnglish: "Claude & Partner"),
+                        label: primaryWindowLabel(
+                            q.seven_day,
+                            defaultKey: "sub7dLabel",
+                            defaultEnglishLabels: ["Claude & GPT · 5h", "Claude & Partner"]
+                        ),
                         usedPercent: q.seven_day.displayPercent,
                         resetAt: q.sevenDayResetDate,
                         accentModelClasses: [.claude, .other]
                     )
                 }
 
-                // Scoped per-model / per-family quota caps
+                // Scoped per-model / per-family quota caps (including Weekly buckets)
                 ForEach(Array(q.scopedModelLimits.enumerated()), id: \.offset) { _, lim in
-                    let rawName = lim.modelDisplayName ?? ""
-                    let classified = ModelClass.classify(rawName)
-                    SubWindowRow(
-                        label: String(format: loc("sub7dScopedFmt"), rawName),
-                        usedPercent: lim.displayPercent,
-                        resetAt: lim.resetDate,
-                        accentModelClasses: [classified]
-                    )
+                    let limitId = lim.scope?.model?.id ?? ""
+                    if limitId == "claude_partner_weekly" {
+                        SubWindowRow(
+                            label: loc("sub3pWeeklyLabel"),
+                            usedPercent: lim.displayPercent,
+                            resetAt: lim.resetDate,
+                            accentModelClasses: [.claude, .other]
+                        )
+                    } else if limitId == "gemini_weekly" {
+                        SubWindowRow(
+                            label: loc("sub1pWeeklyLabel"),
+                            usedPercent: lim.displayPercent,
+                            resetAt: lim.resetDate,
+                            accentModelClasses: [.hydrogen, .carbon, .argon, .flash]
+                        )
+                    } else {
+                        let rawName = lim.modelDisplayName ?? ""
+                        let classified = ModelClass.classify(rawName)
+                        SubWindowRow(
+                            label: String(format: loc("sub7dScopedFmt"), rawName),
+                            usedPercent: lim.displayPercent,
+                            resetAt: lim.resetDate,
+                            accentModelClasses: [classified]
+                        )
+                    }
                 }
 
                 // Legacy optional secondary bucket fallback

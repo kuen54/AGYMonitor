@@ -28,7 +28,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     // Timer / wake / ⌘R / popover-open refreshes are unaffected.
     private var lastFSTriggeredRefresh: Date?
     // Menu-bar content is a SwiftUI hosting view inside the status button (so the
-    // Antigravity mark can spin while a session is busy and carry the attention dot —
+    // Antigravity mark can levitate/pulse while a session is busy and carry the attention dot —
     // the same behavior as the notch and popover header). `menuBarModel.text` holds
     // the current value string; the status item length tracks measured content width.
     private let menuBarModel = MenuBarModel(text: "…")
@@ -57,7 +57,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         if let button = statusItem.button {
             button.action = #selector(togglePopover)
             button.target = self
-            // Host [Antigravity mark + value] in SwiftUI so the mark can spin while a
+            // Host [Antigravity mark + value] in SwiftUI so the mark can animate while a
             // session is busy and carry the attention dot (same view as notch/popover).
             // The hosting view passes mouse events through to the button so a click
             // still toggles the popover; its measured width drives status item length.
@@ -403,7 +403,7 @@ private struct MenuBarWidthKey: PreferenceKey {
     }
 }
 
-/// The status-item content: the session-aware Antigravity mark (spins while busy,
+/// The status-item content: the session-aware Antigravity mark (levitates + pulses while busy,
 /// carries the amber/green attention dot) + the current value. Uses `.agyBrand` so
 /// the menu bar, compact notch pill, and popover header share one visual identity.
 struct MenuBarContentView: View {

@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 
 /// App version, single-sourced from Info.plist (CFBundleShortVersionString).
-fileprivate let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.0"
+fileprivate let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.1"
 
 /// UI-facing subset of QuotaFetchResult.
 enum QuotaError: Equatable {
@@ -166,7 +166,14 @@ private enum AGYStateStore {
 
         let logFiles = names
             .filter { $0.hasPrefix("cli-") && $0.hasSuffix(".log") }
-            .sorted(by: >) // `cli-YYYYMMDD_HHMMSS.log` sorts newest-first lexically
+            .sorted { a, b in
+                let pa = (logDir as NSString).appendingPathComponent(a)
+                let pb = (logDir as NSString).appendingPathComponent(b)
+                let ma = (try? fm.attributesOfItem(atPath: pa)[.modificationDate] as? Date) ?? .distantPast
+                let mb = (try? fm.attributesOfItem(atPath: pb)[.modificationDate] as? Date) ?? .distantPast
+                if ma != mb { return ma > mb }
+                return a > b
+            }
 
         var email: String? = nil
         var tier: String? = nil
@@ -227,6 +234,70 @@ private enum AGYStateStore {
         return res.status == 0 && res.output.contains("gemini")
     }
 
+    /// Read `agy` CLI's live OAuth payload stored in macOS Keychain under
+    /// `service="gemini"`, `account="antigravity"` via `/usr/bin/security`
+    /// (`go-keyring-base64:` wrapper).
+    static func readCLIKeychainAuth() -> (accessToken: String?, expiry: Date?, email: String?)? {
+        guard let res = ProcessRunner.run(
+            "/usr/bin/security",
+            ["find-generic-password", "-s", "gemini", "-a", "antigravity", "-w"],
+            timeout: 4.0
+        ), res.status == 0 else {
+            return nil
+        }
+        return AGYQuotaParser.parseGoKeyringAuthPayload(res.output)
+    }
+
+    /// Resolve an active OAuth bearer token (and account email when known):
+    /// 1. Explicit environment override (`AGY_ACCESS_TOKEN`, etc.)
+    /// 2. `agy` CLI Keychain entry (`service="gemini", account="antigravity"`),
+    ///    auto-refreshing once via `agy models` if expired or near expiry.
+    /// 3. `~/.gemini/oauth_creds.json` or Desktop `antigravityAuthStatus` fallback.
+    static func resolveLiveAuth(
+        cachedDesktopToken: String?,
+        now: Date = Date(),
+        home: String = NSHomeDirectory()
+    ) -> (token: String?, email: String?) {
+        let env = ProcessInfo.processInfo.environment
+        for key in ["AGY_ACCESS_TOKEN", "CLOUDCODE_ACCESS_TOKEN", "GOOGLE_OAUTH_ACCESS_TOKEN"] {
+            if let v = env[key]?.trimmingCharacters(in: .whitespacesAndNewlines), !v.isEmpty {
+                return (v, nil)
+            }
+        }
+
+        if let kc = readCLIKeychainAuth() {
+            let freshEnough: Bool = {
+                guard let exp = kc.expiry else { return true }
+                return exp > now.addingTimeInterval(30)
+            }()
+            if let tok = kc.accessToken, !tok.isEmpty, freshEnough {
+                return (tok, kc.email)
+            }
+            if let bin = resolveAGYBinary(home: home),
+               let res = ProcessRunner.run(bin, ["models"], timeout: 8.0),
+               res.status == 0,
+               let refreshed = readCLIKeychainAuth(),
+               let tok = refreshed.accessToken,
+               !tok.isEmpty {
+                let refreshedValid: Bool = {
+                    guard let exp = refreshed.expiry else { return true }
+                    return exp > Date().addingTimeInterval(5)
+                }()
+                if refreshedValid {
+                    return (tok, refreshed.email ?? kc.email)
+                }
+            }
+            if let mail = kc.email, !mail.isEmpty {
+                if let fallback = resolveAccessibleOAuthToken(cachedToken: cachedDesktopToken, home: home) {
+                    return (fallback, mail)
+                }
+                return (nil, mail)
+            }
+        }
+
+        return (resolveAccessibleOAuthToken(cachedToken: cachedDesktopToken, home: home), nil)
+    }
+
     private static func extractOAuthAccessToken(from text: String) -> String? {
         guard let data = text.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -272,7 +343,7 @@ final class SubscriptionQuotaService {
     private let availableModelsURL = URL(string: "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels")!
     private let loadCodeAssistURL = URL(string: "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist")!
 
-    private let ttl: TimeInterval = 300
+    private let ttl: TimeInterval = 60
     private var cached: (quota: OAuthUsage, at: Date)?
     private var rateLimitedUntil: Date?
     private let lock = NSLock()
@@ -375,15 +446,18 @@ final class SubscriptionQuotaService {
         let now = Date()
         let desktop = AGYStateStore.readCachedDesktopState()
         let cliAccount = AGYStateStore.readCLILogAccountInfo()
+        let liveAuth = AGYStateStore.resolveLiveAuth(cachedDesktopToken: desktop.accessToken, now: now)
 
-        let mergedEmail = Self.nonEmpty(cliAccount.email) ?? Self.nonEmpty(desktop.userStatus?.email)
+        let mergedEmail = Self.nonEmpty(liveAuth.email)
+            ?? Self.nonEmpty(cliAccount.email)
+            ?? Self.nonEmpty(desktop.userStatus?.email)
         let mergedRawTier = Self.nonEmpty(cliAccount.tier) ?? Self.nonEmpty(desktop.userStatus?.planName)
         let promptCredits = desktop.userStatus?.promptCredits ?? desktop.modelCredits
         let flowCredits = desktop.userStatus?.flowCredits
         let flexCredits = desktop.userStatus?.flexCredits
 
         // 1. Attempt live Cloud Code PA HTTP fetch if an OAuth token is accessible
-        if let token = AGYStateStore.resolveAccessibleOAuthToken(cachedToken: desktop.accessToken) {
+        if let token = liveAuth.token {
             fetchLiveCloudCodeQuota(bearerToken: token) { [weak self] liveOutcome in
                 guard let self = self else { return }
                 self.workQueue.async {
@@ -501,74 +575,82 @@ final class SubscriptionQuotaService {
         bearerToken: String,
         completion: @escaping (LivePAOutcome) -> Void
     ) {
-        postJSON(url: quotaSummaryURL, bearerToken: bearerToken) { [weak self] data, http in
+        let lcaBody: [String: Any] = [
+            "metadata": [
+                "ideType": "ANTIGRAVITY",
+                "pluginType": "GEMINI",
+            ]
+        ]
+        postJSON(url: loadCodeAssistURL, bearerToken: bearerToken, bodyObject: lcaBody) { [weak self] lcaData, lcaHTTP in
             guard let self = self else { completion(.unavailable); return }
-            let status = http?.statusCode ?? -1
-            if status == 429 {
-                completion(.rateLimited(Self.retryDeadline(from: http, default: 60)))
+            let lcaStatus = lcaHTTP?.statusCode ?? -1
+            if lcaStatus == 429 {
+                completion(.rateLimited(Self.retryDeadline(from: lcaHTTP, default: 60)))
                 return
             }
-            if status == 200, let data = data {
-                let buckets = AGYQuotaParser.parseAvailableModelsJSON(data)
-                if !buckets.isEmpty {
-                    self.fetchLiveTierOptional(bearerToken: bearerToken) { tier in
-                        completion(.live(buckets: buckets, tier: tier))
-                    }
-                    return
-                }
-            }
-            // Fallback to `v1internal:fetchAvailableModels`
-            self.postJSON(url: self.availableModelsURL, bearerToken: bearerToken) { data2, http2 in
-                let status2 = http2?.statusCode ?? -1
-                if status2 == 429 {
-                    completion(.rateLimited(Self.retryDeadline(from: http2, default: 60)))
-                    return
-                }
-                guard status2 == 200, let data2 = data2 else {
-                    completion(.unavailable)
-                    return
-                }
-                let buckets = AGYQuotaParser.parseAvailableModelsJSON(data2)
-                guard !buckets.isEmpty else {
-                    completion(.unavailable)
-                    return
-                }
-                self.fetchLiveTierOptional(bearerToken: bearerToken) { tier in
-                    completion(.live(buckets: buckets, tier: tier))
-                }
-            }
-        }
-    }
 
-    private func fetchLiveTierOptional(bearerToken: String, completion: @escaping (String?) -> Void) {
-        postJSON(url: loadCodeAssistURL, bearerToken: bearerToken) { data, http in
-            guard http?.statusCode == 200,
-                  let data = data,
-                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                completion(nil)
-                return
+            let lcaInfo: (tier: String?, projectId: String?) = (lcaStatus == 200)
+                ? (lcaData.map(AGYQuotaParser.parseLoadCodeAssistJSON) ?? (nil, nil))
+                : (nil, nil)
+
+            let projectBody: [String: Any] = lcaInfo.projectId.map { ["project": $0] } ?? [:]
+
+            let group = DispatchGroup()
+            let stateLock = NSLock()
+            var modelsData: Data?
+            var summaryData: Data?
+            var modelsStatus = -1
+            var summaryStatus = -1
+            var rateLimitDeadline: Date?
+
+            group.enter()
+            self.postJSON(url: self.availableModelsURL, bearerToken: bearerToken, bodyObject: projectBody) { data, http in
+                stateLock.lock()
+                modelsStatus = http?.statusCode ?? -1
+                if modelsStatus == 200 {
+                    modelsData = data
+                } else if modelsStatus == 429 {
+                    let dl = Self.retryDeadline(from: http, default: 60)
+                    rateLimitDeadline = rateLimitDeadline.map { max($0, dl) } ?? dl
+                }
+                stateLock.unlock()
+                group.leave()
             }
-            if let paid = obj["paidTier"] as? [String: Any],
-               let name = (paid["name"] as? String) ?? (paid["id"] as? String), !name.isEmpty {
-                completion(name)
-                return
+
+            group.enter()
+            self.postJSON(url: self.quotaSummaryURL, bearerToken: bearerToken, bodyObject: projectBody) { data, http in
+                stateLock.lock()
+                summaryStatus = http?.statusCode ?? -1
+                if summaryStatus == 200 {
+                    summaryData = data
+                } else if summaryStatus == 429 {
+                    let dl = Self.retryDeadline(from: http, default: 60)
+                    rateLimitDeadline = rateLimitDeadline.map { max($0, dl) } ?? dl
+                }
+                stateLock.unlock()
+                group.leave()
             }
-            if let cur = obj["currentTier"] as? [String: Any],
-               let name = (cur["name"] as? String) ?? (cur["id"] as? String), !name.isEmpty {
-                completion(name)
-                return
+
+            group.notify(queue: self.workQueue) {
+                let merged = AGYQuotaParser.mergeLiveQuotaBuckets(
+                    availableModelsData: modelsData,
+                    quotaSummaryData: summaryData
+                )
+                if !merged.isEmpty {
+                    completion(.live(buckets: merged, tier: lcaInfo.tier))
+                } else if modelsStatus == 429 || summaryStatus == 429 {
+                    completion(.rateLimited(rateLimitDeadline ?? Date().addingTimeInterval(60)))
+                } else {
+                    completion(.unavailable)
+                }
             }
-            if let tierStr = obj["currentTier"] as? String, !tierStr.isEmpty {
-                completion(tierStr)
-                return
-            }
-            completion(nil)
         }
     }
 
     private func postJSON(
         url: URL,
         bearerToken: String,
+        bodyObject: [String: Any] = [:],
         completion: @escaping (Data?, HTTPURLResponse?) -> Void
     ) {
         guard url.scheme == "https" else {
@@ -580,8 +662,8 @@ final class SubscriptionQuotaService {
         req.timeoutInterval = 8
         req.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.setValue("AGYMonitor/\(appVersion)", forHTTPHeaderField: "User-Agent")
-        req.httpBody = Data("{}".utf8)
+        req.setValue("antigravity/1.5.9 darwin/arm64", forHTTPHeaderField: "User-Agent")
+        req.httpBody = (try? JSONSerialization.data(withJSONObject: bodyObject)) ?? Data("{}".utf8)
 
         URLSession.shared.dataTask(with: req) { data, resp, _ in
             completion(data, resp as? HTTPURLResponse)
@@ -648,13 +730,15 @@ final class SubscriptionQuotaService {
         isOfflineCached: Bool,
         now: Date
     ) -> OAuthUsage {
-        // Partition into primary Gemini bucket, secondary Claude & Partner bucket, and any extra scoped buckets
+        // Partition into primary Gemini 5h bucket, secondary Claude & GPT 5h bucket,
+        // and any extra/weekly scoped buckets (`claude_partner_weekly`, `gemini_weekly`, etc.).
         var geminiBucket: AGYModelQuotaBucket? = nil
         var claudeBucket: AGYModelQuotaBucket? = nil
         var extraBuckets: [AGYModelQuotaBucket] = []
 
         for b in buckets {
             let lowerId = (b.id + " " + b.title).lowercased()
+            let isWeekly = b.id.lowercased().contains("weekly") || b.title.lowercased().contains("weekly")
             let hasGeminiClass = b.modelClasses.contains(where: {
                 $0 == .hydrogen || $0 == .carbon || $0 == .argon || $0 == .flash
             })
@@ -662,20 +746,28 @@ final class SubscriptionQuotaService {
                 $0 == .claude || $0 == .other
             })
 
-            if geminiBucket == nil && (lowerId.contains("gemini") || hasGeminiClass) {
-                geminiBucket = b
-            } else if claudeBucket == nil && (lowerId.contains("claude") || lowerId.contains("partner") || lowerId.contains("anthropic") || hasClaudeOrOtherClass) {
-                claudeBucket = b
+            if b.id == "gemini" || (geminiBucket == nil && !isWeekly && (lowerId.contains("gemini") || hasGeminiClass)) {
+                if geminiBucket == nil {
+                    geminiBucket = b
+                } else {
+                    extraBuckets.append(b)
+                }
+            } else if b.id == "claude_partner" || (claudeBucket == nil && !isWeekly && (lowerId.contains("claude") || lowerId.contains("partner") || lowerId.contains("anthropic") || lowerId.contains("gpt") || hasClaudeOrOtherClass)) {
+                if claudeBucket == nil {
+                    claudeBucket = b
+                } else {
+                    extraBuckets.append(b)
+                }
             } else {
                 extraBuckets.append(b)
             }
         }
 
-        if geminiBucket == nil, !extraBuckets.isEmpty {
-            geminiBucket = extraBuckets.removeFirst()
+        if geminiBucket == nil, let idx = extraBuckets.firstIndex(where: { !$0.id.lowercased().contains("weekly") }) {
+            geminiBucket = extraBuckets.remove(at: idx)
         }
-        if claudeBucket == nil, !extraBuckets.isEmpty {
-            claudeBucket = extraBuckets.removeFirst()
+        if claudeBucket == nil, let idx = extraBuckets.firstIndex(where: { !$0.id.lowercased().contains("weekly") }) {
+            claudeBucket = extraBuckets.remove(at: idx)
         }
 
         let geminiUsed = usedPercent(fromRemainingFraction: geminiBucket?.remainingFraction ?? 1.0)
@@ -691,7 +783,7 @@ final class SubscriptionQuotaService {
         let sevenDay = OAuthUsageWindow(
             utilization: claudeUsed,
             resets_at: claudeReset,
-            label: claudeBucket?.title ?? "Claude & Partner"
+            label: claudeBucket?.title ?? "Claude & GPT · 5h"
         )
 
         let scopedItems: [OAuthUsageLimit] = extraBuckets.map { b in
@@ -735,10 +827,10 @@ final class SubscriptionQuotaService {
             return nil
         }
         switch raw.uppercased() {
-        case "G1_PRO_TIER", "GOOGLE_ONE_AI_PRO", "PRO", "PRO_TIER":
-            return "Google One AI Pro"
-        case "G1_ULTRA_TIER", "GOOGLE_ONE_AI_ULTRA", "ULTRA", "ULTRA_TIER":
-            return "Google One AI Ultra"
+        case "G1_PRO_TIER", "G1_PRO_LITE_TIER", "GOOGLE_ONE_AI_PRO", "GOOGLE_AI_PRO", "GOOGLE AI PRO", "PRO", "PRO_TIER":
+            return "Google AI Pro"
+        case "G1_ULTRA_TIER", "G1_ULTRA_LITE_TIER", "GOOGLE_ONE_AI_ULTRA", "GOOGLE_AI_ULTRA", "GOOGLE AI ULTRA", "ULTRA", "ULTRA_TIER":
+            return "Google AI Ultra"
         case "ENTERPRISE_AGENT_TIER", "ENTERPRISE_TIER", "ENTERPRISE":
             return "Enterprise"
         case "FREE_TIER", "FREE":
