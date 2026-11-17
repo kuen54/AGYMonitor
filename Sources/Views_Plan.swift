@@ -81,7 +81,8 @@ struct SubWindowRow: View {
             let h = Int(s / 3600), m = Int((s.truncatingRemainder(dividingBy: 3600)) / 60)
             return m > 0 ? "\(h)h \(m)m" : "\(h)h"
         }
-        return "\(Int(s / 86400))d"
+        let d = Int(s / 86400), h = Int((s.truncatingRemainder(dividingBy: 86400)) / 3600)
+        return h > 0 ? "\(d)d \(h)h" : "\(d)d"
     }
 }
 
@@ -222,18 +223,21 @@ struct SubscriptionView: View {
     private func primaryWindowLabel(
         _ window: OAuthUsageWindow,
         defaultKey: String,
-        defaultEnglishLabels: [String]
+        canonicalEnglishLabels: [String]
     ) -> String {
         guard let custom = nonEmpty(window.label) else { return loc(defaultKey) }
-        if loc.language == .en || !defaultEnglishLabels.contains(custom) {
-            return custom
+        if canonicalEnglishLabels.contains(custom) {
+            return loc(defaultKey)
         }
-        return loc(defaultKey)
+        return custom
     }
 
     var body: some View {
         VStack(spacing: 8) {
             if let q = store.subscriptionQuota {
+                let geminiWeeklyLimits = q.scopedModelLimits.filter { $0.scope?.model?.id == "gemini_weekly" }
+                let otherScopedLimits = q.scopedModelLimits.filter { $0.scope?.model?.id != "gemini_weekly" }
+
                 // Account email, plan tier badge, and optional Desktop offline-cache badge
                 if nonEmpty(q.planTier) != nil || nonEmpty(q.accountEmail) != nil || q.isOfflineCached {
                     PlanAccountHeader(
@@ -243,7 +247,7 @@ struct SubscriptionView: View {
                     )
                 }
 
-                // Primary Gemini rolling ~5h bucket
+                // 1. Primary Gemini rolling ~5h bucket
                 if q.five_hour.resets_at != nil
                     || q.five_hour.displayPercent > 0
                     || nonEmpty(q.five_hour.label) != nil
@@ -252,7 +256,7 @@ struct SubscriptionView: View {
                         label: primaryWindowLabel(
                             q.five_hour,
                             defaultKey: "sub5hLabel",
-                            defaultEnglishLabels: ["Gemini Models"]
+                            canonicalEnglishLabels: ["Gemini Models", "Gemini · 5h limit"]
                         ),
                         usedPercent: q.five_hour.displayPercent,
                         resetAt: q.fiveHourResetDate,
@@ -260,7 +264,17 @@ struct SubscriptionView: View {
                     )
                 }
 
-                // Secondary Claude & GPT rolling ~5h bucket
+                // 2. Gemini 7-day rolling bucket (grouped directly under Gemini 5h)
+                ForEach(Array(geminiWeeklyLimits.enumerated()), id: \.offset) { _, lim in
+                    SubWindowRow(
+                        label: loc("sub1pWeeklyLabel"),
+                        usedPercent: lim.displayPercent,
+                        resetAt: lim.resetDate,
+                        accentModelClasses: [.hydrogen, .carbon, .argon, .flash]
+                    )
+                }
+
+                // 3. Secondary Claude & GPT rolling ~5h bucket
                 if q.seven_day.resets_at != nil
                     || q.seven_day.displayPercent > 0
                     || nonEmpty(q.seven_day.label) != nil {
@@ -268,7 +282,7 @@ struct SubscriptionView: View {
                         label: primaryWindowLabel(
                             q.seven_day,
                             defaultKey: "sub7dLabel",
-                            defaultEnglishLabels: ["Claude & GPT · 5h", "Claude & Partner"]
+                            canonicalEnglishLabels: ["Claude & GPT · 5h", "Claude & Partner", "Claude & GPT · 5h limit"]
                         ),
                         usedPercent: q.seven_day.displayPercent,
                         resetAt: q.sevenDayResetDate,
@@ -276,8 +290,8 @@ struct SubscriptionView: View {
                     )
                 }
 
-                // Scoped per-model / per-family quota caps (including Weekly buckets)
-                ForEach(Array(q.scopedModelLimits.enumerated()), id: \.offset) { _, lim in
+                // 4. Claude & GPT 7-day rolling bucket + any other scoped limits
+                ForEach(Array(otherScopedLimits.enumerated()), id: \.offset) { _, lim in
                     let limitId = lim.scope?.model?.id ?? ""
                     if limitId == "claude_partner_weekly" {
                         SubWindowRow(
@@ -285,13 +299,6 @@ struct SubscriptionView: View {
                             usedPercent: lim.displayPercent,
                             resetAt: lim.resetDate,
                             accentModelClasses: [.claude, .other]
-                        )
-                    } else if limitId == "gemini_weekly" {
-                        SubWindowRow(
-                            label: loc("sub1pWeeklyLabel"),
-                            usedPercent: lim.displayPercent,
-                            resetAt: lim.resetDate,
-                            accentModelClasses: [.hydrogen, .carbon, .argon, .flash]
                         )
                     } else {
                         let rawName = lim.modelDisplayName ?? ""

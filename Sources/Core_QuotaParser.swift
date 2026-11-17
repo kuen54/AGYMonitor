@@ -440,20 +440,26 @@ public enum AGYQuotaParser {
     }
 
     /// Merge live buckets from `v1internal:fetchAvailableModels` (which holds Gemini's
-    /// 5h rolling quota) and `v1internal:retrieveUserQuotaSummary` (which holds 3P
-    /// "Claude and GPT models" 5h + weekly buckets) without dropping Gemini.
+    /// 5h rolling quota), `v1internal:retrieveUserQuotaSummary` (3P "Claude and GPT models"
+    /// 5h + weekly buckets), and `aicode.googleapis.com/v1alpha:fetchQuotaStatus` (all
+    /// Gemini + 3P 5h/weekly buckets).
     public static func mergeLiveQuotaBuckets(
         availableModelsData: Data?,
-        quotaSummaryData: Data?
+        quotaSummaryData: Data?,
+        aicodeQuotaData: Data? = nil
     ) -> [AGYModelQuotaBucket] {
         let modelBuckets = availableModelsData.map(parseAvailableModelsJSON) ?? []
         let summaryBuckets = quotaSummaryData.map(parseAvailableModelsJSON) ?? []
+        let aicodeBuckets = aicodeQuotaData.map(parseAvailableModelsJSON) ?? []
 
         var merged: [String: AGYModelQuotaBucket] = [:]
         for bucket in modelBuckets {
             merged[bucket.id] = bucket
         }
         for bucket in summaryBuckets {
+            merged[bucket.id] = bucket
+        }
+        for bucket in aicodeBuckets {
             merged[bucket.id] = bucket
         }
         return merged.values.sorted(by: bucketSortOrder)
@@ -1042,8 +1048,12 @@ public enum AGYQuotaParser {
     }
 
     private static func parseQuotaSummaryBuckets(_ root: [String: Any]) -> [AGYModelQuotaBucket] {
+        let summaryRoot = (root["quotaSummary"] as? [String: Any])
+            ?? (root["quota_summary"] as? [String: Any])
+            ?? root
+
         var entries: [(groupTitle: String, groupDesc: String, bucket: [String: Any])] = []
-        if let groups = root["groups"] as? [[String: Any]] {
+        if let groups = summaryRoot["groups"] as? [[String: Any]] {
             for g in groups {
                 let gTitle = (g["displayName"] as? String) ?? (g["display_name"] as? String) ?? ""
                 let gDesc = (g["description"] as? String) ?? ""
@@ -1054,9 +1064,16 @@ public enum AGYQuotaParser {
                 }
             }
         }
-        if let topBuckets = root["buckets"] as? [[String: Any]] {
+        if entries.isEmpty, let topBuckets = summaryRoot["buckets"] as? [[String: Any]] {
             for b in topBuckets {
-                entries.append(("", "", b))
+                let hasSummaryKeys = (b["bucketId"] as? String) != nil
+                    || (b["bucket_id"] as? String) != nil
+                    || (b["window"] as? String) != nil
+                    || (b["refreshWindowLabel"] as? String) != nil
+                    || (b["refresh_window_label"] as? String) != nil
+                if hasSummaryKeys {
+                    entries.append(("", "", b))
+                }
             }
         }
         guard !entries.isEmpty else { return [] }
@@ -1085,7 +1102,10 @@ public enum AGYQuotaParser {
             let resetAt = AppDate.parseISO8601(
                 (b["resetTime"] as? String) ?? (b["reset_time"] as? String)
             )
-            let window = ((b["window"] as? String) ?? "").lowercased()
+            let window = ((b["window"] as? String)
+                ?? (b["refreshWindowLabel"] as? String)
+                ?? (b["refresh_window_label"] as? String)
+                ?? "").lowercased()
             let lowerId = rawId.lowercased()
             let lowerTitle = rawTitle.lowercased()
             let isWeekly = window.contains("week") || lowerId.contains("week") || lowerTitle.contains("week")
@@ -1222,8 +1242,8 @@ public enum AGYQuotaParser {
         func rank(_ id: String) -> Int {
             switch id {
             case "gemini": return 0
-            case "claude_partner": return 1
-            case "gemini_weekly": return 2
+            case "gemini_weekly": return 1
+            case "claude_partner": return 2
             case "claude_partner_weekly": return 3
             default: return 4
             }

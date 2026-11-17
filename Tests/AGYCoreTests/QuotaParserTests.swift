@@ -282,4 +282,86 @@ struct QuotaParserTests {
         #expect(merged[2].id == "claude_partner_weekly")
         #expect(merged[2].remainingPercent == 85)
     }
+
+    @Test("Parses AICode fetchQuotaStatus quotaSummary.groups including gemini-weekly and gemini-5h")
+    func parseAICodeFetchQuotaStatus() {
+        let aicodeJSON = """
+        {
+          "buckets": [
+            {
+              "remainingFraction": 1,
+              "resetTime": "2026-11-17T10:17:48Z",
+              "model": { "modelId": "claude-opus-5-5", "displayName": "Claude Opus 5.5" }
+            },
+            {
+              "remainingFraction": 1,
+              "resetTime": "2026-11-17T10:17:48Z",
+              "model": { "modelId": "gemini-3.8-flash", "displayName": "Gemini 3.8 Flash" }
+            }
+          ],
+          "quotaSummary": {
+            "groups": [
+              {
+                "displayName": "Gemini Models",
+                "description": "Models within this group: Gemini Flash, Gemini Pro",
+                "buckets": [
+                  {
+                    "bucketId": "gemini-weekly",
+                    "displayName": "Weekly Limit Remaining",
+                    "refreshWindowLabel": "weekly",
+                    "remainingFraction": 0.5893855,
+                    "resetTime": "2026-11-23T08:53:55Z"
+                  },
+                  {
+                    "bucketId": "gemini-5h",
+                    "displayName": "Five Hour Limit Remaining",
+                    "refreshWindowLabel": "5h",
+                    "remainingFraction": 0.9145569,
+                    "resetTime": "2026-11-17T09:53:55Z"
+                  }
+                ]
+              },
+              {
+                "displayName": "Claude and GPT models",
+                "description": "Models within this group: Claude Opus, Claude Sonnet, GPT-OSS",
+                "buckets": [
+                  {
+                    "bucketId": "3p-weekly",
+                    "displayName": "Weekly Limit Remaining",
+                    "refreshWindowLabel": "weekly",
+                    "remainingFraction": 1,
+                    "resetTime": "2026-11-24T05:17:48Z"
+                  },
+                  {
+                    "bucketId": "3p-5h",
+                    "displayName": "Five Hour Limit Remaining",
+                    "refreshWindowLabel": "5h",
+                    "remainingFraction": 1,
+                    "resetTime": "2026-11-17T10:17:48Z"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+        """
+
+        let buckets = AGYQuotaParser.mergeLiveQuotaBuckets(
+            availableModelsData: nil,
+            quotaSummaryData: nil,
+            aicodeQuotaData: Data(aicodeJSON.utf8)
+        )
+        #expect(buckets.count == 4)
+        #expect(buckets[0].id == "gemini")
+        #expect(buckets[0].remainingPercent == 91)
+        #expect(buckets[0].usedPercent == 9)
+        #expect(buckets[1].id == "gemini_weekly")
+        #expect(buckets[1].remainingPercent == 59)
+        #expect(buckets[1].usedPercent == 41)
+        #expect(buckets[1].resetAt != nil)
+        #expect(buckets[2].id == "claude_partner")
+        #expect(buckets[2].remainingPercent == 100)
+        #expect(buckets[3].id == "claude_partner_weekly")
+        #expect(buckets[3].remainingPercent == 100)
+    }
 }

@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 
 /// App version, single-sourced from Info.plist (CFBundleShortVersionString).
-fileprivate let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.1"
+fileprivate let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.2"
 
 /// UI-facing subset of QuotaFetchResult.
 enum QuotaError: Equatable {
@@ -339,6 +339,7 @@ private enum AGYStateStore {
 final class SubscriptionQuotaService {
     static let shared = SubscriptionQuotaService()
 
+    private let aicodeQuotaURL = URL(string: "https://aicode.googleapis.com/v1alpha:fetchQuotaStatus")!
     private let quotaSummaryURL = URL(string: "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary")!
     private let availableModelsURL = URL(string: "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels")!
     private let loadCodeAssistURL = URL(string: "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist")!
@@ -597,11 +598,27 @@ final class SubscriptionQuotaService {
 
             let group = DispatchGroup()
             let stateLock = NSLock()
+            var aicodeData: Data?
             var modelsData: Data?
             var summaryData: Data?
+            var aicodeStatus = -1
             var modelsStatus = -1
             var summaryStatus = -1
             var rateLimitDeadline: Date?
+
+            group.enter()
+            self.getJSON(url: self.aicodeQuotaURL, bearerToken: bearerToken) { data, http in
+                stateLock.lock()
+                aicodeStatus = http?.statusCode ?? -1
+                if aicodeStatus == 200 {
+                    aicodeData = data
+                } else if aicodeStatus == 429 {
+                    let dl = Self.retryDeadline(from: http, default: 60)
+                    rateLimitDeadline = rateLimitDeadline.map { max($0, dl) } ?? dl
+                }
+                stateLock.unlock()
+                group.leave()
+            }
 
             group.enter()
             self.postJSON(url: self.availableModelsURL, bearerToken: bearerToken, bodyObject: projectBody) { data, http in
@@ -634,17 +651,38 @@ final class SubscriptionQuotaService {
             group.notify(queue: self.workQueue) {
                 let merged = AGYQuotaParser.mergeLiveQuotaBuckets(
                     availableModelsData: modelsData,
-                    quotaSummaryData: summaryData
+                    quotaSummaryData: summaryData,
+                    aicodeQuotaData: aicodeData
                 )
                 if !merged.isEmpty {
                     completion(.live(buckets: merged, tier: lcaInfo.tier))
-                } else if modelsStatus == 429 || summaryStatus == 429 {
+                } else if aicodeStatus == 429 || modelsStatus == 429 || summaryStatus == 429 {
                     completion(.rateLimited(rateLimitDeadline ?? Date().addingTimeInterval(60)))
                 } else {
                     completion(.unavailable)
                 }
             }
         }
+    }
+
+    private func getJSON(
+        url: URL,
+        bearerToken: String,
+        completion: @escaping (Data?, HTTPURLResponse?) -> Void
+    ) {
+        guard url.scheme == "https" else {
+            completion(nil, nil)
+            return
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        req.timeoutInterval = 8
+        req.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
+        req.setValue("antigravity/1.5.9 darwin/arm64", forHTTPHeaderField: "User-Agent")
+
+        URLSession.shared.dataTask(with: req) { data, resp, _ in
+            completion(data, resp as? HTTPURLResponse)
+        }.resume()
     }
 
     private func postJSON(

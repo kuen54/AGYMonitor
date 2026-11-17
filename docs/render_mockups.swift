@@ -212,12 +212,13 @@ func makeStore(tab: DisplayTab, range: TimeRange = .week) -> UsageStore {
     s.yearTimeDays = year
     s.timeRange = range
     s.subscriptionQuota = OAuthUsage(
-        five_hour: OAuthUsageWindow(utilization: 18, resets_at: resetIn(3.4), label: "Gemini Models"),
-        seven_day: OAuthUsageWindow(utilization: 28, resets_at: resetIn(4.7), label: "Claude & GPT · 5h"),
+        five_hour: OAuthUsageWindow(utilization: 9, resets_at: resetIn(4.6), label: "Gemini Models"),
+        seven_day: OAuthUsageWindow(utilization: 14, resets_at: resetIn(4.9), label: "Claude & GPT · 5h"),
         extra_usage: nil,
         seven_day_sonnet: nil,
         limits: OAuthLimitList(items: [
-            scopedCap("claude_partner_weekly", "Claude & GPT · Weekly", used: 12, resetHours: 132),
+            scopedCap("gemini_weekly", "Gemini · Weekly", used: 41, resetHours: 147),
+            scopedCap("claude_partner_weekly", "Claude & GPT · Weekly", used: 12, resetHours: 164),
         ]),
         accountEmail: "jiakun@google-one.demo",
         planTier: "Google AI Ultra",
