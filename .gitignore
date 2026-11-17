@@ -1,0 +1,32 @@
+# Build & packaging outputs
+.build/
+build/
+dist/
+*.app/
+*.dmg
+*.iconset/
+AppIcon.icns
+
+# SwiftPM
+.swiftpm/
+
+# macOS
+.DS_Store
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Internal dev notes
+CLAUDE.md
+AGENTS.md
+AUDIT_REPORT.md
+
+# Xcode (not used, kept just in case)
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+DerivedData/
+
+# Keep README mockup screenshots tracked
+!docs/*.png

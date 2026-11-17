@@ -1,0 +1,47 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint Info.plist
+        run: plutil -lint Info.plist
+
+      - name: Syntax-check & test analyze_usage.py
+        run: |
+          python3 -m py_compile Resources/analyze_usage.py
+          if ls Tests/test_*.py >/dev/null 2>&1; then
+            python3 -m unittest discover -s Tests -p "test_*.py"
+          fi
+
+      - name: Run core unit tests (swift test)
+        run: |
+          # Tests use swift-testing (import Testing), which needs a Swift 6
+          # toolchain. Prefer the newest installed Xcode 16+ on the runner.
+          XCODE_MODERN="$(ls -d /Applications/Xcode_*.app 2>/dev/null | grep -E 'Xcode_(1[6-9]|[2-9][0-9])' | sort -V | tail -1 || true)"
+          if [ -n "$XCODE_MODERN" ]; then
+            export DEVELOPER_DIR="$XCODE_MODERN/Contents/Developer"
+          fi
+          swift --version
+          swift test
+
+      - name: Build app + DMG
+        run: bash build.sh
+
+      - name: Verify code signature
+        run: codesign --verify --deep --strict build/AGYMonitor.app
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AGYMonitor-dmg
+          path: dist/AGYMonitor.dmg
+          if-no-files-found: error
