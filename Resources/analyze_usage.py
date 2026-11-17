@@ -45,7 +45,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import urllib.parse
 import urllib.request
 
-__version__ = "1.0.2"
+__version__ = "1.0.3"
 
 # ---------------------------------------------------------------------------
 # Antigravity surfaces & cache paths
@@ -102,11 +102,12 @@ LITELLM_PRICING_URL = (
 PRICING_CACHE_TTL = 86400  # 24 hours in seconds
 
 # Offline API-equivalent fallback pricing (USD per 1M tokens) by ModelClass.
+# Uses Google's official non-promotional standard list rates for Gemini 4 / 3.8.
 FALLBACK_PRICING: Dict[str, Dict[str, float]] = {
-    "hydrogen": {"input": 2.50, "output": 15.00, "cache_write": 3.125,  "cache_read": 0.625},
-    "carbon":   {"input": 1.25, "output": 10.00, "cache_write": 1.5625, "cache_read": 0.3125},
-    "argon":    {"input": 1.25, "output": 10.00, "cache_write": 1.5625, "cache_read": 0.3125},
-    "flash":    {"input": 0.30, "output":  2.50, "cache_write": 0.375,  "cache_read": 0.075},
+    "hydrogen": {"input": 1.50, "output":  7.50, "cache_write": 1.875,  "cache_read": 0.075},
+    "carbon":   {"input": 4.00, "output": 20.00, "cache_write": 5.00,   "cache_read": 0.20},
+    "argon":    {"input": 4.00, "output": 20.00, "cache_write": 5.00,   "cache_read": 0.20},
+    "flash":    {"input": 1.50, "output":  7.50, "cache_write": 1.875,  "cache_read": 0.15},
     "claude":   {"input": 3.00, "output": 15.00, "cache_write": 3.75,   "cache_read": 0.30},
     "other":    {"input": 0.15, "output":  0.60, "cache_write": 0.1875, "cache_read": 0.0375},
 }
@@ -115,20 +116,44 @@ FALLBACK_PRICING: Dict[str, Dict[str, float]] = {
 # all Antigravity codename families and partner models (checked via fnmatch before
 # falling back to class-level FALLBACK_PRICING).
 FALLBACK_FAMILY_PRICING: List[Tuple[str, Dict[str, float]]] = [
-    ("gemini-4-hydrogen*",             {"input": 2.50, "output": 15.00, "cache_write": 3.125,  "cache_read": 0.625}),
-    ("gemini-pro-orchestrator-argon*", {"input": 1.25, "output": 10.00, "cache_write": 1.5625, "cache_read": 0.3125}),
-    ("gemini-4-argon*",                {"input": 1.25, "output": 10.00, "cache_write": 1.5625, "cache_read": 0.3125}),
-    ("gemini-4-carbon*",               {"input": 1.25, "output": 10.00, "cache_write": 1.5625, "cache_read": 0.3125}),
-    ("gemini-pro-orchestrator*",       {"input": 1.25, "output": 10.00, "cache_write": 1.5625, "cache_read": 0.3125}),
-    ("gemini-*-pro*",                  {"input": 1.25, "output": 10.00, "cache_write": 1.5625, "cache_read": 0.3125}),
-    ("gemini-*-ultra*",                {"input": 2.50, "output": 15.00, "cache_write": 3.125,  "cache_read": 0.625}),
-    ("gemini-*-flash-lite*",           {"input": 0.10, "output":  0.40, "cache_write": 0.125,  "cache_read": 0.025}),
-    ("gemini-*-flash*",                {"input": 0.30, "output":  2.50, "cache_write": 0.375,  "cache_read": 0.075}),
+    ("gemini-4-hydrogen*",             {"input": 1.50, "output":  7.50, "cache_write": 1.875,  "cache_read": 0.075}),
+    ("gemini-flash-worker-agy*",       {"input": 1.50, "output":  7.50, "cache_write": 1.875,  "cache_read": 0.075}),
+    ("gemini-pro-orchestrator-argon*", {"input": 4.00, "output": 20.00, "cache_write": 5.00,   "cache_read": 0.20}),
+    ("gemini-4-argon*",                {"input": 4.00, "output": 20.00, "cache_write": 5.00,   "cache_read": 0.20}),
+    ("gemini-4-carbon*",               {"input": 4.00, "output": 20.00, "cache_write": 5.00,   "cache_read": 0.20}),
+    ("gemini-pro-orchestrator*",       {"input": 4.00, "output": 20.00, "cache_write": 5.00,   "cache_read": 0.20}),
+    ("gemini-3.8-flash-lite*",         {"input": 0.50, "output":  3.00, "cache_write": 0.625,  "cache_read": 0.05}),
+    ("gemini-3.8-flash*",              {"input": 1.50, "output":  7.50, "cache_write": 1.875,  "cache_read": 0.15}),
+    ("gemini-3.5-flash-lite*",         {"input": 0.30, "output":  2.50, "cache_write": 0.375,  "cache_read": 0.03}),
+    ("gemini-3.5-flash*",              {"input": 1.50, "output":  9.00, "cache_write": 1.875,  "cache_read": 0.15}),
+    ("gemini-3*-pro*",                 {"input": 2.00, "output": 12.00, "cache_write": 2.50,   "cache_read": 0.20}),
+    ("gemini-2.5-pro*",                {"input": 1.25, "output": 10.00, "cache_write": 1.5625, "cache_read": 0.125}),
+    ("gemini-2.5-flash-lite*",         {"input": 0.10, "output":  0.40, "cache_write": 0.125,  "cache_read": 0.01}),
+    ("gemini-2.5-flash*",              {"input": 0.30, "output":  2.50, "cache_write": 0.375,  "cache_read": 0.03}),
+    ("gemini-*-pro*",                  {"input": 2.00, "output": 12.00, "cache_write": 2.50,   "cache_read": 0.20}),
+    ("gemini-*-ultra*",                {"input": 4.00, "output": 20.00, "cache_write": 5.00,   "cache_read": 0.20}),
+    ("gemini-*-flash-lite*",           {"input": 0.30, "output":  1.50, "cache_write": 0.375,  "cache_read": 0.03}),
+    ("gemini-*-flash*",                {"input": 0.75, "output":  3.75, "cache_write": 0.9375, "cache_read": 0.075}),
     ("claude-opus-*",                  {"input": 5.00, "output": 25.00, "cache_write": 6.25,   "cache_read": 0.50}),
     ("claude-sonnet-*",                {"input": 3.00, "output": 15.00, "cache_write": 3.75,   "cache_read": 0.30}),
     ("claude-haiku-*",                 {"input": 1.00, "output":  5.00, "cache_write": 1.25,   "cache_read": 0.10}),
     ("gpt-oss-*",                      {"input": 0.15, "output":  0.60, "cache_write": 0.1875, "cache_read": 0.0375}),
 ]
+
+AGY_MODEL_ALIASES: Dict[str, str] = {
+    "gemini-flash-worker-agy": "gemini-4-hydrogen",
+    "gemini-pro-orchestrator-argon": "gemini-4-argon",
+    "gemini-pro-orchestrator": "gemini-4-carbon",
+}
+
+# Standard (non-promotional) list-price floors applied on top of LiteLLM entries
+# so introductory promo windows do not understate API-equivalent value.
+STANDARD_LIST_PRICE_FLOORS: Dict[str, Dict[str, float]] = {
+    "gemini-4-hydrogen": {"input": 1.50, "output":  7.50, "cache_write": 1.875, "cache_read": 0.075},
+    "gemini-4-carbon":   {"input": 4.00, "output": 20.00, "cache_write": 5.00,  "cache_read": 0.20},
+    "gemini-4-argon":    {"input": 4.00, "output": 20.00, "cache_write": 5.00,  "cache_read": 0.20},
+    "gemini-3.8-flash":  {"input": 1.50, "output":  7.50, "cache_write": 1.875, "cache_read": 0.15},
+}
 
 MODEL_PRICING: Dict[str, Dict[str, float]] = {k: dict(v) for k, v in FALLBACK_PRICING.items()}
 _LITELLM_RAW: Dict[str, Any] = {}
@@ -398,15 +423,25 @@ def _extract_litellm_entry(entry: Any) -> Optional[Dict[str, float]]:
         cw = inp * 1.25
     cr = entry.get("cache_read_input_token_cost")
     if not _is_num(cr) or cr < 0:
-        # Gemini cached context is typically 0.25x input; Anthropic is 0.1x input.
-        prov = str(entry.get("litellm_provider") or "").lower()
-        cr = inp * (0.25 if ("gemini" in prov or "vertex" in prov) else 0.1)
+        cr = inp * 0.1
     return {
         "input":       _per_token_to_per_million(float(inp)),
         "output":      _per_token_to_per_million(float(out)),
         "cache_write": _per_token_to_per_million(float(cw)),
         "cache_read":  _per_token_to_per_million(float(cr)),
     }
+
+
+def _apply_standard_list_floor(
+    candidates: List[str],
+    pricing: Dict[str, float],
+) -> Dict[str, float]:
+    """Enforce non-promotional Google standard list rates when LiteLLM carries a promo rate."""
+    for c in candidates:
+        floor = STANDARD_LIST_PRICE_FLOORS.get(c.lower())
+        if floor is not None:
+            return {k: max(pricing[k], floor[k]) for k in floor}
+    return pricing
 
 
 def load_pricing(offline: bool = False) -> None:
@@ -423,9 +458,8 @@ def load_pricing(offline: bool = False) -> None:
     _LITELLM_RAW = raw
     _PRICING_SOURCE = "litellm"
 
-    # Update public representative tiers when available in LiteLLM; internal AGY
-    # codenames (hydrogen/carbon/argon) keep their explicit Gemini 4 tier rates
-    # unless LiteLLM publishes explicit entries for them.
+    # Update public representative tiers when available in LiteLLM; standard list floors
+    # apply so temporary promo windows do not understate Gemini 4 API-equivalent value.
     sonnet_pat = re.compile(r"^claude-sonnet-(\d+)(?:-(\d{1,2}))?$")
     newest_sonnet: Optional[Tuple[Tuple[int, int], str]] = None
     for key in raw.keys():
@@ -440,15 +474,16 @@ def load_pricing(offline: bool = False) -> None:
             MODEL_PRICING["claude"] = extracted
 
     for codename in ("hydrogen", "carbon", "argon"):
-        for candidate in (f"gemini-4-{codename}", f"gemini/gemini-4-{codename}"):
+        base_name = f"gemini-4-{codename}"
+        for candidate in (base_name, f"gemini/{base_name}", f"vertex_ai/{base_name}"):
             if candidate in raw:
                 extracted = _extract_litellm_entry(raw[candidate])
                 if extracted:
-                    MODEL_PRICING[codename] = extracted
+                    MODEL_PRICING[codename] = _apply_standard_list_floor([base_name], extracted)
                     break
 
 
-_EFFORT_SUFFIX_RE = re.compile(r"-(?:xhigh|high|medium|low|minimal)$", re.IGNORECASE)
+_MODIFIER_SUFFIX_RE = re.compile(r"(?:-(?:tiered|xhigh|high|medium|low|minimal))+$", re.IGNORECASE)
 _VERSION_SUFFIX_RE = re.compile(r"-v\d+:\d+$")
 _BRACKET_SUFFIX_RE = re.compile(r"\[\w+\]$")
 
@@ -485,14 +520,19 @@ def _candidate_model_names(model_str: str) -> List[str]:
             break
     _add(bare)
 
-    # Also try without AGY reasoning-effort suffix (-low/-medium/-high/-xhigh)
-    no_effort = _EFFORT_SUFFIX_RE.sub("", bare)
-    _add(no_effort)
+    # Also try without AGY reasoning-effort / tiered suffixes (e.g. -tiered-xhigh)
+    no_mod = _MODIFIER_SUFFIX_RE.sub("", bare)
+    _add(no_mod)
+
+    # Map AGY-internal orchestrator/worker aliases to canonical Gemini 4 IDs
+    alias = AGY_MODEL_ALIASES.get(no_mod.lower())
+    if alias:
+        _add(alias)
 
     # For Claude models, LiteLLM uses hyphens for version numbers (4.6 -> 4-6)
     if "claude" in bare.lower():
         _add(bare.replace(".", "-"))
-        _add(no_effort.replace(".", "-"))
+        _add(no_mod.replace(".", "-"))
 
     return out
 
@@ -508,7 +548,7 @@ def lookup_model_pricing(model_str: str) -> Optional[Dict[str, float]]:
         if c in _LITELLM_RAW:
             p = _extract_litellm_entry(_LITELLM_RAW[c])
             if p is not None:
-                return p
+                return _apply_standard_list_floor(candidates, p)
 
     # 2. Provider-prefixed match
     prefixes = (
@@ -528,7 +568,7 @@ def lookup_model_pricing(model_str: str) -> Optional[Dict[str, float]]:
             if key in _LITELLM_RAW:
                 p = _extract_litellm_entry(_LITELLM_RAW[key])
                 if p is not None:
-                    return p
+                    return _apply_standard_list_floor(candidates, p)
 
     return None
 
@@ -553,7 +593,7 @@ def classify_model(raw: str) -> str:
     """Classify an Antigravity model string into hydrogen/carbon/argon/flash/claude/other.
 
     Matches `ModelClass.classify(_:)` in `Sources/Core_ModelClass.swift`:
-      1. contains "hydrogen" -> "hydrogen"
+      1. contains "hydrogen" or "flash-worker-agy" -> "hydrogen"
       2. contains "argon"    -> "argon" (checked BEFORE "orchestrator" so
          "gemini-pro-orchestrator-argon" maps to "argon")
       3. contains "carbon" or "orchestrator" or ("gemini" and "pro") or "ultra" -> "carbon"
@@ -566,7 +606,7 @@ def classify_model(raw: str) -> str:
     m = raw.strip().lower()
     if not m:
         return "other"
-    if "hydrogen" in m:
+    if "hydrogen" in m or "flash-worker-agy" in m:
         return "hydrogen"
     if "argon" in m:
         return "argon"
@@ -832,33 +872,80 @@ def _iter_proto_fields(buf: bytes, start: int = 0, end: Optional[int] = None) ->
     return fields
 
 
-def decode_gen_metadata_cache_write(blob: bytes) -> int:
-    """Decode `cache_write_tokens` from CortexStepGeneratorMetadata protobuf bytes.
+def _unpack_varints(buf: bytes) -> List[int]:
+    """Decode a packed repeated varint byte payload into integers."""
+    out: List[int] = []
+    pos = 0
+    end = len(buf)
+    while pos < end:
+        val, next_pos = _read_varint(buf, pos, end)
+        if val is None or next_pos <= pos:
+            break
+        out.append(val)
+        pos = next_pos
+    return out
 
-    Path: f1 (ChatModelMetadata) -> f4 (ModelUsageStats) -> f4 (cache_write_tokens varint).
-    Returns 0 if absent or malformed.
+
+def _decode_printable_utf8(buf: bytes) -> str:
+    """Decode length-delimited bytes to a stripped UTF-8 string if printable, else ''."""
+    if not buf:
+        return ""
+    try:
+        text = buf.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return ""
+    if not text or not text.isprintable():
+        return ""
+    return text
+
+
+def decode_gen_metadata_row(blob: bytes) -> Tuple[List[int], int, str]:
+    """Decode `(f2_step_indices, cache_write_tokens, model_str)` from CortexStepGeneratorMetadata.
+
+    Paths:
+      - `f2` (packed varint or varint): covered transcript `step_index` values
+      - `f1` (ChatModelMetadata) -> `f4` (ModelUsageStats) -> `f4` (cache_write_tokens)
+      - `f1` (ChatModelMetadata) -> `f19` (model_id) / `f21` (display_label)
     """
     if not blob:
-        return 0
+        return [], 0, ""
     outer = _iter_proto_fields(blob)
     if outer is None:
-        return 0
+        return [], 0, ""
+    step_indices: List[int] = []
     best_cw = 0
+    model_id = ""
+    model_label = ""
     for fnum, wtype, val in outer:
+        if fnum == 2:
+            if wtype == 2:
+                step_indices.extend(_unpack_varints(val))
+            elif wtype == 0 and isinstance(val, int) and not isinstance(val, bool):
+                step_indices.append(val)
+            continue
         if fnum != 1 or wtype != 2:
             continue
         chat_meta = _iter_proto_fields(val)
         if chat_meta is None:
             continue
         for fnum2, wtype2, val2 in chat_meta:
-            if fnum2 != 4 or wtype2 != 2:
-                continue
-            usage_stats = _iter_proto_fields(val2)
-            if usage_stats is None:
-                continue
-            for fnum3, wtype3, val3 in usage_stats:
-                if fnum3 == 4 and wtype3 == 0 and isinstance(val3, int) and val3 > best_cw:
-                    best_cw = val3
+            if fnum2 == 4 and wtype2 == 2:
+                usage_stats = _iter_proto_fields(val2)
+                if usage_stats is None:
+                    continue
+                for fnum3, wtype3, val3 in usage_stats:
+                    if fnum3 == 4 and wtype3 == 0 and isinstance(val3, int) and val3 > best_cw:
+                        best_cw = val3
+            elif fnum2 == 19 and wtype2 == 2 and not model_id:
+                model_id = _decode_printable_utf8(val2)
+            elif fnum2 == 21 and wtype2 == 2 and not model_label:
+                model_label = _decode_printable_utf8(val2)
+    return step_indices, best_cw, (model_id or model_label)
+
+
+def decode_gen_metadata_cache_write(blob: bytes) -> int:
+    """Decode `cache_write_tokens` from CortexStepGeneratorMetadata protobuf bytes."""
+    _, best_cw, _ = decode_gen_metadata_row(blob)
     return best_cw
 
 
@@ -883,8 +970,8 @@ def _db_signature(db_path: Optional[Path]) -> List[int]:
     return sig
 
 
-def read_sqlite_cache_writes(db_path: Optional[Path]) -> Dict[int, int]:
-    """Read step_index -> cache_write_tokens from sibling conversations/<conv-id>.db.
+def read_sqlite_step_metadata(db_path: Optional[Path]) -> Tuple[Dict[int, int], Dict[int, str]]:
+    """Read `(step_index -> cache_write_tokens, step_index -> model_str)` from sibling DB.
 
     Handles the SQLite WAL read-only pitfall: opening a WAL-mode DB with `?mode=ro`
     raises SQLITE_CANTOPEN when `-wal`/`-shm` were cleaned up on exit or live in a
@@ -892,15 +979,15 @@ def read_sqlite_cache_writes(db_path: Optional[Path]) -> Dict[int, int]:
     modifies files on disk.
     """
     if db_path is None:
-        return {}
+        return {}, {}
     try:
         if not db_path.is_file() or db_path.stat().st_size < 16:
-            return {}
+            return {}, {}
         with open(db_path, "rb") as f:
             if f.read(16) != b"SQLite format 3\x00":
-                return {}
+                return {}, {}
     except OSError:
-        return {}
+        return {}, {}
 
     quoted = urllib.parse.quote(str(db_path.resolve()), safe="/:")
     uris = (
@@ -926,19 +1013,32 @@ def read_sqlite_cache_writes(db_path: Optional[Path]) -> Dict[int, int]:
             rows = None
 
     if not rows:
-        return {}
+        return {}, {}
 
-    out: Dict[int, int] = {}
+    cw_map: Dict[int, int] = {}
+    model_map: Dict[int, str] = {}
     for idx, data in rows:
         if isinstance(idx, int) and not isinstance(idx, bool) and data:
             try:
                 raw_bytes = bytes(data)
             except Exception:
                 continue
-            cw = decode_gen_metadata_cache_write(raw_bytes)
-            if cw > 0:
-                out[idx] = cw
-    return out
+            f2_steps, cw, model_str = decode_gen_metadata_row(raw_bytes)
+            targets = [s for s in f2_steps if isinstance(s, int) and s >= 0]
+            if not targets and idx >= 0:
+                targets = [idx]
+            for s in targets:
+                if cw > cw_map.get(s, 0):
+                    cw_map[s] = cw
+                if model_str and s not in model_map:
+                    model_map[s] = model_str
+    return cw_map, model_map
+
+
+def read_sqlite_cache_writes(db_path: Optional[Path]) -> Dict[int, int]:
+    """Read step_index -> cache_write_tokens from sibling conversations/<conv-id>.db."""
+    cw_map, _ = read_sqlite_step_metadata(db_path)
+    return cw_map
 
 
 # ---------------------------------------------------------------------------
@@ -1220,13 +1320,14 @@ def parse_file(path: Path, conv_id: str, db_path: Optional[Path] = None) -> Tupl
         "time_event_lines": 0,
     }
 
-    db_step_cw = read_sqlite_cache_writes(db_path)
+    db_step_cw, db_step_model = read_sqlite_step_metadata(db_path)
 
     events: List[int] = []
     model_events: List[Tuple[int, str]] = []
     # step_index -> [day_key, model_str, inp, out, cw, cr, no_ts_flag, sqlite_supp_flag]
     seen_steps: Dict[int, List[Any]] = {}
     first_ts_dt: Optional[datetime] = None
+    last_known_model = ""
     line_no = 0
     ok = True
 
@@ -1279,7 +1380,18 @@ def parse_file(path: Path, conv_id: str, db_path: Optional[Path] = None) -> Tupl
                 if step_type != "PLANNER_RESPONSE":
                     continue
 
+                raw_idx = data.get("step_index")
+                has_idx = isinstance(raw_idx, int) and not isinstance(raw_idx, bool) and raw_idx >= 0
+
                 model_str = str(data.get("model") or "").strip()
+                if model_str and not model_str.startswith("<"):
+                    last_known_model = model_str
+                elif has_idx and int(raw_idx) in db_step_model:
+                    model_str = db_step_model[int(raw_idx)]
+                    last_known_model = model_str
+                elif last_known_model:
+                    model_str = last_known_model
+
                 if ts_ev is not None and model_str and not model_str.startswith("<"):
                     model_events.append((ts_ev, classify_model(model_str)))
 
@@ -1296,8 +1408,6 @@ def parse_file(path: Path, conv_id: str, db_path: Optional[Path] = None) -> Tupl
                     else data.get("cache_write")
                 )
 
-                raw_idx = data.get("step_index")
-                has_idx = isinstance(raw_idx, int) and not isinstance(raw_idx, bool) and raw_idx >= 0
                 cw = cw_jsonl
                 sqlite_supp = 0
                 if has_idx and raw_idx in db_step_cw:

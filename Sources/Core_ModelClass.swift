@@ -62,7 +62,7 @@ public enum ModelClass: String, Codable, CaseIterable, Sendable {
     public static func classify(_ raw: String) -> ModelClass {
         let lower = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if lower.isEmpty { return .other }
-        if lower.contains("hydrogen") {
+        if lower.contains("hydrogen") || lower.contains("flash-worker-agy") {
             return .hydrogen
         }
         // Check "argon" BEFORE "orchestrator" so "gemini-pro-orchestrator-argon"

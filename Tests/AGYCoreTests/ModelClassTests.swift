@@ -26,7 +26,16 @@ struct ModelClassTests {
     @Test("Classifies all 22 live Antigravity model IDs and display labels")
     func classifyLiveCatalog() {
         // Hydrogen family
-        for m in ["gemini-4-hydrogen-low", "gemini-4-hydrogen-medium", "gemini-4-hydrogen-high", "gemini-4-hydrogen-xhigh", "Gemini 4 Hydrogen (XHigh)"] {
+        for m in [
+            "gemini-4-hydrogen-low",
+            "gemini-4-hydrogen-medium",
+            "gemini-4-hydrogen-high",
+            "gemini-4-hydrogen-xhigh",
+            "gemini-4-hydrogen-tiered-xhigh",
+            "gemini-flash-worker-agy",
+            "Gemini 4 Hydrogen (Orchestrator)",
+            "Gemini 4 Hydrogen (XHigh)",
+        ] {
             #expect(ModelClass.classify(m) == .hydrogen)
         }
 
@@ -41,7 +50,7 @@ struct ModelClassTests {
         }
 
         // Flash / Lite family
-        for m in ["gemini-3.8-flash-low", "gemini-3.8-flash-medium", "gemini-3.8-flash-high", "gemini-2.5-flash-lite", "Gemini 3.8 Flash (High)"] {
+        for m in ["gemini-3.8-flash-low", "gemini-3.8-flash-medium", "gemini-3.8-flash-high", "gemini-3.8-flash-tiered", "gemini-2.5-flash-lite", "Gemini 3.8 Flash (High)"] {
             #expect(ModelClass.classify(m) == .flash)
         }
 

@@ -67,7 +67,7 @@ public struct ArchivedDay: Codable, Equatable, Sendable {
 
 /// The whole archive: schema version (for forward-compatible reads) + days.
 public struct UsageArchiveData: Codable, Equatable, Sendable {
-    public static let currentSchema = 1
+    public static let currentSchema = 2
     public var schemaVersion: Int
     public var days: [String: ArchivedDay]
 

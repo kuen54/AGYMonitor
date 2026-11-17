@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 
 /// App version, single-sourced from Info.plist (CFBundleShortVersionString).
-fileprivate let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.2"
+fileprivate let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.3"
 
 /// UI-facing subset of QuotaFetchResult.
 enum QuotaError: Equatable {

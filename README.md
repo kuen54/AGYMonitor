@@ -165,12 +165,12 @@ build.sh                      ← universal swiftc build + icon + codesign + DMG
 setup_signing.sh              ← optional one-time self-signed certificate setup
 fix_swift.sh                  ← Command Line Tools SwiftBridging modulemap workaround
 .github/workflows/build.yml   ← CI: plist lint → py_compile & unittest → swift test → DMG build
-Info.plist                    ← LSUIElement=true; single source of app version (1.0.0)
+Info.plist                    ← LSUIElement=true; single source of app version (1.0.3)
 ```
 
 ### On pricing accuracy
 
-Google Antigravity plans combine rolling model quotas and Google One AI Credits rather than raw per-token invoices. `AGYMonitor` computes **API-equivalent cost estimates** using [LiteLLM](https://github.com/BerriAI/litellm) public rates (cached 24h) paired with an explicit Antigravity model-family rate table (`Gemini Hydrogen`, `Carbon`, `Argon`, `Flash`, `Claude Opus/Sonnet`, `GPT-OSS`) so you can compare workload intensity across projects and days.
+Google Antigravity plans combine rolling model quotas and Google One AI Credits rather than raw per-token invoices. `AGYMonitor` computes **API-equivalent cost estimates** using [LiteLLM](https://github.com/BerriAI/litellm) public rates (cached 24h) combined with Google's official standard (non-promotional) API list-rate floor for Antigravity model families (`Gemini Hydrogen`, `Carbon`, `Argon`, `3.8 Flash`, `Claude Opus/Sonnet`, `GPT-OSS`) so you can compare workload intensity across projects and days.
 
 ### Durable historical archive
 

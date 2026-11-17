@@ -27,11 +27,17 @@ final class UsageArchive {
         }
 
         var loaded = UsageArchiveData()
+        var droppedStaleSchema = false
         if let files = try? FileManager.default.contentsOfDirectory(
             at: shardDir, includingPropertiesForKeys: nil) {
             for file in files where file.pathExtension == "json" {
                 guard let raw = try? Data(contentsOf: file),
                       let shard = try? JSONDecoder().decode(UsageArchiveData.self, from: raw) else { continue }
+                if shard.schemaVersion < UsageArchiveData.currentSchema {
+                    try? FileManager.default.removeItem(at: file)
+                    droppedStaleSchema = true
+                    continue
+                }
                 guard shard.schemaVersion <= UsageArchiveData.currentSchema else {
                     NSLog("AGYMonitor: skipping archive shard %@ (schema %d > %d)",
                           file.lastPathComponent, shard.schemaVersion, UsageArchiveData.currentSchema)
@@ -39,6 +45,9 @@ final class UsageArchive {
                 }
                 loaded.days.merge(shard.days) { a, _ in a }
             }
+        }
+        if droppedStaleSchema {
+            UserDefaults.standard.removeObject(forKey: "archiveSweptThrough")
         }
         data = loaded
     }

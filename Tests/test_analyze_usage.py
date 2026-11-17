@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 import unittest
 from unittest import mock
 
@@ -62,16 +62,22 @@ def _build_gen_metadata_blob(
     out: int = 200,
     cache_write: int = 4000,
     cache_read: int = 500,
+    model_str: bytes = b"gemini-4-carbon",
+    f2_steps: Optional[List[int]] = None,
 ) -> bytes:
-    """Build CortexStepGeneratorMetadata(f1=ChatModelMetadata(f4=ModelUsageStats(...)))."""
+    """Build CortexStepGeneratorMetadata(f1=ChatModelMetadata(f4=ModelUsageStats(...), f19=model), f2=packed_steps)."""
     usage_stats = (
         _encode_varint_field(2, inp)
         + _encode_varint_field(3, out)
         + _encode_varint_field(4, cache_write)
         + _encode_varint_field(5, cache_read)
     )
-    chat_meta = _encode_len_field(4, usage_stats) + _encode_len_field(19, b"gemini-4-carbon")
-    return _encode_len_field(1, chat_meta)
+    chat_meta = _encode_len_field(4, usage_stats) + _encode_len_field(19, model_str)
+    out_bytes = _encode_len_field(1, chat_meta)
+    if f2_steps:
+        packed = b"".join(_encode_varint(s) for s in f2_steps)
+        out_bytes += _encode_len_field(2, packed)
+    return out_bytes
 
 
 def _write_transcript(
@@ -95,7 +101,7 @@ class TestPython39CompatibilityAndMeta(unittest.TestCase):
     def test_python39_syntax_and_version(self) -> None:
         src = SCRIPT_PATH.read_text(encoding="utf-8")
         tree = ast.parse(src, filename=str(SCRIPT_PATH))
-        self.assertEqual(au.__version__, "1.0.2")
+        self.assertEqual(au.__version__, "1.0.3")
 
         has_future_annotations = False
         for node in ast.walk(tree):
@@ -110,11 +116,14 @@ class TestPython39CompatibilityAndMeta(unittest.TestCase):
 class TestModelClassification(unittest.TestCase):
     def test_exact_classify_rules_from_spec(self) -> None:
         cases = {
-            # Hydrogen
+            # Hydrogen (including worker alias & tiered suffixes)
             "gemini-4-hydrogen-low": "hydrogen",
             "gemini-4-hydrogen-medium": "hydrogen",
             "gemini-4-hydrogen-high": "hydrogen",
             "gemini-4-hydrogen-xhigh": "hydrogen",
+            "gemini-4-hydrogen-tiered-xhigh": "hydrogen",
+            "gemini-flash-worker-agy": "hydrogen",
+            "Gemini 4 Hydrogen (Orchestrator)": "hydrogen",
             # Argon (including orchestrator-argon BEFORE orchestrator/carbon!)
             "gemini-4-argon-low": "argon",
             "gemini-4-argon-medium": "argon",
@@ -132,6 +141,7 @@ class TestModelClassification(unittest.TestCase):
             "gemini-3.8-flash-low": "flash",
             "gemini-3.8-flash-medium": "flash",
             "gemini-3.8-flash-high": "flash",
+            "gemini-3.8-flash-tiered": "flash",
             "gemini-2.5-flash": "flash",
             "gemini-2.5-flash-lite": "flash",
             # Claude
@@ -164,31 +174,41 @@ class TestPricingAndFallback(unittest.TestCase):
     def test_offline_codename_family_fallback_pricing(self) -> None:
         self.assertEqual(au._PRICING_SOURCE, "fallback")
 
-        # Verify every required AGY codename family resolves cleanly
+        # Verify every required AGY codename family resolves cleanly to standard list rates
         h = au.lookup_fallback_pricing("gemini-4-hydrogen-xhigh")
-        self.assertAlmostEqual(h["input"], 2.50)
-        self.assertAlmostEqual(h["output"], 15.00)
-        self.assertAlmostEqual(h["cache_read"], 0.625)
+        self.assertAlmostEqual(h["input"], 1.50)
+        self.assertAlmostEqual(h["output"], 7.50)
+        self.assertAlmostEqual(h["cache_read"], 0.075)
+
+        hw = au.lookup_fallback_pricing("gemini-flash-worker-agy")
+        self.assertAlmostEqual(hw["input"], 1.50)
+        self.assertAlmostEqual(hw["output"], 7.50)
+        self.assertAlmostEqual(hw["cache_read"], 0.075)
 
         c = au.lookup_fallback_pricing("gemini-4-carbon-medium")
-        self.assertAlmostEqual(c["input"], 1.25)
-        self.assertAlmostEqual(c["output"], 10.00)
-        self.assertAlmostEqual(c["cache_read"], 0.3125)
+        self.assertAlmostEqual(c["input"], 4.00)
+        self.assertAlmostEqual(c["output"], 20.00)
+        self.assertAlmostEqual(c["cache_read"], 0.20)
 
         a = au.lookup_fallback_pricing("gemini-4-argon-high")
-        self.assertAlmostEqual(a["input"], 1.25)
-        self.assertAlmostEqual(a["output"], 10.00)
+        self.assertAlmostEqual(a["input"], 4.00)
+        self.assertAlmostEqual(a["output"], 20.00)
+        self.assertAlmostEqual(a["cache_read"], 0.20)
 
         orch = au.lookup_fallback_pricing("gemini-pro-orchestrator")
-        self.assertAlmostEqual(orch["input"], 1.25)
+        self.assertAlmostEqual(orch["input"], 4.00)
+        self.assertAlmostEqual(orch["output"], 20.00)
+        self.assertAlmostEqual(orch["cache_read"], 0.20)
 
         orch_a = au.lookup_fallback_pricing("gemini-pro-orchestrator-argon")
-        self.assertAlmostEqual(orch_a["input"], 1.25)
+        self.assertAlmostEqual(orch_a["input"], 4.00)
+        self.assertAlmostEqual(orch_a["output"], 20.00)
+        self.assertAlmostEqual(orch_a["cache_read"], 0.20)
 
         fl = au.lookup_fallback_pricing("gemini-3.8-flash-medium")
-        self.assertAlmostEqual(fl["input"], 0.30)
-        self.assertAlmostEqual(fl["output"], 2.50)
-        self.assertAlmostEqual(fl["cache_read"], 0.075)
+        self.assertAlmostEqual(fl["input"], 1.50)
+        self.assertAlmostEqual(fl["output"], 7.50)
+        self.assertAlmostEqual(fl["cache_read"], 0.15)
 
         opus = au.lookup_fallback_pricing("claude-opus-5-5-high")
         sonnet = au.lookup_fallback_pricing("claude-sonnet-5-5-high")
@@ -248,8 +268,59 @@ class TestPricingAndFallback(unittest.TestCase):
             },
             "gemini-4-carbon-medium",
         )
-        # 1M * $1.25 + 0.1M * $10.00 + 2M * $0.3125 = 1.25 + 1.00 + 0.625 = 2.875
-        self.assertAlmostEqual(cost, 2.875, places=6)
+        # 1M * $4.00 + 0.1M * $20.00 + 2M * $0.20 = 4.00 + 2.00 + 0.40 = 6.40
+        self.assertAlmostEqual(cost, 6.40, places=6)
+
+        # With promotional LiteLLM entries for Gemini 4 Carbon & 3.8 Flash + Hydrogen,
+        # tiered/worker/orchestrator aliases resolve and standard list floor applies.
+        promo_litellm = dict(fake_litellm)
+        promo_litellm.update({
+            "gemini/gemini-4-hydrogen": {
+                "input_cost_per_token": 1.5e-06,
+                "output_cost_per_token": 7.5e-06,
+                "cache_read_input_token_cost": 7.5e-08,
+                "litellm_provider": "gemini",
+            },
+            "gemini/gemini-4-carbon": {
+                "input_cost_per_token": 2.0e-06,
+                "output_cost_per_token": 1.0e-05,
+                "cache_read_input_token_cost": 1.0e-07,
+                "litellm_provider": "gemini",
+            },
+            "gemini-3.8-flash": {
+                "input_cost_per_token": 7.5e-07,
+                "output_cost_per_token": 3.75e-06,
+                "cache_read_input_token_cost": 7.5e-08,
+                "litellm_provider": "gemini",
+            },
+        })
+        (self.cache_dir / "litellm_pricing.json").write_text(
+            json.dumps(promo_litellm), encoding="utf-8"
+        )
+        au.load_pricing(offline=False)
+
+        for hyd_model in ("gemini-4-hydrogen-tiered-xhigh", "gemini-flash-worker-agy"):
+            p_hyd = au.lookup_model_pricing(hyd_model)
+            self.assertIsNotNone(p_hyd)
+            assert p_hyd is not None
+            self.assertAlmostEqual(p_hyd["input"], 1.50)
+            self.assertAlmostEqual(p_hyd["output"], 7.50)
+            self.assertAlmostEqual(p_hyd["cache_read"], 0.075)
+
+        for carb_model in ("gemini-4-carbon-medium", "gemini-pro-orchestrator"):
+            p_carb = au.lookup_model_pricing(carb_model)
+            self.assertIsNotNone(p_carb)
+            assert p_carb is not None
+            self.assertAlmostEqual(p_carb["input"], 4.00)
+            self.assertAlmostEqual(p_carb["output"], 20.00)
+            self.assertAlmostEqual(p_carb["cache_read"], 0.20)
+
+        p_38 = au.lookup_model_pricing("gemini-3.8-flash-tiered")
+        self.assertIsNotNone(p_38)
+        assert p_38 is not None
+        self.assertAlmostEqual(p_38["input"], 1.50)
+        self.assertAlmostEqual(p_38["output"], 7.50)
+        self.assertAlmostEqual(p_38["cache_read"], 0.15)
 
 
 class TestScannerTokenMathDedupSentinelAndSQLite(unittest.TestCase):
@@ -729,6 +800,73 @@ class TestScannerTokenMathDedupSentinelAndSQLite(unittest.TestCase):
         finally:
             os.chmod(conv_dir, 0o755)
             os.chmod(db_path, 0o644)
+
+    def test_desktop_missing_model_recovers_from_sqlite_f2_packed_steps(self) -> None:
+        conv_id = "desktop-no-model-888"
+        _write_transcript(
+            self.gemini_dir,
+            "antigravity",
+            conv_id,
+            [
+                {
+                    "step_index": 1,
+                    "type": "PLANNER_RESPONSE",
+                    "status": "DONE",
+                    "created_at": "2026-11-17T07:24:08Z",
+                    "input_tokens": 10000,
+                    "cache_read_tokens": 20000,
+                    "output_tokens": 500,
+                },
+                {
+                    "step_index": 6,
+                    "type": "PLANNER_RESPONSE",
+                    "status": "DONE",
+                    "created_at": "2026-11-17T07:40:00Z",
+                    "input_tokens": 4000,
+                    "cache_read_tokens": 8000,
+                    "output_tokens": 200,
+                },
+            ],
+        )
+
+        conv_dir = self.gemini_dir / "antigravity" / "conversations"
+        conv_dir.mkdir(parents=True, exist_ok=True)
+        db_path = conv_dir / f"{conv_id}.db"
+        conn = sqlite3.connect(str(db_path))
+        cur = conn.cursor()
+        cur.execute("CREATE TABLE gen_metadata (idx INT PRIMARY KEY, data BLOB, size INT)")
+        blob0 = _build_gen_metadata_blob(
+            inp=10000, out=500, cache_write=0, cache_read=20000,
+            model_str=b"gemini-pro-orchestrator", f2_steps=[1, 2, 3],
+        )
+        blob1 = _build_gen_metadata_blob(
+            inp=4000, out=200, cache_write=0, cache_read=8000,
+            model_str=b"gemini-flash-worker-agy", f2_steps=[6, 7],
+        )
+        cur.execute("INSERT INTO gen_metadata (idx, data, size) VALUES (?, ?, ?)", (0, blob0, len(blob0)))
+        cur.execute("INSERT INTO gen_metadata (idx, data, size) VALUES (?, ?, ?)", (1, blob1, len(blob1)))
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        local_day = datetime.fromisoformat("2026-11-17T07:24:08+00:00").astimezone().strftime("%Y-%m-%d")
+        start_dt, end_dt = au.resolve_range(f"{local_day}:{local_day}")
+        sessions, time_days = au.scan_sessions(
+            start_dt, end_dt, use_cache=False, data_dirs=[self.gemini_dir]
+        )
+        payload = au.build_json_payload(sessions, include_sessions=False, time_days=time_days)
+
+        self.assertNotIn("other", payload["totals_by_model"])
+        carbon = payload["totals_by_model"]["carbon"]
+        self.assertEqual(carbon["input_tokens"], 10000)
+        self.assertEqual(carbon["output_tokens"], 500)
+        self.assertEqual(carbon["cache_read"], 20000)
+        hydrogen = payload["totals_by_model"]["hydrogen"]
+        self.assertEqual(hydrogen["input_tokens"], 4000)
+        self.assertEqual(hydrogen["output_tokens"], 200)
+        self.assertEqual(hydrogen["cache_read"], 8000)
+        self.assertEqual(time_days[local_day]["intervals"][0][2], "carbon")
+        self.assertEqual(time_days[local_day]["intervals"][1][2], "hydrogen")
 
 
 class TestActiveTimeIntervalsAndCache(unittest.TestCase):
