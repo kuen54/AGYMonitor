@@ -1,8 +1,10 @@
 import SwiftUI
 import AppKit
 
-// Sessions tab (live Antigravity CLI / Desktop / IDE command deck).
-// Zero duplicate waiting rows, zero gray card boxes, crisp aligned columns.
+// Sessions tab (04 — Live Antigravity CLI / Desktop / IDE command deck).
+// Archival hairline filter index, airy editorial ledger rows with 01/02 indexing,
+// precision optical alert rows, zero heavy slabs, italic serif colophon,
+// and intact window-scoped ↑/↓/Return keyboard navigation.
 
 // MARK: - Host Window Probe (for safe window-scoped ↑/↓/Return navigation)
 
@@ -26,6 +28,7 @@ struct SessionTabView: View {
     @Environment(\.telemetryStaticRender) private var isStaticRender
 
     @State private var filter: SessionStatusFilter = .all
+    @State private var hoveredFilter: SessionStatusFilter? = nil
     @State private var selectedSessionId: String? = nil
     @State private var hoveredRadarSessionId: String? = nil
     @State private var hostWindow: NSWindow? = nil
@@ -78,6 +81,8 @@ struct SessionTabView: View {
         VStack(spacing: 0) {
             if allSessions.isEmpty {
                 emptyState
+                HairlineRule(showCrosshairs: false)
+                colophonFooter
             } else {
                 filterStrip
                 HairlineRule(showCrosshairs: true)
@@ -117,14 +122,8 @@ struct SessionTabView: View {
                     }
                 }
 
-                HStack {
-                    Spacer()
-                    Text(loc("navKeyHint"))
-                        .font(.system(size: 8.5, weight: .medium, design: .monospaced))
-                        .foregroundColor(theme.inkMuted)
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
+                HairlineRule(showCrosshairs: false)
+                colophonFooter
             }
         }
         .background {
@@ -138,81 +137,178 @@ struct SessionTabView: View {
         .onDisappear { removeKeyMonitor() }
     }
 
+    // MARK: De-Slabbed Hairline Filter Index Strip
+
     private var filterStrip: some View {
-        let pills: [(SessionStatusFilter, String, Int, Color?)] = [
-            (.all,     loc("filterAll"),     allSessions.count, nil),
-            (.running, loc("filterRunning"), runningCount,      theme.accent),
+        let chips: [(kind: SessionStatusFilter, label: String, count: Int, tint: Color?)] = [
+            (.all,     loc("filterAll"),     allSessions.count,     nil),
+            (.running, loc("filterRunning"), runningCount,          theme.accent),
             (.waiting, loc("filterWaiting"), waitingSessions.count, theme.signalAmber),
-            (.done,    loc("filterDone"),    doneCount,         theme.signalGreen),
+            (.done,    loc("filterDone"),    doneCount,             theme.signalGreen),
         ]
 
         return HStack(spacing: 4) {
-            ForEach(pills, id: \.0) { item in
-                let isSelected = (filter == item.0)
-                let tint = item.3
-                HStack(spacing: 4) {
-                    if let dot = tint {
-                        Circle().fill(dot).frame(width: 4.5, height: 4.5)
+            ForEach(chips, id: \.kind) { item in
+                let isSelected = (filter == item.kind)
+                let isHovered = (hoveredFilter == item.kind)
+                let squareColor = item.tint ?? theme.accent
+
+                HStack(spacing: 4.5) {
+                    if isSelected {
+                        Rectangle()
+                            .fill(squareColor)
+                            .frame(width: 4, height: 4)
+                            .rotationEffect(item.kind == .waiting ? .degrees(45) : .zero)
+                    } else if let dotTint = item.tint {
+                        Rectangle()
+                            .fill(dotTint.opacity(item.count > 0 ? 0.72 : 0.25))
+                            .frame(width: 3.5, height: 3.5)
+                            .rotationEffect(item.kind == .waiting ? .degrees(45) : .zero)
                     }
-                    Text("\(item.1) \(item.2)")
-                        .font(.system(size: 9.5, weight: isSelected ? .bold : .medium, design: .monospaced))
+
+                    Text(item.label)
+                        .font(.system(size: 8.5, weight: isSelected ? .semibold : .regular, design: .monospaced))
+                        .tracking(0.7)
+                        .foregroundColor(
+                            isSelected
+                                ? theme.inkPrimary
+                                : (isHovered ? theme.inkPrimary.opacity(0.85) : theme.inkSecondary)
+                        )
+
+                    Text("\(item.count)")
+                        .font(.system(size: 8.5, weight: isSelected ? .medium : .regular, design: .monospaced))
+                        .monospacedDigit()
+                        .foregroundColor(
+                            isSelected
+                                ? (item.kind == .waiting ? theme.signalAmber : theme.accent)
+                                : theme.inkMuted
+                        )
                 }
-                .foregroundColor(isSelected ? theme.invertedInk : theme.inkSecondary)
-                .padding(.horizontal, 7)
-                .padding(.vertical, 3.5)
-                .background(isSelected ? theme.invertedBg : Color.clear)
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    withAnimation(.easeInOut(duration: 0.14)) {
-                        filter = item.0
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(
+                    ZStack(alignment: .bottom) {
+                        if isSelected {
+                            Rectangle()
+                                .fill(theme.surfaceRaised.opacity(theme.isDark ? 0.35 : 0.55))
+                            Rectangle()
+                                .fill(theme.accent)
+                                .frame(height: 1.5)
+                        } else if isHovered {
+                            Rectangle()
+                                .fill(theme.surfaceRaised.opacity(0.32))
+                        }
                     }
+                )
+                .contentShape(Rectangle())
+                .onHover { inside in
+                    hoveredFilter = inside ? item.kind : (hoveredFilter == item.kind ? nil : hoveredFilter)
+                }
+                .onTapGesture {
+                    filter = item.kind
                 }
             }
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 7)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 5)
     }
+
+    // MARK: Precision Optical Alert Section (04.2)
 
     private var needsAttentionSection: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 5) {
-                Text("▲ \(loc("needsAttention"))")
-                    .font(.system(size: 9, weight: .bold, design: .monospaced))
-                    .tracking(0.6)
+                Rectangle()
+                    .fill(theme.signalAmber)
+                    .frame(width: 4, height: 4)
+                    .rotationEffect(.degrees(45))
+
+                Text("04.2")
+                    .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                    .foregroundColor(theme.signalAmber.opacity(0.92))
+
+                Text(loc("needsAttention"))
+                    .font(.system(size: 8, weight: .medium, design: .monospaced))
+                    .tracking(0.95)
                     .foregroundColor(theme.signalAmber)
-                Spacer()
-                Text("\(waitingSessions.count)")
-                    .font(.system(size: 9, weight: .bold, design: .monospaced))
-                    .foregroundColor(theme.signalAmber)
+
+                Spacer(minLength: 4)
+
+                Text(String(format: "%02d", waitingSessions.count))
+                    .font(.system(size: 8, weight: .regular, design: .monospaced))
+                    .monospacedDigit()
+                    .foregroundColor(theme.signalAmber.opacity(0.9))
             }
 
-            ForEach(waitingSessions) { session in
-                let wsLabel = sessionStore.labels[session.cwd] ?? SessionLogic.basename(session.cwd)
-                SessionRow(
-                    session: session,
-                    sessionStore: sessionStore,
-                    workspacePrefix: wsLabel,
-                    isSelected: selectedSessionId == session.sessionId || hoveredRadarSessionId == session.sessionId
-                )
+            VStack(spacing: 0) {
+                ForEach(Array(waitingSessions.enumerated()), id: \.element.id) { idx, session in
+                    let wsLabel = sessionStore.labels[session.cwd] ?? SessionLogic.basename(session.cwd)
+                    SessionRow(
+                        session: session,
+                        sessionStore: sessionStore,
+                        rowIndex: idx + 1,
+                        workspacePrefix: wsLabel,
+                        isSelected: selectedSessionId == session.sessionId || hoveredRadarSessionId == session.sessionId
+                    )
+                    if idx < waitingSessions.count - 1 {
+                        Rectangle()
+                            .fill(theme.signalAmber.opacity(theme.isDark ? 0.16 : 0.14))
+                            .frame(height: 0.5)
+                            .padding(.leading, 22)
+                    }
+                }
             }
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, 14)
         .padding(.vertical, 9)
-        .background(theme.signalAmber.opacity(theme.isDark ? 0.08 : 0.07))
+        .background(theme.signalAmber.opacity(theme.isDark ? 0.055 : 0.045))
         .overlay(alignment: .leading) {
-            Rectangle().fill(theme.signalAmber).frame(width: 2)
+            Rectangle().fill(theme.signalAmber).frame(width: 1.5)
         }
+    }
+
+    // MARK: Editorial Colophon Footer
+
+    private var colophonFooter: some View {
+        HStack(spacing: 5) {
+            Text(loc("navKeyHint"))
+                .font(.system(size: 7.5, weight: .regular, design: .monospaced))
+                .tracking(0.45)
+                .foregroundColor(theme.inkMuted)
+                .lineLimit(1)
+
+            Spacer(minLength: 4)
+
+            Text("Plate IV")
+                .font(.system(size: 8.5, weight: .regular, design: .serif))
+                .italic()
+                .foregroundColor(theme.inkMuted.opacity(0.75))
+
+            Text("·")
+                .font(.system(size: 7.5, weight: .regular, design: .monospaced))
+                .foregroundColor(theme.inkMuted.opacity(0.45))
+
+            Text("FIG. 04")
+                .font(.system(size: 7.5, weight: .regular, design: .monospaced))
+                .tracking(0.8)
+                .foregroundColor(theme.inkMuted.opacity(0.78))
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 6.5)
     }
 
     private var emptyState: some View {
         VStack(spacing: 8) {
             Image(systemName: "bubble.left.and.bubble.right")
-                .font(.system(size: 18)).foregroundColor(theme.inkMuted)
+                .font(.system(size: 16, weight: .light))
+                .foregroundColor(theme.inkMuted)
             Text(loc("sessionEmpty"))
-                .font(.system(size: 10.5, design: .monospaced)).foregroundColor(theme.inkSecondary)
+                .font(.system(size: 10, weight: .regular, design: .monospaced))
+                .foregroundColor(theme.inkSecondary)
                 .multilineTextAlignment(.center)
         }
+        .padding(.horizontal, 14)
         .frame(maxWidth: .infinity)
         .frame(height: 130)
     }
@@ -220,15 +316,20 @@ struct SessionTabView: View {
     private func jumpHintBanner(_ key: String) -> some View {
         HStack(spacing: 6) {
             Image(systemName: "info.circle")
-                .font(.system(size: 10)).foregroundColor(theme.accent)
+                .font(.system(size: 9.5, weight: .regular))
+                .foregroundColor(theme.accent)
             Text(loc(key))
-                .font(.system(size: 9.5, design: .monospaced)).foregroundColor(theme.inkPrimary)
+                .font(.system(size: 9, weight: .regular, design: .monospaced))
+                .foregroundColor(theme.inkPrimary)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, 14)
         .padding(.vertical, 7)
-        .background(theme.accentSoft)
+        .background(theme.accent.opacity(theme.isDark ? 0.10 : 0.06))
+        .overlay(alignment: .leading) {
+            Rectangle().fill(theme.accent).frame(width: 1.5)
+        }
         .transition(.opacity)
     }
 
@@ -289,40 +390,51 @@ struct SessionGroupSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 6) {
+            HStack(spacing: 5) {
                 Text("+")
-                    .font(.system(size: 10.5, weight: .bold, design: .monospaced))
-                    .foregroundColor(theme.accent)
-                Text(group.label)
-                    .font(.system(size: 11, weight: .bold, design: .monospaced))
-                    .foregroundColor(theme.inkPrimary)
+                    .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
+                    .foregroundColor(theme.accent.opacity(0.9))
+                Text(group.label.uppercased())
+                    .font(.system(size: 8, weight: .medium, design: .monospaced))
+                    .tracking(0.95)
+                    .foregroundColor(theme.inkSecondary)
                     .lineLimit(1)
-                Spacer(minLength: 0)
+                Spacer(minLength: 4)
                 Text(String(format: "%02d", group.sessions.count))
-                    .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                    .font(.system(size: 8, weight: .regular, design: .monospaced))
+                    .monospacedDigit()
                     .foregroundColor(theme.inkMuted)
             }
             .help(group.cwd)
 
-            VStack(spacing: 2) {
-                ForEach(group.sessions) { session in
+            VStack(spacing: 0) {
+                ForEach(Array(group.sessions.enumerated()), id: \.element.id) { idx, session in
                     SessionRow(
                         session: session,
                         sessionStore: sessionStore,
+                        rowIndex: idx + 1,
                         isSelected: selectedSessionId == session.sessionId || hoveredRadarSessionId == session.sessionId
                     )
+                    if idx < group.sessions.count - 1 {
+                        Rectangle()
+                            .fill(theme.hairline.opacity(0.45))
+                            .frame(height: 0.5)
+                            .padding(.leading, 22)
+                    }
                 }
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
     }
 }
 
-/// One session row: RadarStatusDot + title + aligned bare surface tag + prompt + action/time.
+/// One session ledger row: 01/02 monospaced index + RadarStatusDot + airy .medium/.regular title
+/// + quiet monospace surface tag + hairline telemetry badge.
 struct SessionRow: View {
     let session: SessionInfo
     @ObservedObject var sessionStore: SessionStore
+    var rowIndex: Int? = nil
     var workspacePrefix: String? = nil
     var isSelected: Bool = false
 
@@ -333,65 +445,97 @@ struct SessionRow: View {
     private var isActiveHighlight: Bool { hovering || isSelected }
 
     var body: some View {
-        HStack(spacing: 8) {
+        let isWaiting = (dotKind == .waiting)
+        let focusTint = isWaiting ? theme.signalAmber : theme.accent
+
+        HStack(spacing: 7) {
+            if let rowIndex = rowIndex {
+                Text(String(format: "%02d", rowIndex))
+                    .font(.system(size: 7.5, weight: .regular, design: .monospaced))
+                    .monospacedDigit()
+                    .foregroundColor(isActiveHighlight ? focusTint : theme.inkMuted.opacity(0.72))
+                    .frame(width: 14, alignment: .leading)
+            }
+
             RadarStatusDot(kind: dotKind)
                 .accessibilityLabel(statusLabel)
 
-            VStack(alignment: .leading, spacing: 1.5) {
-                HStack(spacing: 6) {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 5.5) {
                     Text(titleText)
-                        .font(.system(size: 11.5, weight: .semibold))
-                        .foregroundColor(theme.inkPrimary)
+                        .font(.system(size: 11, weight: isWaiting ? .medium : .regular))
+                        .foregroundColor(
+                            isActiveHighlight || isWaiting
+                                ? theme.inkPrimary
+                                : theme.inkPrimary.opacity(0.90)
+                        )
                         .lineLimit(1)
                         .truncationMode(.tail)
 
                     if let surfaceCode = surfaceCode {
                         Text(surfaceCode)
-                            .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
+                            .font(.system(size: 7, weight: .regular, design: .monospaced))
+                            .tracking(0.55)
                             .foregroundColor(theme.inkMuted)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(theme.surfaceRaised.opacity(theme.isDark ? 0.25 : 0.42))
+                            .overlay(Rectangle().stroke(theme.hairline.opacity(0.80), lineWidth: 0.55))
                             .fixedSize()
                     }
                 }
 
                 Text(workspacePrefix.map { "\($0) · \(subtitleText)" } ?? subtitleText)
-                    .font(.system(size: 10))
-                    .foregroundColor(theme.inkSecondary)
+                    .font(.system(size: 9.5, weight: .regular))
+                    .foregroundColor(theme.inkSecondary.opacity(0.86))
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
 
             Spacer(minLength: 4)
 
-            if dotKind == .waiting {
+            if isWaiting {
                 let tag = session.waitReason == .needsConfirmation ? loc("badgeConfirm") : loc("badgeInput")
                 Text("\(tag) ↗")
-                    .font(.system(size: 8.5, weight: .bold, design: .monospaced))
-                    .foregroundColor(.black)
-                    .padding(.horizontal, 5)
+                    .font(.system(size: 7.5, weight: .semibold, design: .monospaced))
+                    .tracking(0.45)
+                    .foregroundColor(theme.signalAmber)
+                    .padding(.horizontal, 5.5)
                     .padding(.vertical, 2)
-                    .background(theme.signalAmber)
+                    .background(theme.signalAmber.opacity(theme.isDark ? 0.11 : 0.09))
+                    .overlay(Rectangle().stroke(theme.signalAmber.opacity(0.62), lineWidth: 0.75))
             } else if dotKind == .doneUnseen {
                 Text(loc("badgeDone"))
-                    .font(.system(size: 8.5, weight: .bold, design: .monospaced))
+                    .font(.system(size: 7.5, weight: .medium, design: .monospaced))
+                    .tracking(0.45)
                     .foregroundColor(theme.signalGreen)
+                    .padding(.horizontal, 4.5)
+                    .padding(.vertical, 1.5)
+                    .background(theme.signalGreen.opacity(theme.isDark ? 0.10 : 0.07))
+                    .overlay(Rectangle().stroke(theme.signalGreen.opacity(0.42), lineWidth: 0.65))
             } else if let updated = session.updatedAt {
                 Text(timeAgo(Date(timeIntervalSince1970: updated / 1000), loc))
-                    .font(.system(size: 9.5, design: .monospaced))
+                    .font(.system(size: 8, weight: .regular, design: .monospaced))
+                    .monospacedDigit()
                     .foregroundColor(theme.inkMuted)
             }
 
             Text(isActiveHighlight ? "↵" : "")
-                .font(.system(size: 10, weight: .bold, design: .monospaced))
-                .foregroundColor(theme.accent)
+                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                .foregroundColor(focusTint)
                 .frame(width: 11)
         }
-        .padding(.vertical, 4)
-        .padding(.horizontal, 4)
+        .padding(.vertical, 6.5)
+        .padding(.horizontal, 5)
         .contentShape(Rectangle())
-        .background(isActiveHighlight ? theme.surfaceRaised.opacity(0.9) : Color.clear)
+        .background(
+            isActiveHighlight
+                ? focusTint.opacity(theme.isDark ? 0.11 : 0.06)
+                : Color.clear
+        )
         .overlay(alignment: .leading) {
             if isSelected {
-                Rectangle().fill(theme.accent).frame(width: 2)
+                Rectangle().fill(focusTint).frame(width: 1.5)
             }
         }
         .onHover { inside in

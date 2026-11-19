@@ -94,14 +94,19 @@ private struct NotchRightWidthKey: PreferenceKey {
 
 final class NotchViewModel: ObservableObject {
     @Published var isOpen: Bool = false
-    @Published var contentSize: CGSize = .zero
+    @Published var isPanelShown: Bool = true
     @Published var closedNotchSize: CGSize = .zero
     @Published var isSynthetic: Bool = false
     @Published var activeWing: NotchWingKind? = nil
     @Published var anyBusy: Bool = false
     @Published var anyWaiting: Bool = false
-    @Published var compactGapOffset: CGFloat = 0
 
+    /// AppKit geometry readouts consumed only by NotchController — intentionally NOT @Published
+    /// so PreferenceKey updates during spring animations never trigger SwiftUI body rebuild storms.
+    var contentSize: CGSize = .zero
+    var compactGapOffset: CGFloat = 0
+
+    var onContentSizeChanged: (() -> Void)?
     var onAcquireModalLock: ((NotchModalLock) -> Void)?
     var onReleaseModalLock: ((NotchModalLock) -> Void)?
     var onTapWing: ((String) -> Void)?
@@ -161,7 +166,8 @@ struct CompactNotchView: View {
     private var leftBlock: some View {
         HStack(spacing: 6) {
             SessionAwareLogo(sessionStore: sessionStore,
-                             size: 14.5, color: darkTheme.accent, dotSize: 5)
+                             size: 14.5, color: darkTheme.accent, dotSize: 5,
+                             isActive: vm.isPanelShown && !vm.isOpen)
             if let wing = vm.activeWing {
                 Text(wing.workspace)
                     .font(.system(size: 10, weight: .semibold, design: .monospaced))
@@ -302,16 +308,20 @@ struct NotchRootView: View {
         .animation(reduceMotion ? NotchAnimations.reduced : NotchAnimations.open, value: vm.activeWing)
         .preferredColorScheme(.dark)
         .onPreferenceChange(NotchContentSizeKey.self) { size in
-            if size != .zero { vm.contentSize = size }
+            guard size != .zero else { return }
+            if abs(size.width - vm.contentSize.width) > 0.5 || abs(size.height - vm.contentSize.height) > 0.5 {
+                vm.contentSize = size
+                vm.onContentSizeChanged?()
+            }
         }
         .onPreferenceChange(NotchLeftWidthKey.self) { w in
-            if w > 0 {
+            if w > 0, abs(w - leftWidth) > 0.5 {
                 leftWidth = w
                 vm.compactGapOffset = compactGapOffset
             }
         }
         .onPreferenceChange(NotchRightWidthKey.self) { w in
-            if w > 0 {
+            if w > 0, abs(w - rightWidth) > 0.5 {
                 rightWidth = w
                 vm.compactGapOffset = compactGapOffset
             }

@@ -78,11 +78,13 @@ struct TimeTabView: View {
                     .foregroundColor(theme.inkSecondary)
                 if isFailed {
                     Text(loc("retry").uppercased())
-                        .font(.system(size: 10, weight: .bold, design: .monospaced))
-                        .foregroundColor(theme.invertedInk)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .background(theme.invertedBg)
+                        .font(.system(size: 9, weight: .medium, design: .monospaced))
+                        .tracking(0.8)
+                        .foregroundColor(theme.accent)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(theme.surfaceRaised.opacity(theme.isDark ? 0.35 : 0.55))
+                        .overlay(Rectangle().stroke(theme.accent.opacity(0.6), lineWidth: 0.75))
                         .contentShape(Rectangle())
                         .onTapGesture { store.refresh(force: true) }
                 }
@@ -93,39 +95,114 @@ struct TimeTabView: View {
     }
 }
 
-/// Monday-first localized short weekday symbols.
-func mondayFirstWeekdaySymbols(_ loc: Localizer) -> [String] {
-    let df = DateFormatter()
-    df.locale = Locale(identifier: loc.language.rawValue)
-    let symbols = df.shortWeekdaySymbols ?? []
-    guard symbols.count == 7 else { return ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] }
-    return (0..<7).map { symbols[($0 + 1) % 7] }
+/// Thread-safe static cache for DateFormatters and localized weekday symbols
+/// so 60Hz hover handlers and SwiftUI body evaluations never allocate DateFormatter instances.
+enum TimeDateFormatters {
+    private static let lock = NSLock()
+    private static var mediumDateByLocale: [String: DateFormatter] = [:]
+    private static var weekdaySymbolsByLocale: [String: [String]] = [:]
+
+    static func displayDate(_ dayKey: String, languageCode: String) -> String {
+        guard let date = TimeLogic.date(fromDayKey: dayKey) else { return dayKey }
+        lock.lock()
+        defer { lock.unlock() }
+        let df: DateFormatter
+        if let existing = mediumDateByLocale[languageCode] {
+            df = existing
+        } else {
+            let created = DateFormatter()
+            created.dateStyle = .medium
+            created.timeStyle = .none
+            created.locale = Locale(identifier: languageCode)
+            mediumDateByLocale[languageCode] = created
+            df = created
+        }
+        return df.string(from: date)
+    }
+
+    static func mondayFirstWeekdaySymbols(languageCode: String) -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        if let cached = weekdaySymbolsByLocale[languageCode] {
+            return cached
+        }
+        let df = DateFormatter()
+        df.locale = Locale(identifier: languageCode)
+        let symbols = df.shortWeekdaySymbols ?? []
+        let result: [String]
+        if symbols.count == 7 {
+            result = (0..<7).map { symbols[($0 + 1) % 7] }
+        } else {
+            result = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        }
+        weekdaySymbolsByLocale[languageCode] = result
+        return result
+    }
 }
 
-/// Edge-to-edge 3-column hairline KPI strip.
+/// Monday-first localized short weekday symbols (cached per locale).
+func mondayFirstWeekdaySymbols(_ loc: Localizer) -> [String] {
+    TimeDateFormatters.mondayFirstWeekdaySymbols(languageCode: loc.language.rawValue)
+}
+
+/// Edge-to-edge 3-column hairline KPI strip with sculptural `.ultraLight` numerals.
 struct TimeKpiStrip: View {
     let items: [(label: String, value: String)]
     @Environment(\.agyTheme) private var theme
+
+    private static func splitKpiValue(_ raw: String) -> (number: String, unit: String) {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return ("", "") }
+        var splitIdx = trimmed.startIndex
+        while splitIdx < trimmed.endIndex {
+            let ch = trimmed[splitIdx]
+            if ch.isNumber || ch == "." || ch == "," || ch == "-" || ch == "+" {
+                splitIdx = trimmed.index(after: splitIdx)
+            } else {
+                break
+            }
+        }
+        if splitIdx == trimmed.startIndex {
+            return (trimmed.uppercased(), "")
+        }
+        let num = String(trimmed[..<splitIdx])
+        let unit = String(trimmed[splitIdx...]).trimmingCharacters(in: .whitespaces).uppercased()
+        return (num, unit)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
                 ForEach(Array(items.enumerated()), id: \.offset) { idx, item in
-                    VStack(alignment: .leading, spacing: 1.5) {
+                    let parts = Self.splitKpiValue(item.value)
+                    VStack(alignment: .leading, spacing: 2) {
                         Text(item.label.uppercased())
-                            .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
+                            .font(.system(size: 7.5, weight: .regular, design: .monospaced))
+                            .tracking(0.8)
                             .foregroundColor(theme.inkMuted)
-                        Text(item.value.uppercased())
-                            .font(.system(size: 13.5, weight: .bold, design: .monospaced))
-                            .monospacedDigit()
-                            .foregroundColor(theme.inkPrimary)
+                            .lineLimit(1)
+                        HStack(alignment: .firstTextBaseline, spacing: 1.5) {
+                            Text(parts.number)
+                                .font(.system(size: 21, weight: .ultraLight, design: .monospaced))
+                                .monospacedDigit()
+                                .foregroundColor(theme.inkPrimary)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.75)
+                            if !parts.unit.isEmpty {
+                                Text(parts.unit)
+                                    .font(.system(size: 8.5, weight: .regular, design: .monospaced))
+                                    .tracking(0.5)
+                                    .foregroundColor(theme.inkMuted)
+                                    .lineLimit(1)
+                            }
+                        }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 7)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
 
                     if idx < items.count - 1 {
-                        Rectangle().fill(theme.hairline).frame(width: 1)
+                        Rectangle().fill(theme.hairline.opacity(0.8)).frame(width: 1)
                     }
                 }
             }
@@ -145,7 +222,7 @@ struct WeekTimeChart: View {
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
 
-    private struct HoveredInterval {
+    private struct HoveredInterval: Equatable {
         let dayKey: String
         let interval: ActiveInterval
     }
@@ -278,7 +355,8 @@ struct WeekTimeChart: View {
     }
 
     private func timeline(day: DayTimeUsage?, dayKey: String, dimmed: Bool, isToday: Bool) -> some View {
-        GeometryReader { geo in
+        let intervals = day?.intervals ?? []
+        return GeometryReader { geo in
             let w = geo.size.width
             ZStack(alignment: .leading) {
                 if dimmed {
@@ -302,8 +380,23 @@ struct WeekTimeChart: View {
                         .frame(width: 1.2, height: rowHeight)
                         .offset(x: min(w - 1.2, w * nowFractionOfDay))
                 }
-                ForEach(Array((day?.intervals ?? []).enumerated()), id: \.offset) { _, interval in
+                ForEach(Array(intervals.enumerated()), id: \.offset) { _, interval in
                     intervalTrace(interval, dayKey: dayKey, width: w)
+                }
+            }
+            .contentShape(Rectangle())
+            .onContinuousHover(coordinateSpace: .local) { phase in
+                switch phase {
+                case .active(let pt):
+                    if let hit = Self.hitTestInterval(x: pt.x, width: w, intervals: intervals) {
+                        hovered = HoveredInterval(dayKey: dayKey, interval: hit)
+                    } else if hovered?.dayKey == dayKey {
+                        hovered = nil
+                    }
+                case .ended:
+                    if hovered?.dayKey == dayKey {
+                        hovered = nil
+                    }
                 }
             }
         }
@@ -311,18 +404,37 @@ struct WeekTimeChart: View {
 
     private func intervalTrace(_ interval: ActiveInterval, dayKey: String, width w: CGFloat) -> some View {
         let barW = max(3, w * CGFloat(max(interval.durationSeconds, 120)) / 86400.0)
-        let x = min(max(0, w * CGFloat(interval.startSec) / 86400.0), w - barW)
+        let x = min(max(0, w * CGFloat(interval.startSec) / 86400.0), max(0, w - barW))
         let color = theme.modelColor(interval.model)
+        let isHovered = (hovered == HoveredInterval(dayKey: dayKey, interval: interval))
 
         return HStack(spacing: 0) {
-            Rectangle().fill(color).frame(width: 1, height: 8)
-            Rectangle().fill(color.opacity(0.92)).frame(width: max(1, barW - 2), height: 4)
-            Rectangle().fill(color).frame(width: 1, height: 8)
+            Rectangle().fill(color).frame(width: 1, height: isHovered ? 10 : 8)
+            Rectangle().fill(color.opacity(isHovered ? 1.0 : 0.92)).frame(width: max(1, barW - 2), height: isHovered ? 5.5 : 4)
+            Rectangle().fill(color).frame(width: 1, height: isHovered ? 10 : 8)
         }
         .frame(width: barW, height: 10)
         .offset(x: x)
-        .contentShape(Rectangle())
-        .onHover { h in hovered = h ? HoveredInterval(dayKey: dayKey, interval: interval) : nil }
+        .allowsHitTesting(false)
+    }
+
+    private static func hitTestInterval(x: CGFloat, width w: CGFloat, intervals: [ActiveInterval]) -> ActiveInterval? {
+        guard w > 0, !intervals.isEmpty else { return nil }
+        let tol: CGFloat = 3.0
+        var best: ActiveInterval? = nil
+        var bestDist = CGFloat.greatestFiniteMagnitude
+        for interval in intervals {
+            let barW = max(3, w * CGFloat(max(interval.durationSeconds, 120)) / 86400.0)
+            let barX = min(max(0, w * CGFloat(interval.startSec) / 86400.0), max(0, w - barW))
+            if x >= barX - tol && x <= barX + barW + tol {
+                let d = abs(x - (barX + barW * 0.5))
+                if d < bestDist {
+                    bestDist = d
+                    best = interval
+                }
+            }
+        }
+        return best
     }
 
     private var axisLabels: some View {
@@ -356,13 +468,14 @@ struct MonthTimeChart: View {
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
 
-    private struct HoveredInterval {
+    private struct HoveredInterval: Equatable {
         let dayKey: String
         let interval: ActiveInterval
     }
     @State private var hovered: HoveredInterval? = nil
+    @State private var hoveredDayKey: String? = nil
 
-    private let rowHeight: CGFloat = 25
+    private var rowHeight: CGFloat { instrumentElevation ? 28 : 25 }
     private let labelWidth: CGFloat = 32
     private let totalWidth: CGFloat = 44
 
@@ -385,7 +498,26 @@ struct MonthTimeChart: View {
         monthDayKeys.filter { (timeData.days[$0]?.totalSeconds ?? 0) > 0 }.count
     }
 
+    private var peakDay: (key: String, seconds: Int)? {
+        var bestKey: String? = nil
+        var bestSec = 0
+        for key in monthDayKeys {
+            let sec = timeData.days[key]?.totalSeconds ?? 0
+            if sec > bestSec {
+                bestSec = sec
+                bestKey = key
+            }
+        }
+        guard let k = bestKey, bestSec > 0 else { return nil }
+        return (k, bestSec)
+    }
+
     var body: some View {
+        let peak = peakDay
+        let peakKey = peak?.key
+        let peakSeconds = peak?.seconds ?? 0
+        let monthStr = String(format: "%04d.%02d", year, month)
+
         VStack(alignment: .leading, spacing: 0) {
             TimeKpiStrip(items: [
                 (loc("timeMonthTotal"), TimeLogic.formatDurationShort(monthTotal)),
@@ -395,32 +527,94 @@ struct MonthTimeChart: View {
             ])
 
             VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    if let h = hovered {
-                        Rectangle()
-                            .fill(theme.modelColor(h.interval.model))
-                            .frame(width: 5, height: 5)
-                        Text("\(shortDate(h.dayKey)) · \(TimeLogic.formatClock(h.interval.startSec))–\(TimeLogic.formatClock(h.interval.endSec))")
-                            .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
-                            .foregroundColor(theme.inkPrimary)
-                        Text(TimeLogic.formatDurationShort(h.interval.durationSeconds).uppercased())
-                            .font(.system(size: 9.5, design: .monospaced))
-                            .foregroundColor(theme.accent)
+                if instrumentElevation {
+                    HStack(spacing: 5) {
+                        Text("03.2")
+                            .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                            .foregroundColor(theme.accent.opacity(0.9))
+                        Text("\(loc("timeMonth").uppercased()) CADENCE // \(monthStr)")
+                            .font(.system(size: 8, weight: .regular, design: .monospaced))
+                            .tracking(0.8)
+                            .foregroundColor(theme.inkSecondary)
+
+                        Spacer(minLength: 4)
+
+                        if let h = hovered {
+                            HStack(spacing: 4) {
+                                Rectangle()
+                                    .fill(theme.accent)
+                                    .frame(width: 4, height: 4)
+                                Text("\(shortDate(h.dayKey)) · \(TimeLogic.formatClock(h.interval.startSec))–\(TimeLogic.formatClock(h.interval.endSec)) · \(TimeLogic.formatDurationShort(h.interval.durationSeconds).uppercased())")
+                                    .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                                    .monospacedDigit()
+                                    .foregroundColor(theme.accent)
+                            }
+                        } else if let key = hoveredDayKey {
+                            let total = timeData.days[key]?.totalSeconds ?? 0
+                            HStack(spacing: 4) {
+                                Rectangle()
+                                    .fill(theme.accent)
+                                    .frame(width: 4, height: 4)
+                                Text("\(shortDate(key)) · \(total > 0 ? TimeLogic.formatDurationShort(total).uppercased() : "0M")")
+                                    .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                                    .monospacedDigit()
+                                    .foregroundColor(theme.accent)
+                            }
+                        } else if peakSeconds > 0 {
+                            Text("\(loc("peakTag")) \(TimeLogic.formatDurationShort(peakSeconds).uppercased())")
+                                .font(.system(size: 8, weight: .regular, design: .monospaced))
+                                .monospacedDigit()
+                                .foregroundColor(theme.inkMuted)
+                        }
                     }
-                    Spacer()
+                    .frame(height: 12)
+                } else {
+                    HStack {
+                        if let h = hovered {
+                            Rectangle()
+                                .fill(theme.modelColor(h.interval.model))
+                                .frame(width: 5, height: 5)
+                            Text("\(shortDate(h.dayKey)) · \(TimeLogic.formatClock(h.interval.startSec))–\(TimeLogic.formatClock(h.interval.endSec))")
+                                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                                .foregroundColor(theme.inkPrimary)
+                            Text(TimeLogic.formatDurationShort(h.interval.durationSeconds).uppercased())
+                                .font(.system(size: 9, design: .monospaced))
+                                .foregroundColor(theme.accent)
+                        }
+                        Spacer()
+                    }
+                    .frame(height: 12)
                 }
-                .frame(height: 12)
 
                 weekdayHeader
 
                 VStack(spacing: 2) {
                     ForEach(Array(weeks.enumerated()), id: \.offset) { _, dayKeys in
-                        weekRow(dayKeys: dayKeys)
+                        weekRow(dayKeys: dayKeys, peakKey: peakKey, peakSeconds: peakSeconds)
                     }
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            .padding(.horizontal, instrumentElevation ? 14 : 12)
+            .padding(.top, instrumentElevation ? 10 : 8)
+            .padding(.bottom, instrumentElevation ? 10 : 8)
+
+            if instrumentElevation {
+                HairlineRule(showCrosshairs: false)
+                HStack(spacing: 6) {
+                    Text("* Daily active intervals & relative session elevation")
+                        .font(.system(size: 8.5, weight: .regular, design: .serif))
+                        .italic()
+                        .foregroundColor(theme.inkMuted)
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    Text("FIG. 03")
+                        .font(.system(size: 7.5, weight: .regular, design: .monospaced))
+                        .tracking(0.8)
+                        .foregroundColor(theme.inkMuted.opacity(0.75))
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 6)
+            }
         }
     }
 
@@ -444,7 +638,8 @@ struct MonthTimeChart: View {
                 ZStack(alignment: .leading) {
                     ForEach(0..<7, id: \.self) { i in
                         Text(symbols[i].uppercased())
-                            .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                            .font(.system(size: 7.5, weight: .regular, design: .monospaced))
+                            .tracking(0.6)
                             .foregroundColor(theme.inkMuted)
                             .position(x: dayW * (CGFloat(i) + 0.5), y: 5)
                     }
@@ -455,25 +650,131 @@ struct MonthTimeChart: View {
         }
     }
 
-    private func weekRow(dayKeys: [String]) -> some View {
+    private func weekRow(dayKeys: [String], peakKey: String?, peakSeconds: Int) -> some View {
         let inMonthKeys = dayKeys.filter { $0.hasPrefix(monthPrefix) }
         let total = TimeLogic.totalSeconds(in: timeData.days, dayKeys: inMonthKeys)
+        let containsPeak = (peakKey != nil && inMonthKeys.contains(peakKey!))
         return HStack(spacing: 6) {
             Text(shortDate(dayKeys.first ?? ""))
-                .font(.system(size: 9, design: .monospaced))
-                .foregroundColor(theme.inkSecondary)
+                .font(.system(size: 8.5, weight: .regular, design: .monospaced))
+                .monospacedDigit()
+                .foregroundColor(theme.inkMuted)
                 .frame(width: labelWidth, alignment: .leading)
-            timeline(dayKeys: dayKeys)
+            timeline(dayKeys: dayKeys, peakKey: peakKey, peakSeconds: peakSeconds)
                 .frame(height: rowHeight)
             Text(TimeLogic.formatDurationShort(total).uppercased())
-                .font(.system(size: 9, weight: total > 0 ? .semibold : .regular, design: .monospaced))
-                .foregroundColor(total > 0 ? theme.inkPrimary : theme.inkMuted)
+                .font(.system(size: 8.5, weight: total > 0 ? .medium : .regular, design: .monospaced))
+                .monospacedDigit()
+                .foregroundColor(
+                    (instrumentElevation && containsPeak)
+                        ? theme.accent
+                        : (total > 0 ? theme.inkPrimary : theme.inkMuted)
+                )
                 .frame(width: totalWidth, alignment: .trailing)
         }
         .padding(.vertical, 1)
     }
 
-    private func timeline(dayKeys: [String]) -> some View {
+    @ViewBuilder
+    private func timeline(dayKeys: [String], peakKey: String?, peakSeconds: Int) -> some View {
+        if instrumentElevation {
+            instrumentTimeline(dayKeys: dayKeys, peakKey: peakKey, peakSeconds: peakSeconds)
+        } else {
+            classicTimeline(dayKeys: dayKeys)
+        }
+    }
+
+    private func instrumentTimeline(dayKeys: [String], peakKey: String?, peakSeconds: Int) -> some View {
+        let normDenom = Double(max(3600, peakSeconds))
+        let dayTotals = dayKeys.map { key -> Int in
+            key.hasPrefix(monthPrefix) ? (timeData.days[key]?.totalSeconds ?? 0) : 0
+        }
+        let dayNumbers = dayKeys.map { key -> String in
+            key.hasPrefix(monthPrefix) ? dayNumString(key) : ""
+        }
+        let inMonthFlags = dayKeys.map { $0.hasPrefix(monthPrefix) }
+        let todayIdx = dayKeys.firstIndex(of: todayKey)
+        let peakIdx = peakKey.flatMap { dayKeys.firstIndex(of: $0) }
+        let rowIntervals: [[ActiveInterval]] = dayKeys.map { key in
+            key.hasPrefix(monthPrefix) ? (timeData.days[key]?.intervals ?? []) : []
+        }
+
+        return GeometryReader { geo in
+            let w = geo.size.width
+            let dayW = w / 7.0
+            ZStack {
+                // Static hover-independent Archival Monthly Signal Specimen cells:
+                // deterministic stipple density wash, 24h micro-oscilloscope baseline,
+                // Fred corner brackets + 3x3 accent apex square on peak day, 1.5px top rule on today.
+                StaticMonthRowCanvas(
+                    dayKeys: dayKeys,
+                    dayTotals: dayTotals,
+                    dayNumbers: dayNumbers,
+                    inMonthFlags: inMonthFlags,
+                    todayIdx: todayIdx,
+                    peakIdx: peakIdx,
+                    normDenom: normDenom,
+                    theme: theme
+                )
+                .equatable()
+                .allowsHitTesting(false)
+
+                // Lightweight hover & interval pulse overlay (24h micro-oscilloscope pulse ticks)
+                MonthRowPulseOverlayCanvas(
+                    dayKeys: dayKeys,
+                    rowIntervals: rowIntervals,
+                    inMonthFlags: inMonthFlags,
+                    todayIdx: todayIdx,
+                    peakIdx: peakIdx,
+                    hoveredDayKey: hoveredDayKey,
+                    hoveredIntervalDayKey: hovered?.dayKey,
+                    hoveredInterval: hovered?.interval,
+                    anyHovered: hovered != nil || hoveredDayKey != nil,
+                    theme: theme
+                )
+                .allowsHitTesting(false)
+            }
+            .contentShape(Rectangle())
+            .onContinuousHover(coordinateSpace: .local) { phase in
+                switch phase {
+                case .active(let pt):
+                    guard dayW > 0 else { return }
+                    let idx = min(dayKeys.count - 1, max(0, Int(floor(pt.x / dayW))))
+                    let key = dayKeys[idx]
+                    if key.hasPrefix(monthPrefix) {
+                        if hoveredDayKey != key {
+                            hoveredDayKey = key
+                        }
+                        let cellX = dayW * CGFloat(idx) + 1.0
+                        let cellW = max(0, dayW - 2.0)
+                        let innerX0 = cellX + 2.5
+                        let innerW = max(1.0, cellW - 5.0)
+                        if let hit = Self.hitTestCellInterval(
+                            x: pt.x,
+                            innerX0: innerX0,
+                            innerW: innerW,
+                            intervals: rowIntervals[idx]
+                        ) {
+                            let nextHover = HoveredInterval(dayKey: key, interval: hit)
+                            if hovered != nextHover {
+                                hovered = nextHover
+                            }
+                        } else if let h = hovered, dayKeys.contains(h.dayKey) {
+                            hovered = nil
+                        }
+                    } else {
+                        if let h = hovered, dayKeys.contains(h.dayKey) { hovered = nil }
+                        if let hk = hoveredDayKey, dayKeys.contains(hk) { hoveredDayKey = nil }
+                    }
+                case .ended:
+                    if let h = hovered, dayKeys.contains(h.dayKey) { hovered = nil }
+                    if let hk = hoveredDayKey, dayKeys.contains(hk) { hoveredDayKey = nil }
+                }
+            }
+        }
+    }
+
+    private func classicTimeline(dayKeys: [String]) -> some View {
         GeometryReader { geo in
             let w = geo.size.width
             let dayW = w / 7
@@ -483,56 +784,432 @@ struct MonthTimeChart: View {
                     let isToday = (key == todayKey)
                     let cellW = max(0, dayW - 2)
                     let cellX = dayW * CGFloat(i) + 1
+                    let cellFill: Color = !inMonth
+                        ? theme.hairline.opacity(0.40)
+                        : (isToday ? theme.accentSoft : theme.surface.opacity(0.75))
 
                     Rectangle()
-                        .fill(isToday ? theme.accentSoft : (!inMonth ? theme.hairline.opacity(0.4) : theme.surface.opacity(0.75)))
+                        .fill(cellFill)
                         .frame(width: cellW, height: rowHeight - 2)
                         .overlay(
                             Rectangle()
-                                .strokeBorder(isToday ? theme.accent : theme.hairline.opacity(inMonth ? 0.5 : 0.25), lineWidth: 1)
+                                .strokeBorder(
+                                    isToday ? theme.accent : theme.hairline.opacity(inMonth ? 0.55 : 0.25),
+                                    lineWidth: 1.0
+                                )
                         )
                         .offset(x: cellX)
+                        .allowsHitTesting(false)
 
                     if inMonth {
                         Text(dayNumString(key))
-                            .font(.system(size: 7.5, weight: isToday ? .bold : .regular, design: .monospaced))
+                            .font(.system(size: 7, weight: isToday ? .medium : .regular, design: .monospaced))
                             .foregroundColor(isToday ? theme.accent : theme.inkMuted)
                             .offset(x: cellX + 3, y: -5.5)
+                            .allowsHitTesting(false)
                     }
                 }
 
                 ForEach(Array(dayKeys.enumerated()), id: \.offset) { i, key in
                     if key.hasPrefix(monthPrefix), let day = timeData.days[key] {
-                        if instrumentElevation && day.totalSeconds > 0 {
-                            let hrs = min(1.0, Double(day.totalSeconds) / (8.0 * 3600.0))
-                            let elevH = max(2.0, CGFloat(hrs) * (rowHeight - 4))
-                            let cellW = max(0, dayW - 2)
-                            let cellX = dayW * CGFloat(i) + 1
-                            Rectangle()
-                                .fill(theme.accent.opacity(theme.isDark ? 0.16 : 0.10))
-                                .frame(width: cellW, height: elevH)
-                                .offset(x: cellX, y: (rowHeight - 2 - elevH) * 0.5)
-                                .allowsHitTesting(false)
-                        }
                         ForEach(Array(day.intervals.enumerated()), id: \.offset) { _, interval in
-                            intervalBar(interval, dayKey: key, dayIndex: i, dayWidth: dayW)
+                            classicIntervalBar(interval, dayKey: key, dayIndex: i, dayWidth: dayW)
                         }
                     }
+                }
+            }
+            .contentShape(Rectangle())
+            .onContinuousHover(coordinateSpace: .local) { phase in
+                switch phase {
+                case .active(let pt):
+                    guard dayW > 0 else { return }
+                    let idx = min(dayKeys.count - 1, max(0, Int(floor(pt.x / dayW))))
+                    let key = dayKeys[idx]
+                    if key.hasPrefix(monthPrefix), let day = timeData.days[key] {
+                        let innerX0 = dayW * CGFloat(idx) + 2.0
+                        let innerW = max(1.0, dayW - 4.0)
+                        if let hit = Self.hitTestCellInterval(
+                            x: pt.x,
+                            innerX0: innerX0,
+                            innerW: innerW,
+                            intervals: day.intervals
+                        ) {
+                            hovered = HoveredInterval(dayKey: key, interval: hit)
+                        } else if let h = hovered, dayKeys.contains(h.dayKey) {
+                            hovered = nil
+                        }
+                    } else if let h = hovered, dayKeys.contains(h.dayKey) {
+                        hovered = nil
+                    }
+                case .ended:
+                    if let h = hovered, dayKeys.contains(h.dayKey) { hovered = nil }
                 }
             }
         }
     }
 
-    private func intervalBar(_ interval: ActiveInterval, dayKey: String,
-                             dayIndex: Int, dayWidth: CGFloat) -> some View {
+    private func classicIntervalBar(
+        _ interval: ActiveInterval,
+        dayKey: String,
+        dayIndex: Int,
+        dayWidth: CGFloat
+    ) -> some View {
         let capWidth = max(2, (dayWidth - 4) * CGFloat(max(interval.durationSeconds, 120)) / 86400.0)
         let x = dayWidth * CGFloat(dayIndex) + 2
             + min(max(0, (dayWidth - 4) * CGFloat(interval.startSec) / 86400.0), max(0, dayWidth - 4 - capWidth))
+        let isHovered = (hovered == HoveredInterval(dayKey: dayKey, interval: interval))
+
         return Rectangle()
-            .fill(theme.modelColor(interval.model).opacity(0.92))
-            .frame(width: capWidth, height: 4)
-            .offset(x: x, y: 5)
-            .onHover { h in hovered = h ? HoveredInterval(dayKey: dayKey, interval: interval) : nil }
+            .fill(theme.modelColor(interval.model).opacity(isHovered ? 1.0 : 0.92))
+            .frame(width: capWidth, height: isHovered ? 5 : 3.5)
+            .offset(x: x, y: 5.5)
+            .allowsHitTesting(false)
+    }
+
+    private static func hitTestCellInterval(
+        x: CGFloat,
+        innerX0: CGFloat,
+        innerW: CGFloat,
+        intervals: [ActiveInterval]
+    ) -> ActiveInterval? {
+        guard innerW > 0, !intervals.isEmpty else { return nil }
+        let tol: CGFloat = 2.5
+        var best: ActiveInterval? = nil
+        var bestDist = CGFloat.greatestFiniteMagnitude
+        for interval in intervals {
+            let capW = max(2.0, innerW * CGFloat(max(interval.durationSeconds, 120)) / 86400.0)
+            let bx = innerX0 + min(
+                max(0, innerW * CGFloat(interval.startSec) / 86400.0),
+                max(0, innerW - capW)
+            )
+            if x >= bx - tol && x <= bx + capW + tol {
+                let d = abs(x - (bx + capW * 0.5))
+                if d < bestDist {
+                    bestDist = d
+                    best = interval
+                }
+            }
+        }
+        return best
+    }
+}
+
+/// Hover-independent Archival Monthly Signal Specimen row canvas (Equatable).
+/// Batches cell frames, out-of-month hatch, deterministic stippled density washes,
+/// 24h micro-oscilloscope baselines, today top rule, and peak Fred corner brackets.
+private struct StaticMonthRowCanvas: View, Equatable {
+    let dayKeys: [String]
+    let dayTotals: [Int]
+    let dayNumbers: [String]
+    let inMonthFlags: [Bool]
+    let todayIdx: Int?
+    let peakIdx: Int?
+    let normDenom: Double
+    let theme: AGYTheme
+
+    var body: some View {
+        Canvas { context, size in
+            let count = dayKeys.count
+            guard count > 0 else { return }
+            let dayW = size.width / CGFloat(count)
+            let cellY: CGFloat = 1.0
+            let cellH = max(4.0, size.height - 2.0)
+            let baseY = cellY + cellH - 5.2
+
+            var inMonthCells = Path()
+            var outMonthCells = Path()
+            var outMonthHatch = Path()
+            var cellBorders = Path()
+            var outBorders = Path()
+            var baselines = Path()
+            var denseStipple = Path()
+            var softStipple = Path()
+
+            let stippleStep: CGFloat = 2.35
+
+            for i in 0..<count {
+                let cellX = dayW * CGFloat(i) + 1.0
+                let cellW = max(0, dayW - 2.0)
+                let rect = CGRect(x: cellX, y: cellY, width: cellW, height: cellH)
+                let inMonth = inMonthFlags[i]
+
+                if !inMonth {
+                    outMonthCells.addRect(rect)
+                    outBorders.addRect(rect)
+                    // Delicate diagonal archival hatch for out-of-month cells
+                    let step: CGFloat = 6.0
+                    var hx = cellX - cellH
+                    while hx < cellX + cellW {
+                        let x0 = max(cellX, hx)
+                        let y0 = cellY + cellH - max(0, cellX - hx)
+                        let x1 = min(cellX + cellW, hx + cellH)
+                        let y1 = cellY + max(0, (hx + cellH) - (cellX + cellW))
+                        if x1 > x0 {
+                            outMonthHatch.move(to: CGPoint(x: x0, y: y0))
+                            outMonthHatch.addLine(to: CGPoint(x: x1, y: y1))
+                        }
+                        hx += step
+                    }
+                    continue
+                }
+
+                inMonthCells.addRect(rect)
+                if i != peakIdx {
+                    cellBorders.addRect(rect)
+                }
+
+                // 24h micro-oscilloscope baseline + 12h center calibration tick
+                let lineX0 = cellX + 2.5
+                let lineX1 = cellX + cellW - 2.5
+                if lineX1 > lineX0 {
+                    baselines.move(to: CGPoint(x: lineX0, y: baseY))
+                    baselines.addLine(to: CGPoint(x: lineX1, y: baseY))
+                    let midX = (lineX0 + lineX1) * 0.5
+                    baselines.move(to: CGPoint(x: midX, y: baseY - 1.2))
+                    baselines.addLine(to: CGPoint(x: midX, y: baseY + 1.2))
+                }
+
+                // Deterministic stippled density wash proportional to daily active hours
+                let totalSec = dayTotals[i]
+                if totalSec > 0 && cellW > 4 {
+                    let frac = min(1.0, Double(totalSec) / normDenom)
+                    let seed = Self.daySeed(dayKeys[i])
+                    let cols = Int((cellW - 3.0) / stippleStep)
+                    let maxReach = max(3.5, CGFloat(frac) * (cellH - 8.0))
+                    let rows = Int((cellH - 6.0) / stippleStep)
+
+                    for r in 0...max(0, rows) {
+                        let py = baseY - 1.0 - CGFloat(r) * stippleStep
+                        guard py >= cellY + 2.0 else { break }
+                        let distAboveBase = baseY - py
+                        guard distAboveBase <= maxReach + 4.0 else { break }
+
+                        for c in 0...max(0, cols) {
+                            let px = cellX + 2.0 + CGFloat(c) * stippleStep
+                            guard px <= cellX + cellW - 2.0 else { break }
+                            // Keep top-left day numeral zone optically clear
+                            if px < cellX + 12.5 && py < cellY + 9.5 { continue }
+
+                            let h = Self.stippleHash(seed, c, r)
+                            let jx = (Double(h & 0xFF) / 255.0 - 0.5) * Double(stippleStep) * 0.85
+                            let jy = (Double((h >> 8) & 0xFF) / 255.0 - 0.5) * Double(stippleStep) * 0.85
+                            let gx = px + CGFloat(jx)
+                            let gy = py + CGFloat(jy)
+                            guard gx >= cellX + 1.5, gx <= cellX + cellW - 1.8,
+                                  gy >= cellY + 1.8, gy <= baseY - 0.5 else { continue }
+
+                            let decay = exp(-Double(distAboveBase) / (3.8 + 10.5 * frac))
+                            let prob = min(0.86, decay * (0.26 + 0.58 * frac))
+                            let roll = Double((h >> 16) & 0x3FF) / 1023.0
+                            if roll < prob {
+                                let sz: CGFloat = ((h >> 26) & 1 == 0) ? 0.9 : 1.15
+                                let dotRect = CGRect(x: gx, y: gy, width: sz, height: sz)
+                                if distAboveBase < maxReach * 0.55 {
+                                    denseStipple.addRect(dotRect)
+                                } else {
+                                    softStipple.addRect(dotRect)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Batched fills & strokes (zero per-cell / per-dot draw loops)
+            if !outMonthCells.isEmpty {
+                context.fill(outMonthCells, with: .color(theme.hairline.opacity(0.14)))
+                context.stroke(outMonthHatch, with: .color(theme.hairline.opacity(0.30)), lineWidth: 0.5)
+                context.stroke(outBorders, with: .color(theme.hairline.opacity(0.28)), lineWidth: 0.55)
+            }
+            if !inMonthCells.isEmpty {
+                context.fill(inMonthCells, with: .color(theme.surface.opacity(theme.isDark ? 0.24 : 0.38)))
+            }
+            if !softStipple.isEmpty {
+                context.fill(softStipple, with: .color(theme.inkSecondary.opacity(theme.isDark ? 0.28 : 0.22)))
+            }
+            if !denseStipple.isEmpty {
+                context.fill(denseStipple, with: .color(theme.inkPrimary.opacity(theme.isDark ? 0.40 : 0.34)))
+            }
+            if !baselines.isEmpty {
+                context.stroke(baselines, with: .color(theme.hairlineStrong.opacity(0.55)), lineWidth: 0.55)
+            }
+            if !cellBorders.isEmpty {
+                context.stroke(cellBorders, with: .color(theme.hairline.opacity(0.58)), lineWidth: 0.65)
+            }
+
+            // Today: clean 1.5px top theme.accent rule
+            if let ti = todayIdx, ti < count, inMonthFlags[ti] {
+                let cellX = dayW * CGFloat(ti) + 1.0
+                let cellW = max(0, dayW - 2.0)
+                context.fill(
+                    Path(CGRect(x: cellX, y: cellY, width: cellW, height: 1.5)),
+                    with: .color(theme.accent)
+                )
+            }
+
+            // Peak day: crisp 0.85pt Fred corner brackets ┌ ┐ └ ┘ + 3x3px theme.accent apex square
+            if let pi = peakIdx, pi < count, inMonthFlags[pi] {
+                let cellX = dayW * CGFloat(pi) + 1.0
+                let cellW = max(0, dayW - 2.0)
+                let minX = cellX
+                let maxX = cellX + cellW
+                let minY = cellY
+                let maxY = cellY + cellH
+                let arm: CGFloat = 4.2
+
+                // Faint interior hairline frame behind brackets
+                context.stroke(
+                    Path(CGRect(x: minX, y: minY, width: cellW, height: cellH)),
+                    with: .color(theme.hairline.opacity(0.45)),
+                    lineWidth: 0.55
+                )
+
+                var brackets = Path()
+                // ┌
+                brackets.move(to: CGPoint(x: minX, y: minY + arm))
+                brackets.addLine(to: CGPoint(x: minX, y: minY))
+                brackets.addLine(to: CGPoint(x: minX + arm, y: minY))
+                // ┐
+                brackets.move(to: CGPoint(x: maxX - arm, y: minY))
+                brackets.addLine(to: CGPoint(x: maxX, y: minY))
+                brackets.addLine(to: CGPoint(x: maxX, y: minY + arm))
+                // └
+                brackets.move(to: CGPoint(x: minX, y: maxY - arm))
+                brackets.addLine(to: CGPoint(x: minX, y: maxY))
+                brackets.addLine(to: CGPoint(x: minX + arm, y: maxY))
+                // ┘
+                brackets.move(to: CGPoint(x: maxX - arm, y: maxY))
+                brackets.addLine(to: CGPoint(x: maxX, y: maxY))
+                brackets.addLine(to: CGPoint(x: maxX, y: maxY - arm))
+
+                context.stroke(brackets, with: .color(theme.accent), lineWidth: 0.85)
+
+                // 3x3px theme.accent apex square in top-right corner
+                context.fill(
+                    Path(CGRect(x: maxX - 5.5, y: minY + 2.8, width: 3.0, height: 3.0)),
+                    with: .color(theme.accent)
+                )
+            }
+
+            // Crisp day numbers anchored top-left
+            for i in 0..<count where inMonthFlags[i] {
+                let cellX = dayW * CGFloat(i) + 1.0
+                let isSpecial = (i == todayIdx || i == peakIdx)
+                let label = Text(dayNumbers[i])
+                    .font(.system(size: 7, weight: isSpecial ? .medium : .regular, design: .monospaced))
+                    .foregroundColor(isSpecial ? theme.accent : theme.inkMuted)
+                context.draw(label, at: CGPoint(x: cellX + 3.0, y: cellY + 2.2), anchor: .topLeading)
+            }
+        }
+    }
+
+    private static func daySeed(_ key: String) -> Int {
+        var h = 5381
+        for b in key.utf8 {
+            h = ((h << 5) &+ h) &+ Int(b)
+        }
+        return h
+    }
+
+    private static func stippleHash(_ seed: Int, _ x: Int, _ y: Int) -> UInt32 {
+        var h = UInt32(truncatingIfNeeded: seed &* 83492791 ^ x &* 374761393 ^ y &* 668265263)
+        h = (h ^ (h >> 13)) &* 1274126177
+        return h ^ (h >> 16)
+    }
+}
+
+/// Lightweight dynamic pulse-tick overlay for Month Cadence (Instrument mode).
+/// Batches 24h micro-oscilloscope interval traces and hover accent highlight.
+private struct MonthRowPulseOverlayCanvas: View {
+    let dayKeys: [String]
+    let rowIntervals: [[ActiveInterval]]
+    let inMonthFlags: [Bool]
+    let todayIdx: Int?
+    let peakIdx: Int?
+    let hoveredDayKey: String?
+    let hoveredIntervalDayKey: String?
+    let hoveredInterval: ActiveInterval?
+    let anyHovered: Bool
+    let theme: AGYTheme
+
+    var body: some View {
+        Canvas { context, size in
+            let count = dayKeys.count
+            guard count > 0 else { return }
+            let dayW = size.width / CGFloat(count)
+            let cellY: CGFloat = 1.0
+            let cellH = max(4.0, size.height - 2.0)
+            let baseY = cellY + cellH - 5.2
+
+            var normalBars = Path()
+            var normalTicks = Path()
+            var accentBars = Path()
+            var accentTicks = Path()
+
+            for i in 0..<count where inMonthFlags[i] {
+                let key = dayKeys[i]
+                let cellX = dayW * CGFloat(i) + 1.0
+                let cellW = max(0, dayW - 2.0)
+                let innerX0 = cellX + 2.5
+                let innerW = max(1.0, cellW - 5.0)
+                let isHoveredDay = (hoveredDayKey == key)
+
+                if isHoveredDay {
+                    context.stroke(
+                        Path(CGRect(x: cellX, y: cellY, width: cellW, height: cellH)),
+                        with: .color(theme.accent.opacity(0.55)),
+                        lineWidth: 0.85
+                    )
+                }
+
+                for interval in rowIntervals[i] {
+                    let iw = max(1.8, innerW * CGFloat(max(interval.durationSeconds, 120)) / 86400.0)
+                    let ix = innerX0 + min(
+                        max(0, innerW * CGFloat(interval.startSec) / 86400.0),
+                        max(0, innerW - iw)
+                    )
+                    let isHoveredExact = (hoveredIntervalDayKey == key && hoveredInterval == interval)
+                    let isDayFocused = (hoveredInterval == nil && isHoveredDay)
+                    let isAccent = isHoveredExact || isDayFocused
+
+                    let pulseH: CGFloat = isHoveredExact ? 3.2 : 2.2
+                    let tickTop = baseY - (isHoveredExact ? 5.2 : 4.2)
+                    let tickBot = baseY + 1.4
+                    let barRect = CGRect(x: ix, y: baseY - pulseH, width: iw, height: pulseH)
+
+                    if isAccent {
+                        accentBars.addRect(barRect)
+                        accentTicks.move(to: CGPoint(x: ix + 0.4, y: tickTop))
+                        accentTicks.addLine(to: CGPoint(x: ix + 0.4, y: tickBot))
+                        if iw >= 3.2 {
+                            accentTicks.move(to: CGPoint(x: ix + iw - 0.4, y: tickTop))
+                            accentTicks.addLine(to: CGPoint(x: ix + iw - 0.4, y: tickBot))
+                        }
+                    } else {
+                        normalBars.addRect(barRect)
+                        normalTicks.move(to: CGPoint(x: ix + 0.4, y: tickTop))
+                        normalTicks.addLine(to: CGPoint(x: ix + 0.4, y: tickBot))
+                        if iw >= 3.2 {
+                            normalTicks.move(to: CGPoint(x: ix + iw - 0.4, y: tickTop))
+                            normalTicks.addLine(to: CGPoint(x: ix + iw - 0.4, y: tickBot))
+                        }
+                    }
+                }
+            }
+
+            if !normalBars.isEmpty {
+                let alpha: Double = anyHovered ? 0.28 : 0.82
+                context.fill(normalBars, with: .color(theme.inkPrimary.opacity(alpha)))
+                context.stroke(normalTicks, with: .color(theme.inkPrimary.opacity(min(0.95, alpha + 0.12))), lineWidth: 0.75)
+            }
+            if !accentBars.isEmpty {
+                if theme.isDark {
+                    context.stroke(accentTicks, with: .color(theme.accent.opacity(0.28)), lineWidth: 2.6)
+                }
+                context.fill(accentBars, with: .color(theme.accent))
+                context.stroke(accentTicks, with: .color(theme.accent), lineWidth: 0.9)
+            }
+        }
     }
 }
 
@@ -563,11 +1240,13 @@ struct YearHeatmap: View {
                     Text(loc("loadFailed"))
                         .font(.system(size: 10.5, design: .monospaced)).foregroundColor(theme.inkSecondary)
                     Text(loc("retry").uppercased())
-                        .font(.system(size: 10, weight: .bold, design: .monospaced))
-                        .foregroundColor(theme.invertedInk)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .background(theme.invertedBg)
+                        .font(.system(size: 9, weight: .medium, design: .monospaced))
+                        .tracking(0.8)
+                        .foregroundColor(theme.accent)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(theme.surfaceRaised.opacity(theme.isDark ? 0.35 : 0.55))
+                        .overlay(Rectangle().stroke(theme.accent.opacity(0.6), lineWidth: 0.75))
                         .contentShape(Rectangle())
                         .onTapGesture { store.loadYearTime(store.viewingTimeYear, force: true) }
                 }
@@ -647,12 +1326,7 @@ struct YearHeatmap: View {
     }
 
     private func displayDate(_ dayKey: String) -> String {
-        guard let date = TimeLogic.date(fromDayKey: dayKey) else { return dayKey }
-        let df = DateFormatter()
-        df.dateStyle = .medium
-        df.timeStyle = .none
-        df.locale = Locale(identifier: loc.language.rawValue)
-        return df.string(from: date)
+        TimeDateFormatters.displayDate(dayKey, languageCode: loc.language.rawValue)
     }
 
     private func grid(_ days: [String: Int]) -> some View {

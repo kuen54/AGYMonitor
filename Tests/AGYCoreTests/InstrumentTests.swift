@@ -203,4 +203,52 @@ struct InstrumentTests {
             #expect(node.pos.y >= 0.18 && node.pos.y <= 0.82)
         }
     }
+
+    @Test("Deterministic hit-testing selects exact Borehole stratum, Flow label, Radar node, and Year cell")
+    func deterministicHitTesting() {
+        // 1. Borehole stratum hit-test: top hits carbon, middle hits hydrogen, bottom hits claude
+        let slices = InstrumentMath.buildBoreholeSlices(
+            items: [("carbon", 15.2), ("argon", 3.4), ("neon", 4.4), ("hydrogen", 8.0), ("claude", 4.9)],
+            minSliceFraction: 0.085
+        )
+        #expect(InstrumentMath.hitTestBoreholeSlice(normalizedY: 0.02, slices: slices) == "carbon")
+        #expect(InstrumentMath.hitTestBoreholeSlice(normalizedY: slices[0].midY, slices: slices) == "carbon")
+        #expect(InstrumentMath.hitTestBoreholeSlice(normalizedY: slices[3].midY, slices: slices) == "hydrogen")
+        #expect(InstrumentMath.hitTestBoreholeSlice(normalizedY: 0.99, slices: slices) == "claude")
+        #expect(InstrumentMath.hitTestBoreholeSlice(normalizedY: -0.1, slices: slices) == nil)
+        #expect(InstrumentMath.hitTestBoreholeSlice(normalizedY: 1.2, slices: slices) == nil)
+
+        // 2. Relaxed flow label centers hit-test
+        let centers = [14.0, 44.0, 74.0, 104.0]
+        let ids = ["carbon", "hydrogen", "claude", "flash"]
+        #expect(InstrumentMath.hitTestLabelCenters(y: 12.0, centers: centers, ids: ids) == "carbon")
+        #expect(InstrumentMath.hitTestLabelCenters(y: 46.0, centers: centers, ids: ids) == "hydrogen")
+        #expect(InstrumentMath.hitTestLabelCenters(y: 105.0, centers: centers, ids: ids) == "flash")
+        #expect(InstrumentMath.hitTestLabelCenters(y: 140.0, centers: centers, ids: ids, maxDistance: 10.0) == nil)
+
+        // 3. Radar node nearest hit-test
+        let s1 = SessionInfo(pid: 1, sessionId: "a", cwd: "/dev/a", status: .busy, entrypoint: "cli")
+        let s2 = SessionInfo(pid: 2, sessionId: "b", cwd: "/dev/b", status: .waiting, entrypoint: "cli")
+        let radar = InstrumentMath.buildSessionRadarLayout(sessions: [s1, s2], labels: [:])
+        let target = radar.nodes[0]
+        let hit = InstrumentMath.hitTestRadarNode(
+            x: target.pos.x * 392.0 + 3.0,
+            y: target.pos.y * 152.0 - 2.0,
+            width: 392.0,
+            height: 152.0,
+            nodes: radar.nodes,
+            maxRadius: 18.0
+        )
+        #expect(hit?.id == target.id)
+        let miss = InstrumentMath.hitTestRadarNode(
+            x: 0.0, y: 0.0, width: 392.0, height: 152.0, nodes: radar.nodes, maxRadius: 8.0
+        )
+        #expect(miss == nil)
+
+        // 4. Year contour cell accounts for padY
+        let topCell = InstrumentMath.yearContourCell(x: 200.0, y: 16.0, width: 392.0, height: 184.0, padY: 16.0)
+        #expect(topCell?.row == 0)
+        let botCell = InstrumentMath.yearContourCell(x: 200.0, y: 167.0, width: 392.0, height: 184.0, padY: 16.0)
+        #expect(botCell?.row == 6)
+    }
 }

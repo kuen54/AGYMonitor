@@ -722,23 +722,36 @@ public enum InstrumentMath {
             return ContourFieldResult(levels: [], peaks: [], maxHours: 0)
         }
 
-        // Upsample Y 2x + zero border pad so Marching Squares contours form closed topographic loops
-        let cols = colsRaw + 2   // 55: interior 1...53
-        let rows = 15            // interior 1...13 maps Y 0...6 at 0.5 row steps
+        // Upsample 2x in X (106 interior) and 4x in Y (27 interior) + 1-cell zero border pad
+        // -> 108×29 scalar field so Marching Squares contours form smooth closed topographic loops.
+        let innerCols = colsRaw * 2          // 106
+        let innerRows = 27                   // 27 interior rows (29 with zero border)
+        let cols = innerCols + 2             // 108
+        let rows = innerRows + 2             // 29
         var field = Array(repeating: Array(repeating: 0.0, count: cols), count: rows)
-        for c in 0..<colsRaw {
-            for yr in 0..<13 {
-                let fy = Double(yr) * 0.5
-                let r0 = min(rowsRaw - 1, Int(floor(fy)))
-                let r1 = min(rowsRaw - 1, r0 + 1)
-                let frac = fy - Double(r0)
-                let val = rawGrid[r0][c] * (1.0 - frac) + rawGrid[r1][c] * frac
-                field[yr + 1][c + 1] = val
+        let maxRawCol = Double(colsRaw - 1)
+        let maxRawRow = Double(rowsRaw - 1)
+
+        for yr in 0..<innerRows {
+            let fy = min(maxRawRow, max(0.0, ((Double(yr) + 0.5) / Double(innerRows)) * Double(rowsRaw) - 0.5))
+            let r0 = min(rowsRaw - 1, Int(floor(fy)))
+            let r1 = min(rowsRaw - 1, r0 + 1)
+            let fr = fy - Double(r0)
+            let oneMinusFr = 1.0 - fr
+
+            for xc in 0..<innerCols {
+                let fx = min(maxRawCol, max(0.0, ((Double(xc) + 0.5) / Double(innerCols)) * Double(colsRaw) - 0.5))
+                let c0 = min(colsRaw - 1, Int(floor(fx)))
+                let c1 = min(colsRaw - 1, c0 + 1)
+                let fc = fx - Double(c0)
+                let top = rawGrid[r0][c0] * (1.0 - fc) + rawGrid[r0][c1] * fc
+                let bot = rawGrid[r1][c0] * (1.0 - fc) + rawGrid[r1][c1] * fc
+                field[yr + 1][xc + 1] = top * oneMinusFr + bot * fr
             }
         }
 
-        // Two separable smoothing passes keeping zero perimeter intact
-        field = smoothField(field, passes: 2)
+        // Three separable Gaussian-like smoothing passes keeping zero perimeter intact
+        field = smoothField(field, passes: 3)
 
         var smoothPeak = 0.0
         for row in field {
@@ -749,7 +762,9 @@ public enum InstrumentMath {
         }
 
         let ratios: [Double] = (0..<levelCount).map { idx in
-            0.16 + (0.68 * Double(idx)) / Double(max(1, levelCount - 1))
+            levelCount == 1
+                ? 0.5
+                : 0.12 + (0.78 * Double(idx)) / Double(levelCount - 1)
         }
 
         var levels: [ContourLevel] = []
@@ -1040,5 +1055,85 @@ public enum InstrumentMath {
         case .shell:   return 3
         case .unknown: return 4
         }
+    }
+
+    // MARK: - 6. Deterministic Geometric Hit-Testing (Hover & Tap Accuracy)
+
+    /// Exact borehole stratum hit-test from normalized vertical position `ny ∈ [0, 1]`.
+    public static func hitTestBoreholeSlice(
+        normalizedY: Double,
+        slices: [BoreholeSlice]
+    ) -> String? {
+        guard !slices.isEmpty, normalizedY >= 0.0, normalizedY <= 1.0 else { return nil }
+        for (idx, slice) in slices.enumerated() {
+            let isLast = (idx == slices.count - 1)
+            if normalizedY >= slice.yStart && (normalizedY < slice.yEnd || (isLast && normalizedY <= slice.yEnd)) {
+                return slice.id
+            }
+        }
+        return slices.last?.id
+    }
+
+    /// Nearest vertical label hit-test (used by FoldedTokenFlowChart relaxed left/right label columns).
+    public static func hitTestLabelCenters(
+        y: Double,
+        centers: [Double],
+        ids: [String],
+        maxDistance: Double = 11.0
+    ) -> String? {
+        let count = min(centers.count, ids.count)
+        guard count > 0, maxDistance > 0 else { return nil }
+        var bestId: String? = nil
+        var bestDist = maxDistance
+        for i in 0..<count {
+            let d = abs(y - centers[i])
+            if d <= bestDist {
+                bestDist = d
+                bestId = ids[i]
+            }
+        }
+        return bestId
+    }
+
+    /// Nearest radar node hit-test in viewport pixel space.
+    public static func hitTestRadarNode(
+        x: Double,
+        y: Double,
+        width: Double,
+        height: Double,
+        nodes: [RadarNode],
+        maxRadius: Double = 18.0
+    ) -> RadarNode? {
+        guard width > 0, height > 0, maxRadius > 0, !nodes.isEmpty else { return nil }
+        var best: RadarNode? = nil
+        var bestDist = maxRadius
+        for node in nodes {
+            let nx = node.pos.x * width
+            let ny = node.pos.y * height
+            let d = hypot(x - nx, y - ny)
+            if d <= bestDist {
+                bestDist = d
+                best = node
+            }
+        }
+        return best
+    }
+
+    /// Map pointer coordinates inside the Year Topographic Contour plot (respecting `padY`)
+    /// to `(col ∈ 0...52, row ∈ 0...6, normX ∈ [0,1], normY ∈ [0,1])`.
+    public static func yearContourCell(
+        x: Double,
+        y: Double,
+        width: Double,
+        height: Double,
+        padY: Double
+    ) -> (col: Int, row: Int, normX: Double, normY: Double)? {
+        guard width > 0, height > 0 else { return nil }
+        let innerH = max(1.0, height - padY * 2.0)
+        let nx = min(0.9999, max(0.0, x / width))
+        let ny = min(0.9999, max(0.0, (y - padY) / innerH))
+        let col = min(52, max(0, Int(nx * 53.0)))
+        let row = min(6, max(0, Int(ny * 7.0)))
+        return (col: col, row: row, normX: nx, normY: ny)
     }
 }

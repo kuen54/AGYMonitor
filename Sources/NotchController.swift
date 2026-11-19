@@ -154,7 +154,8 @@ final class NotchInstance {
     var state: NotchState
     var openWork: DispatchWorkItem?
     var closeWork: DispatchWorkItem?
-    var sizeObserver: AnyCancellable?
+    var lastPointerSample: NotchPointerSample? = nil
+    var lastOnClickableWing: Bool = false
 
     init(panel: NotchPanel, screen: NotchScreen, isFullscreen: Bool = false) {
         self.panel = panel
@@ -272,6 +273,9 @@ final class NotchController: NSObject {
                 guard let self = self, let inst = inst else { return }
                 self.dispatch(inst, event: .explicitClose)
             }
+            inst.vm.onContentSizeChanged = { [weak self] in
+                self?.applyPanelState()
+            }
 
             let host = FirstMouseHostingView(rootView: NotchRootView(store: store, sessionStore: store.sessionStore, vm: inst.vm, onQuit: onQuit))
             host.translatesAutoresizingMaskIntoConstraints = true
@@ -285,18 +289,13 @@ final class NotchController: NSObject {
             panel.enableFullscreenFloat()
 
             instances[id] = inst
-
-            inst.sizeObserver = inst.vm.$contentSize
-                .dropFirst()
-                .removeDuplicates()
-                .sink { [weak self] _ in self?.applyPanelState() }
         }
         applyPanelState()
     }
 
     private func teardownAll() {
         for inst in instances.values {
-            inst.sizeObserver?.cancel(); inst.sizeObserver = nil
+            inst.vm.onContentSizeChanged = nil
             inst.openWork?.cancel()
             inst.closeWork?.cancel()
             inst.panel.disableFullscreenFloat()
@@ -417,6 +416,15 @@ final class NotchController: NSObject {
         let mouse = NSEvent.mouseLocation
         for inst in instances.values {
             let sample = pointerSample(for: inst, mouse: mouse)
+            let onWing: Bool = !inst.state.isOpen
+                && inst.vm.activeWing != nil
+                && sample.onScreen
+                && hit(mouse, closedWingRect(inst))
+            if sample == inst.lastPointerSample && onWing == inst.lastOnClickableWing {
+                continue
+            }
+            inst.lastPointerSample = sample
+            inst.lastOnClickableWing = onWing
             dispatch(inst, event: .pointerMoved(sample), pointer: sample, mouse: mouse)
         }
     }
@@ -579,10 +587,16 @@ final class NotchController: NSObject {
             && pointer.onScreen
             && hit(mouse, closedWingRect(inst))
         setVisible(inst, pres.visible)
-        inst.panel.ignoresMouseEvents = pres.ignoresMouseEvents && !onClickableWing
+        let nextIgnores = pres.ignoresMouseEvents && !onClickableWing
+        if inst.panel.ignoresMouseEvents != nextIgnores {
+            inst.panel.ignoresMouseEvents = nextIgnores
+        }
     }
 
     private func setVisible(_ inst: NotchInstance, _ visible: Bool) {
+        if inst.vm.isPanelShown != visible {
+            inst.vm.isPanelShown = visible
+        }
         let target: CGFloat = visible ? 1 : 0
         guard abs(inst.panel.alphaValue - target) > 0.001 else { return }
         if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {

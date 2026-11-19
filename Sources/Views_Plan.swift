@@ -1,10 +1,10 @@
 import SwiftUI
 import AppKit
 
-// Plan tab: Single-plane dual-track quota instruments with 60-tick Vernier Scale
-// & calibrated `▼` Pace Marker, plus flush 3-column AI Credits matrix.
+// Plan Tab (FIG. 05): Specimen account header, dual drafting protractor gauges (or classic
+// 60-tick vernier tracks), flush 3-column AI Credits pool ledger, and editorial colophon.
 
-// MARK: - Quota Track Row
+// MARK: - Quota Track Row (Classic Mode & Custom Scoped Limits)
 
 private struct QuotaTrackRow: View {
     let label: String
@@ -18,15 +18,6 @@ private struct QuotaTrackRow: View {
     private var remaining: Int { max(0, 100 - usedPercent) }
     private var remainingFraction: CGFloat { max(0, min(1, CGFloat(remaining) / 100.0)) }
 
-    private var pace: QuotaPaceSnapshot? {
-        QuotaPaceLogic.compute(
-            usedPercent: usedPercent,
-            resetAt: resetAt,
-            windowDurationSeconds: windowDurationSeconds,
-            now: Date()
-        )
-    }
-
     private var statusColor: Color {
         switch remaining {
         case 30...:   return theme.accent
@@ -36,26 +27,58 @@ private struct QuotaTrackRow: View {
     }
 
     var body: some View {
+        let currentPace = QuotaPaceLogic.compute(
+            usedPercent: usedPercent,
+            resetAt: resetAt,
+            windowDurationSeconds: windowDurationSeconds,
+            now: Date()
+        )
+
         VStack(alignment: .leading, spacing: 5) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Text(label.uppercased())
-                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .font(.system(size: 8.5, weight: .medium, design: .monospaced))
+                    .tracking(0.6)
                     .foregroundColor(theme.inkSecondary)
 
                 Spacer(minLength: 4)
 
-                if let p = pace {
-                    let sign = p.paceDeltaPercent > 0 ? "+\(p.paceDeltaPercent)%" : "\(p.paceDeltaPercent)%"
+                if let p = currentPace {
+                    let sign = p.paceDeltaPercent > 0
+                        ? "+\(p.paceDeltaPercent)%"
+                        : (p.paceDeltaPercent < 0 ? "−\(abs(p.paceDeltaPercent))%" : "0%")
                     let paceLabel = String(format: loc("planPaceFmt"), sign)
-                    Text(p.isOverPaceWarning ? "▲ \(paceLabel)" : paceLabel)
-                        .font(.system(size: 8.5, weight: p.isOverPaceWarning ? .bold : .medium, design: .monospaced))
-                        .foregroundColor(p.isOverPaceWarning ? theme.signalAmber : theme.inkSecondary)
+                    if p.isOverPaceWarning {
+                        HStack(spacing: 3.5) {
+                            Rectangle()
+                                .fill(theme.signalAmber)
+                                .frame(width: 4.5, height: 4.5)
+                                .rotationEffect(.degrees(45))
+                            Text(paceLabel)
+                                .font(.system(size: 7.5, weight: .medium, design: .monospaced))
+                                .monospacedDigit()
+                                .foregroundColor(theme.signalAmber)
+                        }
+                        .padding(.horizontal, 4.5)
+                        .padding(.vertical, 1.5)
+                        .background(theme.signalAmber.opacity(theme.isDark ? 0.11 : 0.08))
+                        .overlay(
+                            Rectangle()
+                                .strokeBorder(theme.signalAmber.opacity(0.5), lineWidth: 0.75)
+                        )
+                    } else {
+                        Text(paceLabel)
+                            .font(.system(size: 8, weight: .regular, design: .monospaced))
+                            .monospacedDigit()
+                            .foregroundColor(theme.inkSecondary)
+                    }
                 }
 
                 if let r = resetAt {
                     Text(String(format: loc("planResetShortFmt"), formatQuotaResetDuration(r).uppercased()))
-                        .font(.system(size: 9, weight: .medium, design: .monospaced))
-                        .foregroundColor(theme.inkSecondary)
+                        .font(.system(size: 8, weight: .regular, design: .monospaced))
+                        .monospacedDigit()
+                        .foregroundColor(theme.inkMuted)
                 }
             }
 
@@ -64,11 +87,12 @@ private struct QuotaTrackRow: View {
                     whole: "\(remaining)",
                     suffix: "% LEFT",
                     size: 24,
+                    weight: .ultraLight,
                     accentPrimary: remaining < 30 ? statusColor : nil
                 )
                 Spacer()
                 Text(String(format: loc("subUsedFmt"), usedPercent).uppercased())
-                    .font(.system(size: 9, design: .monospaced))
+                    .font(.system(size: 8.5, weight: .regular, design: .monospaced))
                     .monospacedDigit()
                     .foregroundColor(theme.inkMuted)
             }
@@ -76,8 +100,8 @@ private struct QuotaTrackRow: View {
             VernierScaleBar(
                 fraction: remainingFraction,
                 fillColor: statusColor,
-                paceMarkerFraction: pace.map { CGFloat($0.expectedRemainingFraction) },
-                paceWarning: pace?.isOverPaceWarning == true,
+                paceMarkerFraction: currentPace.map { CGFloat($0.expectedRemainingFraction) },
+                paceWarning: currentPace?.isOverPaceWarning == true,
                 ticks: 60
             )
         }
@@ -87,19 +111,26 @@ private struct QuotaTrackRow: View {
 // MARK: - Plan Family Header (Bare Monospace Codes, Zero Skittles)
 
 struct FamilySectionHeader: View {
+    var indexTag: String? = nil
     let title: String
     let codes: String
     @Environment(\.agyTheme) private var theme
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 5) {
+            if let tag = indexTag {
+                Text(tag)
+                    .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                    .foregroundColor(theme.accent.opacity(0.9))
+            }
             Text(title)
-                .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                .font(.system(size: 8.5, weight: .medium, design: .monospaced))
                 .tracking(0.6)
                 .foregroundColor(theme.inkPrimary)
             Spacer()
             Text(codes)
-                .font(.system(size: 8.5, weight: .medium, design: .monospaced))
+                .font(.system(size: 7.5, weight: .regular, design: .monospaced))
+                .tracking(0.4)
                 .foregroundColor(theme.inkMuted)
         }
     }
@@ -126,27 +157,48 @@ struct PlanAccountStrip: View {
     @Environment(\.agyTheme) private var theme
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 5) {
+            Text("05.")
+                .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
+                .foregroundColor(theme.accent)
+
             if let mail = email?.trimmingCharacters(in: .whitespacesAndNewlines), !mail.isEmpty {
                 Text("USER // \(mail)")
-                    .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                    .font(.system(size: 8.5, weight: .regular, design: .monospaced))
+                    .tracking(0.6)
                     .foregroundColor(theme.inkSecondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
+
             Spacer(minLength: 4)
+
             if isOfflineCached {
-                Text(loc("subOfflineCached").uppercased())
-                    .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
-                    .foregroundColor(theme.signalAmber)
+                HStack(spacing: 4) {
+                    Rectangle()
+                        .fill(theme.signalAmber)
+                        .frame(width: 4.5, height: 4.5)
+                        .rotationEffect(.degrees(45))
+                    Text(loc("subOfflineCached").uppercased())
+                        .font(.system(size: 7.5, weight: .medium, design: .monospaced))
+                        .tracking(0.6)
+                        .foregroundColor(theme.signalAmber)
+                }
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(theme.signalAmber.opacity(theme.isDark ? 0.11 : 0.08))
+                .overlay(
+                    Rectangle()
+                        .strokeBorder(theme.signalAmber.opacity(0.5), lineWidth: 0.75)
+                )
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 7)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
     }
 }
 
-// MARK: - AI Credits Matrix Section
+// MARK: - AI Credits Matrix Section (05.3 Pool Ledger)
 
 struct AICreditsSection: View {
     let promptCredits: Int?
@@ -168,43 +220,89 @@ struct AICreditsSection: View {
         if !items.isEmpty {
             VStack(alignment: .leading, spacing: 0) {
                 HStack(spacing: 5) {
-                    Image(systemName: "sparkles")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundColor(theme.accent)
+                    Text("05.3")
+                        .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                        .foregroundColor(theme.accent.opacity(0.9))
                     Text(loc("subCreditsTitle").uppercased())
-                        .font(.system(size: 9.5, weight: .bold, design: .monospaced))
-                        .tracking(0.6)
-                        .foregroundColor(theme.inkPrimary)
-                    Spacer()
+                        .font(.system(size: 8, weight: .regular, design: .monospaced))
+                        .tracking(0.8)
+                        .foregroundColor(theme.inkSecondary)
+                    Spacer(minLength: 4)
+                    Text("POOL LEDGER")
+                        .font(.system(size: 7.5, weight: .regular, design: .monospaced))
+                        .tracking(0.7)
+                        .foregroundColor(theme.inkMuted)
                 }
-                .padding(.horizontal, 12)
+                .padding(.horizontal, 14)
                 .padding(.vertical, 7)
 
                 Rectangle().fill(theme.hairline).frame(height: 1)
 
+                let maxPool = items.map(\.value).max() ?? 0
+                let largestIdx: Int? = maxPool > 0 ? items.firstIndex(where: { $0.value == maxPool }) : nil
+
                 HStack(spacing: 0) {
                     ForEach(Array(items.enumerated()), id: \.offset) { idx, pool in
-                        VStack(alignment: .leading, spacing: 2) {
+                        let ratio: CGFloat = maxPool > 0
+                            ? max(0, min(1, CGFloat(pool.value) / CGFloat(maxPool)))
+                            : 0
+                        let isLargest = (idx == largestIdx)
+
+                        VStack(alignment: .leading, spacing: 5) {
                             Text(pool.label.uppercased())
-                                .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
+                                .font(.system(size: 7.5, weight: .regular, design: .monospaced))
+                                .tracking(0.8)
                                 .foregroundColor(theme.inkMuted)
                             Text(formatNumber(pool.value))
-                                .font(.system(size: 14, weight: .bold, design: .monospaced))
+                                .font(.system(size: 21, weight: .ultraLight, design: .monospaced))
                                 .monospacedDigit()
                                 .foregroundColor(theme.inkPrimary)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.8)
+                            CreditHorizonHairline(
+                                ratio: ratio,
+                                fillColor: isLargest ? theme.accent : theme.inkSecondary.opacity(0.45),
+                                trackColor: theme.hairline.opacity(theme.isDark ? 0.80 : 0.85)
+                            )
+                            .equatable()
+                            .padding(.top, 1)
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 9)
 
                         if idx < items.count - 1 {
-                            Rectangle().fill(theme.hairline).frame(width: 1)
+                            Rectangle().fill(theme.hairline.opacity(0.85)).frame(width: 1)
                         }
                     }
                 }
                 .fixedSize(horizontal: false, vertical: true)
             }
         }
+    }
+}
+
+private struct CreditHorizonHairline: View, Equatable {
+    let ratio: CGFloat
+    let fillColor: Color
+    let trackColor: Color
+
+    var body: some View {
+        let clamped = max(0, min(1, ratio))
+        Canvas { context, size in
+            context.fill(
+                Path(CGRect(x: 0, y: 0, width: size.width, height: size.height)),
+                with: .color(trackColor)
+            )
+            if clamped > 0 {
+                let fillW = min(size.width, max(2.0, size.width * clamped))
+                context.fill(
+                    Path(CGRect(x: 0, y: 0, width: fillW, height: size.height)),
+                    with: .color(fillColor)
+                )
+            }
+        }
+        .frame(height: 1.5)
     }
 }
 
@@ -222,6 +320,14 @@ struct SubscriptionView: View {
         return trimmed
     }
 
+    private func stripLeadingIndexPrefix(_ raw: String) -> String {
+        if let range = raw.range(of: " // "),
+           raw.distance(from: raw.startIndex, to: range.lowerBound) <= 4 {
+            return String(raw[range.upperBound...])
+        }
+        return raw
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             switch store.effectiveQuotaPhase {
@@ -229,13 +335,11 @@ struct SubscriptionView: View {
                 quotaSections(q, notice: notice)
             case .failed(let err, let retryAt):
                 stateMessage(
-                    icon: "exclamationmark.triangle",
                     text: errorText(for: err, retryAt: retryAt),
                     showRetry: true
                 )
             case .noAccount:
                 stateMessage(
-                    icon: "person.crop.circle.badge.questionmark",
                     text: loc("subNoToken"),
                     showRetry: true
                 )
@@ -254,34 +358,49 @@ struct SubscriptionView: View {
             return mid != "gemini_weekly" && mid != "claude_partner_weekly"
         }
 
+        let hasGemini5h = q.five_hour.resets_at != nil
+            || q.five_hour.displayPercent > 0
+            || nonEmpty(q.five_hour.label) != nil
+            || q.scopedModelLimits.isEmpty
+        let hasClaude5h = q.seven_day.resets_at != nil
+            || q.seven_day.displayPercent > 0
+            || nonEmpty(q.seven_day.label) != nil
+        let hasPrimaryQuota = hasGemini5h || hasClaude5h || !geminiWeeklyLimits.isEmpty || !claudeWeeklyLimits.isEmpty
+
+        let showSonnet = {
+            if let sonnet = q.seven_day_sonnet,
+               sonnet.displayPercent > 0 || sonnet.resets_at != nil,
+               !q.scopedModelLimits.contains(where: {
+                   $0.modelDisplayName?.caseInsensitiveCompare("Claude") == .orderedSame }) {
+                return true
+            }
+            return false
+        }()
+
         if nonEmpty(q.accountEmail) != nil || q.isOfflineCached {
             PlanAccountStrip(email: q.accountEmail, isOfflineCached: q.isOfflineCached)
             HairlineRule(showCrosshairs: true)
         }
 
         if store.visualMode == .instrument {
-            OrbitalPlanDeck(
-                quota: q,
-                geminiWeeklyLimits: geminiWeeklyLimits,
-                claudeWeeklyLimits: claudeWeeklyLimits,
-                hasGemini5h: q.five_hour.resets_at != nil
-                    || q.five_hour.displayPercent > 0
-                    || nonEmpty(q.five_hour.label) != nil
-                    || q.scopedModelLimits.isEmpty,
-                hasClaude5h: q.seven_day.resets_at != nil
-                    || q.seven_day.displayPercent > 0
-                    || nonEmpty(q.seven_day.label) != nil
-            )
+            if hasPrimaryQuota {
+                OrbitalPlanDeck(
+                    quota: q,
+                    geminiWeeklyLimits: geminiWeeklyLimits,
+                    claudeWeeklyLimits: claudeWeeklyLimits,
+                    hasGemini5h: hasGemini5h,
+                    hasClaude5h: hasClaude5h
+                )
+            }
         } else {
-            // Section 01: Gemini Family
-            let hasGemini5h = q.five_hour.resets_at != nil
-                || q.five_hour.displayPercent > 0
-                || nonEmpty(q.five_hour.label) != nil
-                || q.scopedModelLimits.isEmpty
-            if hasGemini5h || !geminiWeeklyLimits.isEmpty {
+            let showGeminiClassic = hasGemini5h || !geminiWeeklyLimits.isEmpty
+            let showClaudeClassic = hasClaude5h || !claudeWeeklyLimits.isEmpty
+
+            if showGeminiClassic {
                 VStack(alignment: .leading, spacing: 10) {
                     FamilySectionHeader(
-                        title: loc("planGeminiFamily"),
+                        indexTag: "05.1",
+                        title: stripLeadingIndexPrefix(loc("planGeminiFamily")),
                         codes: "CRB · ARG · NEO · HYD · FLS"
                     )
                     if hasGemini5h {
@@ -302,20 +421,19 @@ struct SubscriptionView: View {
                         )
                     }
                 }
-                .padding(.horizontal, 12)
+                .padding(.horizontal, 14)
                 .padding(.vertical, 10)
 
-                HairlineRule(showCrosshairs: true)
+                if showClaudeClassic {
+                    HairlineRule(showCrosshairs: true)
+                }
             }
 
-            // Section 02: Claude & GPT Family
-            let hasClaude5h = q.seven_day.resets_at != nil
-                || q.seven_day.displayPercent > 0
-                || nonEmpty(q.seven_day.label) != nil
-            if hasClaude5h || !claudeWeeklyLimits.isEmpty {
+            if showClaudeClassic {
                 VStack(alignment: .leading, spacing: 10) {
                     FamilySectionHeader(
-                        title: loc("planClaudeFamily"),
+                        indexTag: "05.2",
+                        title: stripLeadingIndexPrefix(loc("planClaudeFamily")),
                         codes: "CLD · OTH"
                     )
                     if hasClaude5h {
@@ -336,14 +454,15 @@ struct SubscriptionView: View {
                         )
                     }
                 }
-                .padding(.horizontal, 12)
+                .padding(.horizontal, 14)
                 .padding(.vertical, 10)
-
-                HairlineRule(showCrosshairs: true)
             }
         }
 
-        ForEach(Array(customScopedLimits.enumerated()), id: \.offset) { _, lim in
+        ForEach(Array(customScopedLimits.enumerated()), id: \.offset) { idx, lim in
+            if idx > 0 || hasPrimaryQuota {
+                HairlineRule(showCrosshairs: true)
+            }
             let rawName = lim.modelDisplayName ?? ""
             let classified = ModelClass.classify(rawName)
             VStack(alignment: .leading, spacing: 8) {
@@ -355,27 +474,28 @@ struct SubscriptionView: View {
                     windowDurationSeconds: QuotaPaceLogic.sevenDayWindowSeconds
                 )
             }
-            .padding(.horizontal, 12)
+            .padding(.horizontal, 14)
             .padding(.vertical, 10)
-            HairlineRule(showCrosshairs: true)
         }
 
-        if let sonnet = q.seven_day_sonnet,
-           sonnet.displayPercent > 0 || sonnet.resets_at != nil,
-           !q.scopedModelLimits.contains(where: {
-               $0.modelDisplayName?.caseInsensitiveCompare("Claude") == .orderedSame }) {
+        if showSonnet, let sonnet = q.seven_day_sonnet {
+            if hasPrimaryQuota || !customScopedLimits.isEmpty {
+                HairlineRule(showCrosshairs: true)
+            }
             QuotaTrackRow(
                 label: nonEmpty(sonnet.label) ?? loc("sub7dSonnetLabel"),
                 usedPercent: sonnet.displayPercent,
                 resetAt: q.sevenDaySonnetResetDate,
                 windowDurationSeconds: QuotaPaceLogic.fiveHourWindowSeconds
             )
-            .padding(.horizontal, 12)
+            .padding(.horizontal, 14)
             .padding(.vertical, 10)
-            HairlineRule(showCrosshairs: true)
         }
 
         if q.hasCredits {
+            if hasPrimaryQuota || !customScopedLimits.isEmpty || showSonnet {
+                HairlineRule(showCrosshairs: true)
+            }
             AICreditsSection(
                 promptCredits: q.promptCredits,
                 flowCredits: q.flowCredits,
@@ -386,16 +506,16 @@ struct SubscriptionView: View {
         if q.extra_usage?.is_enabled == true {
             HairlineRule(showCrosshairs: false)
             HStack(spacing: 6) {
-                Image(systemName: "creditcard")
-                    .font(.system(size: 9.5))
-                    .foregroundColor(theme.inkSecondary)
+                Rectangle()
+                    .fill(theme.accent)
+                    .frame(width: 4, height: 4)
                 Text(loc("subExtraOn"))
-                    .font(.system(size: 9.5))
+                    .font(.system(size: 8.5, weight: .regular, design: .monospaced))
                     .foregroundColor(theme.inkSecondary)
                 Spacer()
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 7)
         }
 
         switch notice {
@@ -408,51 +528,81 @@ struct SubscriptionView: View {
             HairlineRule(showCrosshairs: false)
             noticeRow(text: errorText(for: err, retryAt: nil), showRetry: err != .rateLimited)
         }
+
+        HairlineRule(showCrosshairs: false)
+        specimenColophon
+    }
+
+    // MARK: Editorial Specimen Colophon
+
+    private var specimenColophon: some View {
+        HStack(spacing: 6) {
+            Text("* Rolling 5h & 7d quota buckets synced from Antigravity quota service")
+                .font(.system(size: 8.5, weight: .regular, design: .serif))
+                .italic()
+                .foregroundColor(theme.inkMuted)
+                .lineLimit(1)
+            Spacer(minLength: 4)
+            Text("FIG. 05")
+                .font(.system(size: 7.5, weight: .regular, design: .monospaced))
+                .tracking(0.8)
+                .foregroundColor(theme.inkMuted.opacity(0.75))
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 6)
     }
 
     private func noticeRow(text: String, showRetry: Bool) -> some View {
         HStack(spacing: 6) {
-            Image(systemName: "exclamationmark.triangle")
-                .font(.system(size: 9.5))
-                .foregroundColor(theme.signalAmber)
+            Rectangle()
+                .fill(theme.signalAmber)
+                .frame(width: 4.5, height: 4.5)
+                .rotationEffect(.degrees(45))
             Text(text)
-                .font(.system(size: 9.5, design: .monospaced))
+                .font(.system(size: 8.5, weight: .regular, design: .monospaced))
                 .foregroundColor(theme.inkSecondary)
             Spacer()
             if showRetry {
                 Text(loc("retry").uppercased())
-                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .font(.system(size: 8, weight: .medium, design: .monospaced))
+                    .tracking(0.7)
                     .foregroundColor(theme.accent)
                     .contentShape(Rectangle())
                     .onTapGesture { store.refreshQuota(force: true) }
             }
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, 14)
         .padding(.vertical, 7)
     }
 
-    private func stateMessage(icon: String, text: String, showRetry: Bool = false) -> some View {
+    private func stateMessage(text: String, showRetry: Bool = false) -> some View {
         HStack(spacing: 8) {
-            Image(systemName: icon)
-                .font(.system(size: 12))
-                .foregroundColor(theme.signalAmber)
+            Rectangle()
+                .fill(theme.signalAmber)
+                .frame(width: 5, height: 5)
+                .rotationEffect(.degrees(45))
             Text(text)
-                .font(.system(size: 10.5, design: .monospaced))
+                .font(.system(size: 9.5, weight: .regular, design: .monospaced))
                 .foregroundColor(theme.inkSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer()
             if showRetry {
                 Text(loc("retry").uppercased())
-                    .font(.system(size: 9.5, weight: .bold, design: .monospaced))
-                    .foregroundColor(theme.invertedInk)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 3)
-                    .background(theme.invertedBg)
+                    .font(.system(size: 8, weight: .medium, design: .monospaced))
+                    .tracking(0.8)
+                    .foregroundColor(theme.accent)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(theme.surfaceRaised.opacity(theme.isDark ? 0.35 : 0.55))
+                    .overlay(
+                        Rectangle()
+                            .strokeBorder(theme.accent.opacity(0.55), lineWidth: 0.75)
+                    )
                     .contentShape(Rectangle())
                     .onTapGesture { store.refreshQuota(force: true) }
             }
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, 14)
         .padding(.vertical, 16)
     }
 

@@ -51,6 +51,12 @@ enum StrataPattern: Equatable {
 /// Swiss Precision Telemetry palette supporting 4 distinct studio instruments
 /// across Light (Swiss Paper) and Dark / Notch (Void Instrument) modes.
 struct AGYTheme: Equatable {
+    struct CacheKey: Hashable {
+        let preset: TelemetryThemePreset
+        let isDark: Bool
+        let isNotch: Bool
+    }
+
     static let panelWidth: CGFloat = 420
     static let cardRadius: CGFloat = 1.5
     static let controlRadius: CGFloat = 1.5
@@ -58,6 +64,10 @@ struct AGYTheme: Equatable {
     let preset: TelemetryThemePreset
     let isDark: Bool
     let isNotch: Bool
+
+    var cacheKey: CacheKey {
+        CacheKey(preset: preset, isDark: isDark, isNotch: isNotch)
+    }
 
     let canvas: Color
     let surface: Color
@@ -85,60 +95,60 @@ struct AGYTheme: Equatable {
 
         switch (preset, dark) {
         case (.monolith, false):
-            self.canvas = Color(red: 0.965, green: 0.961, blue: 0.941)         // #F6F5F0 Archival Paper
-            self.surface = Color(red: 0.941, green: 0.937, blue: 0.914)        // #F0EFE9
-            self.surfaceRaised = Color.white
-            self.hairline = Color.black.opacity(0.13)
-            self.hairlineStrong = Color.black.opacity(0.30)
-            self.reticle = Color.black.opacity(0.42)
-            self.inkPrimary = Color(red: 0.063, green: 0.071, blue: 0.086)     // #101216
+            self.canvas = Color(red: 0.953, green: 0.949, blue: 0.933)         // #F3F2EE Archival Gallery Paper
+            self.surface = Color(red: 0.929, green: 0.925, blue: 0.906)        // #EDECE7
+            self.surfaceRaised = Color(red: 0.984, green: 0.980, blue: 0.969)  // #FBFAF7
+            self.hairline = Color.black.opacity(0.105)
+            self.hairlineStrong = Color.black.opacity(0.24)
+            self.reticle = Color.black.opacity(0.36)
+            self.inkPrimary = Color(red: 0.075, green: 0.082, blue: 0.098)     // #131519 Carbon Ink
             self.inkSecondary = Color(red: 0.341, green: 0.361, blue: 0.408)   // #575C68
-            self.inkMuted = Color(red: 0.537, green: 0.557, blue: 0.604)       // #898E9A
-            self.accent = Color(red: 0.149, green: 0.282, blue: 1.000)         // #2648FF
-            self.invertedBg = Color(red: 0.063, green: 0.071, blue: 0.086)     // #101216
-            self.invertedInk = Color(red: 0.965, green: 0.961, blue: 0.941)    // #F6F5F0
+            self.inkMuted = Color(red: 0.545, green: 0.561, blue: 0.600)       // #8B8F99
+            self.accent = Color(red: 0.141, green: 0.275, blue: 1.000)         // #2446FF Electric Cobalt
+            self.invertedBg = Color(red: 0.075, green: 0.082, blue: 0.098)
+            self.invertedInk = Color(red: 0.953, green: 0.949, blue: 0.933)
 
         case (.monolith, true):
-            self.canvas = isNotch ? Color.black : Color(red: 0.020, green: 0.024, blue: 0.031) // #050608
-            self.surface = isNotch ? Color.black : Color(red: 0.039, green: 0.047, blue: 0.063) // #0A0C10
-            self.surfaceRaised = Color.white.opacity(0.08)
-            self.hairline = Color.white.opacity(0.12)
-            self.hairlineStrong = Color.white.opacity(0.28)
-            self.reticle = Color.white.opacity(0.42)
-            self.inkPrimary = Color(red: 0.949, green: 0.957, blue: 0.973)     // #F2F4F8
-            self.inkSecondary = Color(red: 0.541, green: 0.576, blue: 0.651)   // #8A93A6
-            self.inkMuted = Color(red: 0.329, green: 0.361, blue: 0.431)       // #545C6E
-            self.accent = Color(red: 0.310, green: 0.486, blue: 1.000)         // #4F7CFF
-            self.invertedBg = Color(red: 0.949, green: 0.957, blue: 0.973)
-            self.invertedInk = Color(red: 0.020, green: 0.024, blue: 0.031)
+            self.canvas = isNotch ? Color.black : Color(red: 0.024, green: 0.027, blue: 0.035) // #060709
+            self.surface = isNotch ? Color.black : Color(red: 0.043, green: 0.051, blue: 0.067) // #0B0D11
+            self.surfaceRaised = Color.white.opacity(0.065)
+            self.hairline = Color.white.opacity(0.11)
+            self.hairlineStrong = Color.white.opacity(0.24)
+            self.reticle = Color.white.opacity(0.38)
+            self.inkPrimary = Color(red: 0.937, green: 0.945, blue: 0.965)     // #EFF1F6
+            self.inkSecondary = Color(red: 0.549, green: 0.580, blue: 0.651)   // #8C94A6
+            self.inkMuted = Color(red: 0.337, green: 0.369, blue: 0.435)       // #565E6F
+            self.accent = Color(red: 0.325, green: 0.506, blue: 1.000)         // #5381FF
+            self.invertedBg = Color(red: 0.937, green: 0.945, blue: 0.965)
+            self.invertedInk = Color(red: 0.024, green: 0.027, blue: 0.035)
 
         case (.blueprint, false):
-            self.canvas = Color(red: 0.918, green: 0.937, blue: 0.973)         // #EAEFF8 Pale Cyanotype
-            self.surface = Color(red: 0.882, green: 0.910, blue: 0.961)        // #E1E8F5
-            self.surfaceRaised = Color(red: 0.969, green: 0.976, blue: 0.996)  // #F7F9FE
-            self.hairline = Color(red: 0.094, green: 0.145, blue: 0.408).opacity(0.16)
-            self.hairlineStrong = Color(red: 0.094, green: 0.145, blue: 0.408).opacity(0.36)
-            self.reticle = Color(red: 0.118, green: 0.243, blue: 0.878).opacity(0.50)
-            self.inkPrimary = Color(red: 0.078, green: 0.118, blue: 0.329)     // #141E54
-            self.inkSecondary = Color(red: 0.267, green: 0.322, blue: 0.541)   // #44528A
-            self.inkMuted = Color(red: 0.475, green: 0.529, blue: 0.722)       // #7987B8
-            self.accent = Color(red: 0.122, green: 0.251, blue: 0.922)         // #1F40EB
-            self.invertedBg = Color(red: 0.094, green: 0.145, blue: 0.408)     // #182568
-            self.invertedInk = Color(red: 0.953, green: 0.965, blue: 0.988)    // #F3F6FC
+            self.canvas = Color(red: 0.898, green: 0.918, blue: 0.961)         // #E5EAF5 Archival Cyanotype
+            self.surface = Color(red: 0.859, green: 0.886, blue: 0.945)        // #DBE2F1
+            self.surfaceRaised = Color(red: 0.949, green: 0.961, blue: 0.992)  // #F2F5FD
+            self.hairline = Color(red: 0.110, green: 0.149, blue: 0.439).opacity(0.14)
+            self.hairlineStrong = Color(red: 0.110, green: 0.149, blue: 0.439).opacity(0.32)
+            self.reticle = Color(red: 0.141, green: 0.243, blue: 0.863).opacity(0.45)
+            self.inkPrimary = Color(red: 0.086, green: 0.118, blue: 0.369)     // #161E5E
+            self.inkSecondary = Color(red: 0.255, green: 0.302, blue: 0.549)   // #414D8C
+            self.inkMuted = Color(red: 0.467, green: 0.514, blue: 0.722)       // #7783B8
+            self.accent = Color(red: 0.141, green: 0.255, blue: 0.941)         // #2441F0
+            self.invertedBg = Color(red: 0.086, green: 0.118, blue: 0.369)
+            self.invertedInk = Color(red: 0.949, green: 0.961, blue: 0.992)
 
         case (.blueprint, true):
-            self.canvas = isNotch ? Color.black : Color(red: 0.067, green: 0.086, blue: 0.290) // #11164A Deep Polar Blueprint
-            self.surface = isNotch ? Color(red: 0.027, green: 0.039, blue: 0.141) : Color(red: 0.090, green: 0.114, blue: 0.361)
-            self.surfaceRaised = Color(red: 0.141, green: 0.173, blue: 0.478).opacity(0.55)
-            self.hairline = Color(red: 0.545, green: 0.659, blue: 1.000).opacity(0.18)
-            self.hairlineStrong = Color(red: 0.620, green: 0.722, blue: 1.000).opacity(0.38)
-            self.reticle = Color(red: 0.620, green: 0.722, blue: 1.000).opacity(0.55)
-            self.inkPrimary = Color(red: 0.933, green: 0.949, blue: 1.000)     // #EEF2FF
-            self.inkSecondary = Color(red: 0.608, green: 0.663, blue: 0.863)   // #9BA9DC
-            self.inkMuted = Color(red: 0.396, green: 0.451, blue: 0.678)       // #6573AD
-            self.accent = Color(red: 0.392, green: 0.549, blue: 1.000)         // #648CFF
-            self.invertedBg = Color(red: 0.949, green: 0.945, blue: 0.918)     // #F2F1EA Bone Cursor
-            self.invertedInk = Color(red: 0.078, green: 0.102, blue: 0.329)    // #141A54
+            self.canvas = isNotch ? Color.black : Color(red: 0.118, green: 0.125, blue: 0.427) // #1E206D Deep Polar Indigo
+            self.surface = isNotch ? Color(red: 0.039, green: 0.047, blue: 0.180) : Color(red: 0.145, green: 0.157, blue: 0.494)
+            self.surfaceRaised = Color(red: 0.886, green: 0.910, blue: 1.000).opacity(0.10)
+            self.hairline = Color(red: 0.765, green: 0.816, blue: 1.000).opacity(0.18)
+            self.hairlineStrong = Color(red: 0.824, green: 0.867, blue: 1.000).opacity(0.36)
+            self.reticle = Color(red: 0.863, green: 0.898, blue: 1.000).opacity(0.55)
+            self.inkPrimary = Color(red: 0.933, green: 0.945, blue: 0.992)     // #EEF1FD
+            self.inkSecondary = Color(red: 0.678, green: 0.718, blue: 0.914)   // #ADB7E9
+            self.inkMuted = Color(red: 0.478, green: 0.522, blue: 0.769)       // #7A85C4
+            self.accent = Color(red: 0.945, green: 0.941, blue: 0.902)         // #F1F0E6 Archival Bone Highlight
+            self.invertedBg = Color(red: 0.945, green: 0.941, blue: 0.902)     // #F1F0E6
+            self.invertedInk = Color(red: 0.118, green: 0.125, blue: 0.427)    // #1E206D
 
         case (.phosphor, false):
             self.canvas = Color(red: 0.953, green: 0.965, blue: 0.976)         // #F3F6F9 Cold Technical Paper
@@ -227,24 +237,25 @@ struct AGYTheme: Equatable {
             case .other:    return inkMuted.opacity(0.48)
             }
         case .blueprint:
+            // Strict cyanotype monochrome ink ramp (inspired by Polar archival blueprints)
             if isDark {
                 switch mc {
-                case .carbon:   return Color(red: 0.45, green: 0.62, blue: 1.00)
-                case .argon:    return Color(red: 0.30, green: 0.78, blue: 0.94)
-                case .neon:     return Color(red: 0.68, green: 0.78, blue: 1.00)
-                case .hydrogen: return Color(red: 0.56, green: 0.50, blue: 0.98)
-                case .flash:    return Color(red: 0.38, green: 0.86, blue: 0.78)
-                case .claude:   return Color(red: 0.95, green: 0.94, blue: 0.90)
+                case .carbon:   return accent                                      // Archival Bone Highlight
+                case .argon:    return Color(red: 0.78, green: 0.83, blue: 1.00)   // Pale Cyanotype Ink
+                case .neon:     return Color(red: 0.62, green: 0.69, blue: 0.96)   // Periwinkle Ink
+                case .hydrogen: return Color(red: 0.48, green: 0.56, blue: 0.88)   // Mid Blueprint Ink
+                case .flash:    return Color(red: 0.36, green: 0.44, blue: 0.78)   // Deep Blueprint Ink
+                case .claude:   return Color(red: 0.86, green: 0.89, blue: 0.98)   // Bright Chalk Ink
                 case .other:    return inkMuted
                 }
             } else {
                 switch mc {
-                case .carbon:   return Color(red: 0.12, green: 0.25, blue: 0.92)
-                case .argon:    return Color(red: 0.08, green: 0.48, blue: 0.78)
-                case .neon:     return Color(red: 0.28, green: 0.44, blue: 0.95)
-                case .hydrogen: return Color(red: 0.36, green: 0.32, blue: 0.76)
-                case .flash:    return Color(red: 0.46, green: 0.60, blue: 0.84)
-                case .claude:   return Color(red: 0.09, green: 0.15, blue: 0.41)
+                case .carbon:   return accent                                      // Vivid Cobalt
+                case .argon:    return Color(red: 0.12, green: 0.18, blue: 0.52)   // Deep Prussian Ink
+                case .neon:     return Color(red: 0.24, green: 0.32, blue: 0.68)   // Mid Indigo Ink
+                case .hydrogen: return Color(red: 0.38, green: 0.46, blue: 0.78)   // Muted Cobalt Ink
+                case .flash:    return Color(red: 0.54, green: 0.60, blue: 0.84)   // Pale Blueprint Ink
+                case .claude:   return Color(red: 0.16, green: 0.24, blue: 0.60)   // Indigo Ink
                 case .other:    return inkMuted
                 }
             }
@@ -349,6 +360,10 @@ private struct TelemetryStaticRenderKey: EnvironmentKey {
     static let defaultValue = false
 }
 
+private struct TelemetryPanelVisibleKey: EnvironmentKey {
+    static let defaultValue = true
+}
+
 extension EnvironmentValues {
     var agyTheme: AGYTheme {
         get { self[AGYThemeKey.self] }
@@ -358,5 +373,10 @@ extension EnvironmentValues {
     var telemetryStaticRender: Bool {
         get { self[TelemetryStaticRenderKey.self] }
         set { self[TelemetryStaticRenderKey.self] = newValue }
+    }
+
+    var telemetryPanelVisible: Bool {
+        get { self[TelemetryPanelVisibleKey.self] }
+        set { self[TelemetryPanelVisibleKey.self] = newValue }
     }
 }
