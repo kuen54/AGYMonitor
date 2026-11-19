@@ -29,13 +29,16 @@ public struct NotchPointerSample: Equatable, Sendable {
     public let inContentRect: Bool
     public let inRevealEdge: Bool
     public let inRevealBand: Bool
+    /// True when the pointer is over a visible closed-state Live Wing action pill.
+    public let inClickableWing: Bool
 
     public static let outside = NotchPointerSample(
         onScreen: false,
         inHoverBand: false,
         inContentRect: false,
         inRevealEdge: false,
-        inRevealBand: false
+        inRevealBand: false,
+        inClickableWing: false
     )
 
     public init(
@@ -43,13 +46,15 @@ public struct NotchPointerSample: Equatable, Sendable {
         inHoverBand: Bool,
         inContentRect: Bool,
         inRevealEdge: Bool,
-        inRevealBand: Bool
+        inRevealBand: Bool,
+        inClickableWing: Bool = false
     ) {
         self.onScreen = onScreen
         self.inHoverBand = inHoverBand
         self.inContentRect = inContentRect
         self.inRevealEdge = inRevealEdge
         self.inRevealBand = inRevealBand
+        self.inClickableWing = inClickableWing
     }
 }
 
@@ -298,6 +303,9 @@ public enum NotchMachine {
         if state.isOpen {
             return NotchPanelPresentation(visible: true, ignoresMouseEvents: !pointer.inContentRect)
         }
-        return NotchPanelPresentation(visible: true, ignoresMouseEvents: !pointer.inHoverBand)
+        return NotchPanelPresentation(
+            visible: true,
+            ignoresMouseEvents: !(pointer.inHoverBand || pointer.inClickableWing)
+        )
     }
 }

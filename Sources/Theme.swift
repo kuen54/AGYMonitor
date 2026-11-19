@@ -46,10 +46,10 @@ enum StrataPattern: Equatable {
     case muted
 }
 
-// MARK: - AGY // TELEMETRY Multi-Theme Design System
+// MARK: - AGY // TELEMETRY Two-Color Duotone Design System
 
-/// Swiss Precision Telemetry palette supporting 4 distinct studio instruments
-/// across Light (Swiss Paper) and Dark / Notch (Void Instrument) modes.
+/// Swiss Precision Telemetry palette supporting 6 curated two-color (duotone)
+/// studio instruments across Light (Archival Paper) and Dark / Notch modes.
 struct AGYTheme: Equatable {
     struct CacheKey: Hashable {
         let preset: TelemetryThemePreset
@@ -80,6 +80,8 @@ struct AGYTheme: Equatable {
     let inkMuted: Color
     let accent: Color
     let accentSoft: Color
+    let accentSecondary: Color
+    let accentSecondarySoft: Color
     let invertedBg: Color
     let invertedInk: Color
 
@@ -94,6 +96,7 @@ struct AGYTheme: Equatable {
         self.isNotch = isNotch
 
         switch (preset, dark) {
+        // 1. Monolith — Cobalt × Slate-Steel (Swiss gallery default)
         case (.monolith, false):
             self.canvas = Color(red: 0.953, green: 0.949, blue: 0.933)         // #F3F2EE Archival Gallery Paper
             self.surface = Color(red: 0.929, green: 0.925, blue: 0.906)        // #EDECE7
@@ -105,6 +108,7 @@ struct AGYTheme: Equatable {
             self.inkSecondary = Color(red: 0.341, green: 0.361, blue: 0.408)   // #575C68
             self.inkMuted = Color(red: 0.545, green: 0.561, blue: 0.600)       // #8B8F99
             self.accent = Color(red: 0.141, green: 0.275, blue: 1.000)         // #2446FF Electric Cobalt
+            self.accentSecondary = Color(red: 0.294, green: 0.369, blue: 0.533) // #4B5E88 Drafting Steel-Blue
             self.invertedBg = Color(red: 0.075, green: 0.082, blue: 0.098)
             self.invertedInk = Color(red: 0.953, green: 0.949, blue: 0.933)
 
@@ -118,96 +122,169 @@ struct AGYTheme: Equatable {
             self.inkPrimary = Color(red: 0.937, green: 0.945, blue: 0.965)     // #EFF1F6
             self.inkSecondary = Color(red: 0.549, green: 0.580, blue: 0.651)   // #8C94A6
             self.inkMuted = Color(red: 0.337, green: 0.369, blue: 0.435)       // #565E6F
-            self.accent = Color(red: 0.325, green: 0.506, blue: 1.000)         // #5381FF
+            self.accent = Color(red: 0.325, green: 0.506, blue: 1.000)         // #5381FF Electric Cobalt
+            self.accentSecondary = Color(red: 0.541, green: 0.643, blue: 0.839) // #8AA4D6 Cool Steel-Blue
             self.invertedBg = Color(red: 0.937, green: 0.945, blue: 0.965)
             self.invertedInk = Color(red: 0.024, green: 0.027, blue: 0.035)
 
+        // 2. Blueprint — Polar Indigo × Signal Orange (Architectural Cyanotype + Drafting Pencil)
         case (.blueprint, false):
-            self.canvas = Color(red: 0.898, green: 0.918, blue: 0.961)         // #E5EAF5 Archival Cyanotype
-            self.surface = Color(red: 0.859, green: 0.886, blue: 0.945)        // #DBE2F1
-            self.surfaceRaised = Color(red: 0.949, green: 0.961, blue: 0.992)  // #F2F5FD
-            self.hairline = Color(red: 0.110, green: 0.149, blue: 0.439).opacity(0.14)
-            self.hairlineStrong = Color(red: 0.110, green: 0.149, blue: 0.439).opacity(0.32)
-            self.reticle = Color(red: 0.141, green: 0.243, blue: 0.863).opacity(0.45)
-            self.inkPrimary = Color(red: 0.086, green: 0.118, blue: 0.369)     // #161E5E
-            self.inkSecondary = Color(red: 0.255, green: 0.302, blue: 0.549)   // #414D8C
-            self.inkMuted = Color(red: 0.467, green: 0.514, blue: 0.722)       // #7783B8
-            self.accent = Color(red: 0.141, green: 0.255, blue: 0.941)         // #2441F0
-            self.invertedBg = Color(red: 0.086, green: 0.118, blue: 0.369)
-            self.invertedInk = Color(red: 0.949, green: 0.961, blue: 0.992)
+            self.canvas = Color(red: 0.902, green: 0.925, blue: 0.969)         // #E6ECF7 Cyanotype Paper
+            self.surface = Color(red: 0.863, green: 0.894, blue: 0.957)        // #DCE4F4
+            self.surfaceRaised = Color(red: 0.953, green: 0.965, blue: 0.992)  // #F3F6FD
+            self.hairline = Color(red: 0.075, green: 0.106, blue: 0.329).opacity(0.14)
+            self.hairlineStrong = Color(red: 0.075, green: 0.106, blue: 0.329).opacity(0.30)
+            self.reticle = Color(red: 0.851, green: 0.282, blue: 0.059).opacity(0.48)
+            self.inkPrimary = Color(red: 0.075, green: 0.106, blue: 0.329)     // #131B54 Deep Indigo Ink
+            self.inkSecondary = Color(red: 0.231, green: 0.278, blue: 0.522)   // #3B4785
+            self.inkMuted = Color(red: 0.431, green: 0.478, blue: 0.698)       // #6E7AB2
+            self.accent = Color(red: 0.114, green: 0.235, blue: 0.949)         // #1D3CF2 Klein Cobalt
+            self.accentSecondary = Color(red: 0.851, green: 0.282, blue: 0.059) // #D9480F Drafting Signal Orange
+            self.invertedBg = Color(red: 0.075, green: 0.106, blue: 0.329)     // #131B54
+            self.invertedInk = Color(red: 0.953, green: 0.965, blue: 0.992)    // #F3F6FD
 
         case (.blueprint, true):
-            self.canvas = isNotch ? Color.black : Color(red: 0.118, green: 0.125, blue: 0.427) // #1E206D Deep Polar Indigo
-            self.surface = isNotch ? Color(red: 0.039, green: 0.047, blue: 0.180) : Color(red: 0.145, green: 0.157, blue: 0.494)
-            self.surfaceRaised = Color(red: 0.886, green: 0.910, blue: 1.000).opacity(0.10)
-            self.hairline = Color(red: 0.765, green: 0.816, blue: 1.000).opacity(0.18)
-            self.hairlineStrong = Color(red: 0.824, green: 0.867, blue: 1.000).opacity(0.36)
-            self.reticle = Color(red: 0.863, green: 0.898, blue: 1.000).opacity(0.55)
-            self.inkPrimary = Color(red: 0.933, green: 0.945, blue: 0.992)     // #EEF1FD
-            self.inkSecondary = Color(red: 0.678, green: 0.718, blue: 0.914)   // #ADB7E9
-            self.inkMuted = Color(red: 0.478, green: 0.522, blue: 0.769)       // #7A85C4
-            self.accent = Color(red: 0.945, green: 0.941, blue: 0.902)         // #F1F0E6 Archival Bone Highlight
+            self.canvas = isNotch ? Color.black : Color(red: 0.078, green: 0.098, blue: 0.322) // #141952 Deep Polar Indigo
+            self.surface = isNotch ? Color.black : Color(red: 0.106, green: 0.129, blue: 0.392) // #1B2164
+            self.surfaceRaised = Color(red: 0.478, green: 0.608, blue: 1.000).opacity(0.11)
+            self.hairline = Color(red: 0.478, green: 0.608, blue: 1.000).opacity(0.20)
+            self.hairlineStrong = Color(red: 0.478, green: 0.608, blue: 1.000).opacity(0.38)
+            self.reticle = Color(red: 1.000, green: 0.420, blue: 0.208).opacity(0.55)
+            self.inkPrimary = Color(red: 0.945, green: 0.941, blue: 0.902)     // #F1F0E6 Archival Bone
+            self.inkSecondary = Color(red: 0.659, green: 0.710, blue: 0.910)   // #A8B5E8
+            self.inkMuted = Color(red: 0.447, green: 0.502, blue: 0.745)       // #7280BE
+            self.accent = Color(red: 0.478, green: 0.608, blue: 1.000)         // #7A9BFF Luminous Cyanotype Blue
+            self.accentSecondary = Color(red: 1.000, green: 0.420, blue: 0.208) // #FF6B35 Drafting Signal Orange
             self.invertedBg = Color(red: 0.945, green: 0.941, blue: 0.902)     // #F1F0E6
-            self.invertedInk = Color(red: 0.118, green: 0.125, blue: 0.427)    // #1E206D
+            self.invertedInk = Color(red: 0.078, green: 0.098, blue: 0.322)    // #141952
 
-        case (.phosphor, false):
-            self.canvas = Color(red: 0.953, green: 0.965, blue: 0.976)         // #F3F6F9 Cold Technical Paper
-            self.surface = Color(red: 0.922, green: 0.941, blue: 0.961)        // #EBF0F5
-            self.surfaceRaised = Color.white
-            self.hairline = Color(red: 0.051, green: 0.094, blue: 0.161).opacity(0.12)
-            self.hairlineStrong = Color(red: 0.051, green: 0.094, blue: 0.161).opacity(0.28)
-            self.reticle = Color(red: 0.000, green: 0.400, blue: 1.000).opacity(0.45)
-            self.inkPrimary = Color(red: 0.051, green: 0.078, blue: 0.125)     // #0D1420
-            self.inkSecondary = Color(red: 0.306, green: 0.357, blue: 0.431)   // #4E5B6E
-            self.inkMuted = Color(red: 0.510, green: 0.565, blue: 0.639)       // #8290A3
-            self.accent = Color(red: 0.000, green: 0.400, blue: 1.000)         // #0066FF
-            self.invertedBg = Color(red: 0.051, green: 0.078, blue: 0.125)
-            self.invertedInk = Color(red: 0.953, green: 0.965, blue: 0.976)
+        // 3. Risograph — Fluorescent Pink × Federal Blue (Tokyo 2-Drum Overprint)
+        case (.risograph, false):
+            self.canvas = Color(red: 0.980, green: 0.957, blue: 0.925)         // #FAF4EC Warm Cream Riso Paper
+            self.surface = Color(red: 0.949, green: 0.914, blue: 0.867)        // #F2E9DD
+            self.surfaceRaised = Color(red: 1.000, green: 0.984, blue: 0.961)  // #FFFBF5
+            self.hairline = Color(red: 0.106, green: 0.078, blue: 0.149).opacity(0.13)
+            self.hairlineStrong = Color(red: 0.106, green: 0.078, blue: 0.149).opacity(0.28)
+            self.reticle = Color(red: 0.118, green: 0.294, blue: 1.000).opacity(0.45)
+            self.inkPrimary = Color(red: 0.106, green: 0.078, blue: 0.149)     // #1B1426 Deep Riso Ink
+            self.inkSecondary = Color(red: 0.325, green: 0.275, blue: 0.408)   // #534668
+            self.inkMuted = Color(red: 0.541, green: 0.486, blue: 0.620)       // #8A7C9E
+            self.accent = Color(red: 0.863, green: 0.110, blue: 0.431)         // #DC1C6E Fluorescent Riso Pink
+            self.accentSecondary = Color(red: 0.118, green: 0.294, blue: 1.000) // #1E4BFF Federal Cobalt Blue
+            self.invertedBg = Color(red: 0.106, green: 0.078, blue: 0.149)     // #1B1426
+            self.invertedInk = Color(red: 0.980, green: 0.957, blue: 0.925)    // #FAF4EC
 
-        case (.phosphor, true):
-            self.canvas = Color.black                                          // #000000 Pure Void
-            self.surface = isNotch ? Color.black : Color(red: 0.020, green: 0.031, blue: 0.051) // #05080D
-            self.surfaceRaised = Color(red: 0.271, green: 0.769, blue: 1.000).opacity(0.10)
-            self.hairline = Color(red: 0.659, green: 0.847, blue: 1.000).opacity(0.13)
-            self.hairlineStrong = Color(red: 0.659, green: 0.847, blue: 1.000).opacity(0.30)
-            self.reticle = Color(red: 0.271, green: 0.769, blue: 1.000).opacity(0.52)
-            self.inkPrimary = Color(red: 0.918, green: 0.957, blue: 1.000)     // #EAF4FF
-            self.inkSecondary = Color(red: 0.498, green: 0.627, blue: 0.745)   // #7FA0BE
-            self.inkMuted = Color(red: 0.282, green: 0.376, blue: 0.471)       // #486078
-            self.accent = Color(red: 0.271, green: 0.769, blue: 1.000)         // #45C4FF Ice Cyan
-            self.invertedBg = Color(red: 0.918, green: 0.957, blue: 1.000)
-            self.invertedInk = Color.black
+        case (.risograph, true):
+            self.canvas = isNotch ? Color.black : Color(red: 0.055, green: 0.039, blue: 0.094) // #0E0A18 Deep Ink-Plum Void
+            self.surface = isNotch ? Color.black : Color(red: 0.086, green: 0.063, blue: 0.149) // #161026
+            self.surfaceRaised = Color(red: 1.000, green: 0.200, blue: 0.545).opacity(0.10)
+            self.hairline = Color(red: 0.980, green: 0.941, blue: 0.965).opacity(0.14)
+            self.hairlineStrong = Color(red: 0.302, green: 0.545, blue: 1.000).opacity(0.34)
+            self.reticle = Color(red: 0.302, green: 0.545, blue: 1.000).opacity(0.55)
+            self.inkPrimary = Color(red: 0.980, green: 0.941, blue: 0.965)     // #FAF0F6 Warm Rose-White
+            self.inkSecondary = Color(red: 0.722, green: 0.616, blue: 0.710)   // #B89DB5
+            self.inkMuted = Color(red: 0.471, green: 0.380, blue: 0.482)       // #78617B
+            self.accent = Color(red: 1.000, green: 0.200, blue: 0.545)         // #FF338B Fluorescent Pink
+            self.accentSecondary = Color(red: 0.302, green: 0.545, blue: 1.000) // #4D8BFF Federal Electric Blue
+            self.invertedBg = Color(red: 1.000, green: 0.200, blue: 0.545)     // #FF338B
+            self.invertedInk = Color(red: 0.055, green: 0.039, blue: 0.094)    // #0E0A18
 
+        // 4. Amber — Braun Amber × Petrol Teal (Dieter Rams Warm/Cool Duotone)
         case (.amber, false):
-            self.canvas = Color(red: 0.961, green: 0.945, blue: 0.910)         // #F5F1E8 Braun Warm Paper
-            self.surface = Color(red: 0.929, green: 0.910, blue: 0.863)        // #EDE8DC
+            self.canvas = Color(red: 0.961, green: 0.941, blue: 0.902)         // #F5F0E6 Warm Braun Paper
+            self.surface = Color(red: 0.925, green: 0.898, blue: 0.847)        // #ECE5D8
             self.surfaceRaised = Color(red: 0.988, green: 0.976, blue: 0.949)  // #FCF9F2
-            self.hairline = Color(red: 0.141, green: 0.110, blue: 0.078).opacity(0.14)
-            self.hairlineStrong = Color(red: 0.141, green: 0.110, blue: 0.078).opacity(0.32)
-            self.reticle = Color(red: 0.784, green: 0.314, blue: 0.063).opacity(0.48)
-            self.inkPrimary = Color(red: 0.110, green: 0.086, blue: 0.063)     // #1C1610
-            self.inkSecondary = Color(red: 0.388, green: 0.333, blue: 0.278)   // #635547
-            self.inkMuted = Color(red: 0.580, green: 0.525, blue: 0.471)       // #948678
-            self.accent = Color(red: 0.784, green: 0.314, blue: 0.063)         // #C85010 Burnt Signal Orange
-            self.invertedBg = Color(red: 0.110, green: 0.086, blue: 0.063)
-            self.invertedInk = Color(red: 0.961, green: 0.945, blue: 0.910)
+            self.hairline = Color(red: 0.106, green: 0.086, blue: 0.067).opacity(0.13)
+            self.hairlineStrong = Color(red: 0.106, green: 0.086, blue: 0.067).opacity(0.28)
+            self.reticle = Color(red: 0.055, green: 0.463, blue: 0.478).opacity(0.46)
+            self.inkPrimary = Color(red: 0.106, green: 0.086, blue: 0.067)     // #1B1611 Espresso Ink
+            self.inkSecondary = Color(red: 0.376, green: 0.325, blue: 0.275)   // #605346
+            self.inkMuted = Color(red: 0.573, green: 0.518, blue: 0.463)       // #928476
+            self.accent = Color(red: 0.784, green: 0.314, blue: 0.063)         // #C85010 Burnt Braun Orange
+            self.accentSecondary = Color(red: 0.055, green: 0.463, blue: 0.478) // #0E767A Deep Petrol Teal
+            self.invertedBg = Color(red: 0.106, green: 0.086, blue: 0.067)     // #1B1611
+            self.invertedInk = Color(red: 0.961, green: 0.941, blue: 0.902)    // #F5F0E6
 
         case (.amber, true):
-            self.canvas = Color.black                                          // #000000 CRT Void
-            self.surface = isNotch ? Color.black : Color(red: 0.031, green: 0.024, blue: 0.016) // #080604
-            self.surfaceRaised = Color(red: 0.961, green: 0.651, blue: 0.137).opacity(0.11)
-            self.hairline = Color(red: 0.961, green: 0.651, blue: 0.137).opacity(0.17)
-            self.hairlineStrong = Color(red: 0.961, green: 0.651, blue: 0.137).opacity(0.36)
-            self.reticle = Color(red: 0.961, green: 0.651, blue: 0.137).opacity(0.55)
-            self.inkPrimary = Color(red: 0.961, green: 0.925, blue: 0.863)     // #F5ECDC
-            self.inkSecondary = Color(red: 0.690, green: 0.596, blue: 0.471)   // #B09878
-            self.inkMuted = Color(red: 0.431, green: 0.357, blue: 0.271)       // #6E5B45
+            self.canvas = isNotch ? Color.black : Color(red: 0.047, green: 0.039, blue: 0.031) // #0C0A08 Warm CRT Charcoal
+            self.surface = isNotch ? Color.black : Color(red: 0.082, green: 0.071, blue: 0.055) // #15120E
+            self.surfaceRaised = Color(red: 0.961, green: 0.651, blue: 0.137).opacity(0.10)
+            self.hairline = Color(red: 0.961, green: 0.925, blue: 0.863).opacity(0.13)
+            self.hairlineStrong = Color(red: 0.961, green: 0.651, blue: 0.137).opacity(0.32)
+            self.reticle = Color(red: 0.176, green: 0.831, blue: 0.749).opacity(0.52)
+            self.inkPrimary = Color(red: 0.961, green: 0.925, blue: 0.863)     // #F5ECDC Warm Cream
+            self.inkSecondary = Color(red: 0.702, green: 0.612, blue: 0.494)   // #B39C7E
+            self.inkMuted = Color(red: 0.447, green: 0.373, blue: 0.282)       // #725F48
             self.accent = Color(red: 0.961, green: 0.651, blue: 0.137)         // #F5A623 Phosphor Amber
-            self.invertedBg = Color(red: 0.961, green: 0.651, blue: 0.137)
-            self.invertedInk = Color.black
+            self.accentSecondary = Color(red: 0.176, green: 0.831, blue: 0.749) // #2DD4BF Luminous Petrol Teal
+            self.invertedBg = Color(red: 0.961, green: 0.651, blue: 0.137)     // #F5A623
+            self.invertedInk = Color(red: 0.047, green: 0.039, blue: 0.031)    // #0C0A08
+
+        // 5. Racing — British Racing Emerald × Burnished Gold (Heritage Chronograph)
+        case (.racing, false):
+            self.canvas = Color(red: 0.925, green: 0.949, blue: 0.929)         // #ECF2ED Heritage Sage Paper
+            self.surface = Color(red: 0.882, green: 0.918, blue: 0.890)        // #E1EAE3
+            self.surfaceRaised = Color(red: 0.965, green: 0.980, blue: 0.969)  // #F6FAF7
+            self.hairline = Color(red: 0.051, green: 0.141, blue: 0.106).opacity(0.13)
+            self.hairlineStrong = Color(red: 0.051, green: 0.141, blue: 0.106).opacity(0.28)
+            self.reticle = Color(red: 0.702, green: 0.455, blue: 0.000).opacity(0.48)
+            self.inkPrimary = Color(red: 0.051, green: 0.141, blue: 0.106)     // #0D241B Deep Pine Ink
+            self.inkSecondary = Color(red: 0.196, green: 0.341, blue: 0.278)   // #325747
+            self.inkMuted = Color(red: 0.376, green: 0.518, blue: 0.455)       // #608474
+            self.accent = Color(red: 0.047, green: 0.451, blue: 0.294)         // #0C734B British Racing Emerald
+            self.accentSecondary = Color(red: 0.702, green: 0.455, blue: 0.000) // #B37400 Burnished Brass Gold
+            self.invertedBg = Color(red: 0.051, green: 0.141, blue: 0.106)     // #0D241B
+            self.invertedInk = Color(red: 0.925, green: 0.949, blue: 0.929)    // #ECF2ED
+
+        case (.racing, true):
+            self.canvas = isNotch ? Color.black : Color(red: 0.031, green: 0.090, blue: 0.067) // #081711 Deep British Racing Green
+            self.surface = isNotch ? Color.black : Color(red: 0.055, green: 0.141, blue: 0.106) // #0E241B
+            self.surfaceRaised = Color(red: 0.176, green: 0.831, blue: 0.533).opacity(0.095)
+            self.hairline = Color(red: 0.925, green: 0.961, blue: 0.933).opacity(0.14)
+            self.hairlineStrong = Color(red: 0.949, green: 0.718, blue: 0.251).opacity(0.34)
+            self.reticle = Color(red: 0.949, green: 0.718, blue: 0.251).opacity(0.54)
+            self.inkPrimary = Color(red: 0.925, green: 0.961, blue: 0.933)     // #ECF5EE Warm Ivory-Mint
+            self.inkSecondary = Color(red: 0.545, green: 0.702, blue: 0.612)   // #8BB39C
+            self.inkMuted = Color(red: 0.310, green: 0.459, blue: 0.376)       // #4F7560
+            self.accent = Color(red: 0.176, green: 0.831, blue: 0.533)         // #2DD488 Racing Emerald
+            self.accentSecondary = Color(red: 0.949, green: 0.718, blue: 0.251) // #F2B740 Burnished Chronograph Gold
+            self.invertedBg = Color(red: 0.949, green: 0.718, blue: 0.251)     // #F2B740
+            self.invertedInk = Color(red: 0.031, green: 0.090, blue: 0.067)    // #081711
+
+        // 6. Volt — Acid Volt × Electric Ultraviolet (High-Visibility Telemetry)
+        case (.volt, false):
+            self.canvas = Color(red: 0.949, green: 0.957, blue: 0.973)         // #F2F4F8 Cool Technical Chalk
+            self.surface = Color(red: 0.906, green: 0.918, blue: 0.949)        // #E7EAF2
+            self.surfaceRaised = Color(red: 0.980, green: 0.984, blue: 0.992)  // #FAFBFD
+            self.hairline = Color(red: 0.075, green: 0.086, blue: 0.122).opacity(0.12)
+            self.hairlineStrong = Color(red: 0.075, green: 0.086, blue: 0.122).opacity(0.28)
+            self.reticle = Color(red: 0.427, green: 0.157, blue: 0.851).opacity(0.46)
+            self.inkPrimary = Color(red: 0.075, green: 0.086, blue: 0.122)     // #13161F Graphite Ink
+            self.inkSecondary = Color(red: 0.278, green: 0.302, blue: 0.380)   // #474D61
+            self.inkMuted = Color(red: 0.482, green: 0.506, blue: 0.588)       // #7B8196
+            self.accent = Color(red: 0.247, green: 0.431, blue: 0.000)         // #3F6E00 High-Contrast Acid Moss
+            self.accentSecondary = Color(red: 0.427, green: 0.157, blue: 0.851) // #6D28D9 Deep Ultraviolet
+            self.invertedBg = Color(red: 0.075, green: 0.086, blue: 0.122)     // #13161F
+            self.invertedInk = Color(red: 0.949, green: 0.957, blue: 0.973)    // #F2F4F8
+
+        case (.volt, true):
+            self.canvas = isNotch ? Color.black : Color(red: 0.031, green: 0.024, blue: 0.059) // #08060F Ultraviolet Obsidian
+            self.surface = isNotch ? Color.black : Color(red: 0.067, green: 0.051, blue: 0.118) // #110D1E
+            self.surfaceRaised = Color(red: 0.702, green: 0.420, blue: 1.000).opacity(0.11)
+            self.hairline = Color(red: 0.953, green: 0.965, blue: 0.918).opacity(0.13)
+            self.hairlineStrong = Color(red: 0.702, green: 0.420, blue: 1.000).opacity(0.34)
+            self.reticle = Color(red: 0.702, green: 0.420, blue: 1.000).opacity(0.55)
+            self.inkPrimary = Color(red: 0.953, green: 0.965, blue: 0.918)     // #F3F6EA Crisp Ivory
+            self.inkSecondary = Color(red: 0.639, green: 0.620, blue: 0.722)   // #A39EB8
+            self.inkMuted = Color(red: 0.400, green: 0.376, blue: 0.482)       // #66607B
+            self.accent = Color(red: 0.784, green: 1.000, blue: 0.000)         // #C8FF00 Acid Volt Chartreuse
+            self.accentSecondary = Color(red: 0.702, green: 0.420, blue: 1.000) // #B36BFF Electric Ultraviolet
+            self.invertedBg = Color(red: 0.784, green: 1.000, blue: 0.000)     // #C8FF00
+            self.invertedInk = Color(red: 0.031, green: 0.024, blue: 0.059)    // #08060F
         }
 
         self.accentSoft = self.accent.opacity(dark ? 0.16 : 0.10)
+        self.accentSecondarySoft = self.accentSecondary.opacity(dark ? 0.16 : 0.10)
         self.signalAmber = dark
             ? Color(red: 0.961, green: 0.651, blue: 0.137)
             : Color(red: 0.855, green: 0.520, blue: 0.020)
@@ -227,6 +304,7 @@ struct AGYTheme: Equatable {
         }
         switch preset {
         case .monolith:
+            // Monochrome lithology ramp + Electric Cobalt focal accent on .carbon
             switch mc {
             case .carbon:   return accent
             case .argon:    return inkPrimary.opacity(0.82)
@@ -236,48 +314,17 @@ struct AGYTheme: Equatable {
             case .claude:   return inkPrimary.opacity(0.72)
             case .other:    return inkMuted.opacity(0.48)
             }
-        case .blueprint:
-            // Strict cyanotype monochrome ink ramp (inspired by Polar archival blueprints)
-            if isDark {
-                switch mc {
-                case .carbon:   return accent                                      // Archival Bone Highlight
-                case .argon:    return Color(red: 0.78, green: 0.83, blue: 1.00)   // Pale Cyanotype Ink
-                case .neon:     return Color(red: 0.62, green: 0.69, blue: 0.96)   // Periwinkle Ink
-                case .hydrogen: return Color(red: 0.48, green: 0.56, blue: 0.88)   // Mid Blueprint Ink
-                case .flash:    return Color(red: 0.36, green: 0.44, blue: 0.78)   // Deep Blueprint Ink
-                case .claude:   return Color(red: 0.86, green: 0.89, blue: 0.98)   // Bright Chalk Ink
-                case .other:    return inkMuted
-                }
-            } else {
-                switch mc {
-                case .carbon:   return accent                                      // Vivid Cobalt
-                case .argon:    return Color(red: 0.12, green: 0.18, blue: 0.52)   // Deep Prussian Ink
-                case .neon:     return Color(red: 0.24, green: 0.32, blue: 0.68)   // Mid Indigo Ink
-                case .hydrogen: return Color(red: 0.38, green: 0.46, blue: 0.78)   // Muted Cobalt Ink
-                case .flash:    return Color(red: 0.54, green: 0.60, blue: 0.84)   // Pale Blueprint Ink
-                case .claude:   return Color(red: 0.16, green: 0.24, blue: 0.60)   // Indigo Ink
-                case .other:    return inkMuted
-                }
-            }
-        case .phosphor:
-            switch mc {
-            case .carbon:   return Color(red: 0.231, green: 0.482, blue: 1.000) // #3B7BFF Cobalt
-            case .argon:    return Color(red: 0.133, green: 0.722, blue: 0.812) // #22B8CF Ice Cyan
-            case .neon:     return Color(red: 0.482, green: 0.408, blue: 0.933) // #7B68EE Iris
-            case .hydrogen: return Color(red: 0.180, green: 0.620, blue: 0.561) // #2E9E8F Deep Teal
-            case .flash:    return Color(red: 0.243, green: 0.722, blue: 0.510) // #3EB882 Mint
-            case .claude:   return Color(red: 0.788, green: 0.478, blue: 0.329) // #C97A54 Copper
-            case .other:    return Color(red: 0.431, green: 0.482, blue: 0.549) // #6E7B8C Graphite
-            }
-        case .amber:
+        case .blueprint, .risograph, .amber, .racing, .volt:
+            // Two-color duotone ramp: primary Gemini models in Color 1 (accent),
+            // counter-group (.claude, .hydrogen, .flash) in Color 2 (accentSecondary).
             switch mc {
             case .carbon:   return accent
-            case .argon:    return inkPrimary.opacity(0.82)
-            case .neon:     return accent.opacity(0.60)
-            case .hydrogen: return inkSecondary.opacity(0.78)
-            case .flash:    return inkMuted.opacity(0.65)
-            case .claude:   return Color(red: 0.851, green: 0.439, blue: 0.220) // Warm copper
-            case .other:    return inkMuted.opacity(0.42)
+            case .argon:    return accent.opacity(0.76)
+            case .neon:     return accent.opacity(0.56)
+            case .claude:   return accentSecondary
+            case .hydrogen: return accentSecondary.opacity(0.78)
+            case .flash:    return accentSecondary.opacity(0.58)
+            case .other:    return inkMuted.opacity(0.55)
             }
         }
     }
@@ -308,31 +355,7 @@ struct AGYTheme: Equatable {
             return hairline.opacity(isDark ? 0.90 : 0.85)
         }
         switch (preset, isDark) {
-        case (.amber, false):
-            let ramp: [Color] = [
-                Color(red: 0.96, green: 0.86, blue: 0.75),
-                Color(red: 0.91, green: 0.69, blue: 0.48),
-                Color(red: 0.85, green: 0.48, blue: 0.21),
-                Color(red: 0.72, green: 0.25, blue: 0.05),
-            ]
-            return ramp[level - 1]
-        case (.amber, true):
-            let ramp: [Color] = [
-                Color(red: 0.24, green: 0.16, blue: 0.05),
-                Color(red: 0.48, green: 0.31, blue: 0.08),
-                Color(red: 0.76, green: 0.49, blue: 0.11),
-                Color(red: 0.98, green: 0.69, blue: 0.18),
-            ]
-            return ramp[level - 1]
-        case (.phosphor, true):
-            let ramp: [Color] = [
-                Color(red: 0.06, green: 0.18, blue: 0.30),
-                Color(red: 0.10, green: 0.36, blue: 0.58),
-                Color(red: 0.18, green: 0.58, blue: 0.86),
-                Color(red: 0.35, green: 0.82, blue: 1.00),
-            ]
-            return ramp[level - 1]
-        case (_, false):
+        case (.monolith, false):
             let ramp: [Color] = [
                 Color(red: 0.84, green: 0.88, blue: 1.00),
                 Color(red: 0.58, green: 0.69, blue: 1.00),
@@ -340,12 +363,102 @@ struct AGYTheme: Equatable {
                 Color(red: 0.10, green: 0.24, blue: 0.82),
             ]
             return ramp[level - 1]
-        case (_, true):
+        case (.monolith, true):
             let ramp: [Color] = [
                 Color(red: 0.08, green: 0.14, blue: 0.30),
                 Color(red: 0.14, green: 0.27, blue: 0.62),
                 Color(red: 0.25, green: 0.46, blue: 0.98),
                 Color(red: 0.50, green: 0.68, blue: 1.00),
+            ]
+            return ramp[level - 1]
+
+        // Duotone transition: Signal Orange (L1–L2) -> Cyanotype Cobalt (L3–L4)
+        case (.blueprint, false):
+            let ramp: [Color] = [
+                Color(red: 0.949, green: 0.776, blue: 0.690), // #F2C6B0
+                Color(red: 0.898, green: 0.478, blue: 0.267), // #E57A44
+                Color(red: 0.322, green: 0.439, blue: 0.980), // #5270FA
+                Color(red: 0.086, green: 0.184, blue: 0.831), // #162FD4
+            ]
+            return ramp[level - 1]
+        case (.blueprint, true):
+            let ramp: [Color] = [
+                Color(red: 0.302, green: 0.133, blue: 0.078), // #4D2214
+                Color(red: 0.788, green: 0.302, blue: 0.125), // #C94D20
+                Color(red: 0.275, green: 0.416, blue: 0.902), // #466AE6
+                Color(red: 0.549, green: 0.667, blue: 1.000), // #8CAAFF
+            ]
+            return ramp[level - 1]
+
+        // Duotone transition: Federal Blue (L1–L2) -> Fluorescent Pink (L3–L4)
+        case (.risograph, false):
+            let ramp: [Color] = [
+                Color(red: 0.769, green: 0.824, blue: 0.980), // #C4D2FA
+                Color(red: 0.329, green: 0.471, blue: 0.980), // #5478FA
+                Color(red: 0.910, green: 0.302, blue: 0.557), // #E84D8E
+                Color(red: 0.769, green: 0.063, blue: 0.365), // #C4105D
+            ]
+            return ramp[level - 1]
+        case (.risograph, true):
+            let ramp: [Color] = [
+                Color(red: 0.078, green: 0.149, blue: 0.322), // #142652
+                Color(red: 0.180, green: 0.357, blue: 0.839), // #2E5BD6
+                Color(red: 0.788, green: 0.141, blue: 0.431), // #C9246E
+                Color(red: 1.000, green: 0.278, blue: 0.592), // #FF4797
+            ]
+            return ramp[level - 1]
+
+        // Duotone transition: Petrol Teal (L1–L2) -> Braun Amber (L3–L4)
+        case (.amber, false):
+            let ramp: [Color] = [
+                Color(red: 0.725, green: 0.867, blue: 0.851), // #B9DDD9
+                Color(red: 0.231, green: 0.604, blue: 0.612), // #3B9A9C
+                Color(red: 0.875, green: 0.463, blue: 0.200), // #DF7633
+                Color(red: 0.710, green: 0.263, blue: 0.031), // #B54308
+            ]
+            return ramp[level - 1]
+        case (.amber, true):
+            let ramp: [Color] = [
+                Color(red: 0.051, green: 0.220, blue: 0.204), // #0D3834
+                Color(red: 0.114, green: 0.541, blue: 0.494), // #1D8A7E
+                Color(red: 0.761, green: 0.478, blue: 0.078), // #C27A14
+                Color(red: 1.000, green: 0.710, blue: 0.212), // #FFB536
+            ]
+            return ramp[level - 1]
+
+        // Duotone transition: Burnished Gold (L1–L2) -> British Racing Emerald (L3–L4)
+        case (.racing, false):
+            let ramp: [Color] = [
+                Color(red: 0.902, green: 0.827, blue: 0.639), // #E6D3A3
+                Color(red: 0.788, green: 0.565, blue: 0.141), // #C99024
+                Color(red: 0.169, green: 0.580, blue: 0.408), // #2B9468
+                Color(red: 0.031, green: 0.361, blue: 0.227), // #085C3A
+            ]
+            return ramp[level - 1]
+        case (.racing, true):
+            let ramp: [Color] = [
+                Color(red: 0.239, green: 0.180, blue: 0.055), // #3D2E0E
+                Color(red: 0.659, green: 0.482, blue: 0.118), // #A87B1E
+                Color(red: 0.102, green: 0.580, blue: 0.365), // #1A945D
+                Color(red: 0.220, green: 0.878, blue: 0.580), // #38E094
+            ]
+            return ramp[level - 1]
+
+        // Duotone transition: Ultraviolet (L1–L2) -> Acid Volt (L3–L4)
+        case (.volt, false):
+            let ramp: [Color] = [
+                Color(red: 0.843, green: 0.780, blue: 0.980), // #D7C7FA
+                Color(red: 0.553, green: 0.357, blue: 0.941), // #8D5BF0
+                Color(red: 0.392, green: 0.620, blue: 0.071), // #649E12
+                Color(red: 0.224, green: 0.388, blue: 0.000), // #396300
+            ]
+            return ramp[level - 1]
+        case (.volt, true):
+            let ramp: [Color] = [
+                Color(red: 0.176, green: 0.090, blue: 0.302), // #2D174D
+                Color(red: 0.478, green: 0.243, blue: 0.839), // #7A3ED6
+                Color(red: 0.518, green: 0.722, blue: 0.000), // #84B800
+                Color(red: 0.784, green: 1.000, blue: 0.000), // #C8FF00
             ]
             return ramp[level - 1]
         }

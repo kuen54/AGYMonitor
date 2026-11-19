@@ -86,4 +86,74 @@ struct QuotaStateTests {
         #expect(phase == .failed(error: .unauthorized, retryAt: nil))
         #expect(phase.hasAccountSurface)
     }
+
+    @Test("QuotaFetchGate serves cache/cooldown, coalesces in-flight, and queues forced follow-up on ⌘R")
+    func quotaFetchGateCoalescingAndUpgrade() {
+        var gate = QuotaFetchGate()
+        let t0 = Date(timeIntervalSince1970: 10_000)
+
+        // Fresh cache short-circuits non-forced fetch
+        #expect(gate.request(force: false, cacheTimestamp: t0.addingTimeInterval(-10), ttl: 60, cooldownDeadline: nil, now: t0) == .serveCache)
+
+        // Active 429 cooldown blocks even forced refreshes from hammering server
+        let until = t0.addingTimeInterval(120)
+        #expect(gate.request(force: true, cacheTimestamp: nil, ttl: 60, cooldownDeadline: until, now: t0) == .serveCooldown(retryAt: until))
+
+        // Start a non-forced network fetch
+        #expect(gate.request(force: false, cacheTimestamp: nil, ttl: 60, cooldownDeadline: nil, now: t0) == .startNetworkFetch(force: false))
+        #expect(gate.isInFlight)
+
+        // Non-forced caller coalesces without queueing a follow-up
+        #expect(gate.request(force: false, cacheTimestamp: nil, ttl: 60, cooldownDeadline: nil, now: t0) == .coalesceIntoInFlight)
+        #expect(!gate.pendingForcedFollowUp)
+
+        // Forced ⌘R during non-forced in-flight queues a single forced follow-up
+        #expect(gate.request(force: true, cacheTimestamp: nil, ttl: 60, cooldownDeadline: nil, now: t0) == .coalesceIntoInFlight)
+        #expect(gate.pendingForcedFollowUp)
+
+        // Completing the first fetch triggers the forced follow-up
+        #expect(gate.complete() == true)
+        #expect(gate.isInFlight)
+        #expect(gate.currentForce)
+
+        // Completing the forced follow-up leaves gate idle
+        #expect(gate.complete() == false)
+        #expect(!gate.isInFlight)
+    }
+
+    @Test("TokenPresenceProbeState performs SWR revalidation without overlapping probes")
+    func tokenPresenceSWR() {
+        var swr = TokenPresenceProbeState(ttl: 60)
+        let t0 = Date(timeIntervalSince1970: 1_000)
+
+        #expect(swr.evaluate(now: t0) == .probeSynchronously)
+        swr.recordResult(true, at: t0)
+
+        // Fresh within TTL
+        #expect(swr.evaluate(now: t0.addingTimeInterval(30)) == .returnCached(true))
+
+        // Stale past TTL triggers one background revalidation
+        #expect(swr.evaluate(now: t0.addingTimeInterval(65)) == .returnCachedAndRevalidate(true))
+        // Second call while revalidating does NOT spawn duplicate probe
+        #expect(swr.evaluate(now: t0.addingTimeInterval(66)) == .returnCached(true))
+
+        swr.recordResult(false, at: t0.addingTimeInterval(67))
+        #expect(swr.evaluate(now: t0.addingTimeInterval(70)) == .returnCached(false))
+    }
+
+    @Test("shouldAutoRefreshOnTabEntry skips redundant probes during .loading and active 429 cooldown")
+    func tabEntryAutoRefreshGate() {
+        let now = Date(timeIntervalSince1970: 50_000)
+        let future = now.addingTimeInterval(90)
+
+        #expect(!QuotaStateReducer.shouldAutoRefreshOnTabEntry(phase: QuotaPhase<String>.loading, cooldownUntil: nil, now: now))
+        #expect(!QuotaStateReducer.shouldAutoRefreshOnTabEntry(phase: QuotaPhase<String>.failed(error: .rateLimited, retryAt: future), cooldownUntil: nil, now: now))
+        #expect(!QuotaStateReducer.shouldAutoRefreshOnTabEntry(phase: QuotaPhase<String>.noAccount, cooldownUntil: future, now: now))
+
+        // Fresh snapshot (< 30s) skips refresh; stale snapshot (> 30s) refreshes
+        let freshReady: QuotaPhase<String> = .ready(snapshot: "ok", source: .live, updatedAt: now.addingTimeInterval(-10), notice: .none)
+        let staleReady: QuotaPhase<String> = .ready(snapshot: "ok", source: .live, updatedAt: now.addingTimeInterval(-45), notice: .none)
+        #expect(!QuotaStateReducer.shouldAutoRefreshOnTabEntry(phase: freshReady, cooldownUntil: nil, now: now))
+        #expect(QuotaStateReducer.shouldAutoRefreshOnTabEntry(phase: staleReady, cooldownUntil: nil, now: now))
+    }
 }

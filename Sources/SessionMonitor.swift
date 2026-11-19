@@ -78,12 +78,7 @@ final class SessionMonitor {
     private var fsStream: FSEventStreamRef?
     private var fsCoalesceWork: DispatchWorkItem?
     private var pollTimer: DispatchSourceTimer?
-    private var started = false
-
-    private var fsHealthy = false
-    private var lastFSAttemptAt: Date?
-    private var pollInterval: TimeInterval?
-    private var lastLiveCount = 0
+    private var lifecycle = SessionMonitorLifecycleState()
 
     // Queue-confined caches
     private var lastScan: SessionScan?
@@ -140,11 +135,6 @@ final class SessionMonitor {
     private var prevStatuses: [String: SessionStatus] = [:]
     private var doneUnseen: [String: Double] = [:]
 
-    // Poll cadence
-    private let activeInterval: TimeInterval = 2.0
-    private let idleInterval: TimeInterval = 6.0
-    private var isActive = false
-
     init(sessionsDir: String? = nil, projectsDir: URL? = nil,
          onChange: @escaping (SessionScan) -> Void) {
         self.onChange = onChange
@@ -161,39 +151,23 @@ final class SessionMonitor {
                 : AGYLocator.presenceDir(home: home))
     }
 
-    // MARK: - Lifecycle
+    // MARK: - Lifecycle (backed by SessionMonitorLifecycleMachine)
 
     func start() {
         queue.async { [weak self] in
-            guard let self = self, !self.started else { return }
-            self.started = true
-            self.startFSWatcher()
-            self.rescan()
+            self?.dispatchLifecycle(.start(now: Date()))
         }
     }
 
     func stop() {
         queue.async { [weak self] in
-            guard let self = self, self.started else { return }
-            self.started = false
-            self.fsCoalesceWork?.cancel()
-            self.fsCoalesceWork = nil
-            self.cancelPoll()
-            self.fsHealthy = false
-            if let s = self.fsStream {
-                FSEventStreamStop(s)
-                FSEventStreamInvalidate(s)
-                FSEventStreamRelease(s)
-                self.fsStream = nil
-            }
+            self?.dispatchLifecycle(.stop)
         }
     }
 
     func setActive(_ active: Bool) {
         queue.async { [weak self] in
-            guard let self = self, self.started, self.isActive != active else { return }
-            self.isActive = active
-            self.rescan()
+            self?.dispatchLifecycle(.setActive(active, now: Date()))
         }
     }
 
@@ -209,17 +183,45 @@ final class SessionMonitor {
         }
     }
 
+    private func dispatchLifecycle(_ event: SessionMonitorLifecycleEvent) {
+        let effects = SessionMonitorLifecycleMachine.reduce(&lifecycle, event: event)
+        for effect in effects {
+            switch effect {
+            case .startFSWatcher:
+                startFSWatcher()
+            case .stopFSWatcher:
+                stopFSWatcher()
+            case .scheduleFSCoalesce:
+                scheduleFSCoalesce()
+            case .cancelFSCoalesce:
+                fsCoalesceWork?.cancel()
+                fsCoalesceWork = nil
+            case .setPollTimer(let interval):
+                if let interval = interval {
+                    startPollTimer(interval: interval)
+                } else {
+                    cancelPoll()
+                }
+            case .runScan:
+                performScan()
+            }
+        }
+    }
+
     // MARK: - FSEvents (sub-second reactivity)
 
-    private func startFSWatcher() {
-        lastFSAttemptAt = Date()
-        fsHealthy = false
-        if let existing = fsStream {
-            FSEventStreamStop(existing)
-            FSEventStreamInvalidate(existing)
-            FSEventStreamRelease(existing)
+    private func stopFSWatcher() {
+        if let s = fsStream {
+            FSEventStreamStop(s)
+            FSEventStreamInvalidate(s)
+            FSEventStreamRelease(s)
             fsStream = nil
         }
+    }
+
+    private func startFSWatcher() {
+        let attemptAt = Date()
+        stopFSWatcher()
         let fm = FileManager.default
         var candidateDirs = usesCustomProjectsDir
             ? [
@@ -235,7 +237,10 @@ final class SessionMonitor {
             var isDir: ObjCBool = false
             return fm.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
         }
-        guard !existingDirs.isEmpty else { return }
+        guard !existingDirs.isEmpty else {
+            dispatchLifecycle(.fsWatcherAttempted(healthy: false, at: attemptAt))
+            return
+        }
 
         var context = FSEventStreamContext(
             version: 0,
@@ -244,7 +249,7 @@ final class SessionMonitor {
         let callback: FSEventStreamCallback = { _, info, _, _, _, _ in
             guard let info = info else { return }
             let monitor = Unmanaged<SessionMonitor>.fromOpaque(info).takeUnretainedValue()
-            monitor.scheduleFSRescan()
+            monitor.dispatchLifecycle(.fsEventReceived)
         }
         guard let stream = FSEventStreamCreate(
             kCFAllocatorDefault,
@@ -254,24 +259,29 @@ final class SessionMonitor {
             FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
             0.3,
             FSEventStreamCreateFlags(kFSEventStreamCreateFlagWatchRoot)
-        ) else { return }
+        ) else {
+            dispatchLifecycle(.fsWatcherAttempted(healthy: false, at: attemptAt))
+            return
+        }
 
         FSEventStreamSetDispatchQueue(stream, queue)
         if FSEventStreamStart(stream) {
             fsStream = stream
-            fsHealthy = existingDirs.contains(cliRootDir)
+            let healthy = existingDirs.contains(cliRootDir)
+            dispatchLifecycle(.fsWatcherAttempted(healthy: healthy, at: attemptAt))
         } else {
             NSLog("AGYMonitor: session FSEventStreamStart failed; poll-only")
             FSEventStreamInvalidate(stream)
             FSEventStreamRelease(stream)
             fsStream = nil
+            dispatchLifecycle(.fsWatcherAttempted(healthy: false, at: attemptAt))
         }
     }
 
-    private func scheduleFSRescan() {
+    private func scheduleFSCoalesce() {
         fsCoalesceWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            self?.rescan()
+            self?.dispatchLifecycle(.fsCoalesceFired(now: Date()))
         }
         fsCoalesceWork = work
         queue.asyncAfter(deadline: .now() + 0.15, execute: work)
@@ -283,40 +293,22 @@ final class SessionMonitor {
         pollTimer?.cancel()
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + interval, repeating: interval, leeway: .milliseconds(500))
-        timer.setEventHandler { [weak self] in self?.rescan() }
+        timer.setEventHandler { [weak self] in
+            self?.dispatchLifecycle(.pollTimerFired(now: Date()))
+        }
         pollTimer = timer
-        pollInterval = interval
         timer.resume()
     }
 
     private func cancelPoll() {
         pollTimer?.cancel()
         pollTimer = nil
-        pollInterval = nil
-    }
-
-    private func reconcilePoll() {
-        guard let desired = SessionPollCadence.interval(
-            started: started,
-            fsHealthy: fsHealthy,
-            isActive: isActive,
-            liveCount: lastLiveCount
-        ) else {
-            cancelPoll()
-            return
-        }
-        if pollInterval != desired { startPollTimer(interval: desired) }
     }
 
     // MARK: - Main Scan Pipeline (queue only)
 
-    private func rescan(now: Double = Date().timeIntervalSince1970) {
-        let nowDate = Date(timeIntervalSince1970: now)
-        if SessionPollCadence.shouldRetryFSWatcher(
-            started: started, fsHealthy: fsHealthy, now: nowDate, lastAttemptAt: lastFSAttemptAt
-        ) {
-            startFSWatcher()
-        }
+    private func performScan(now: Double = Date().timeIntervalSince1970) {
+        guard lifecycle.isStarted else { return }
         var scan = computeScan(now: now)
         let stepped = SessionLogic.stepDoneUnseen(
             prev: prevStatuses, current: scan.sessions,
@@ -330,8 +322,7 @@ final class SessionMonitor {
             lastScan = scan
             DispatchQueue.main.async { [weak self] in self?.onChange(scan) }
         }
-        lastLiveCount = scan.sessions.count
-        reconcilePoll()
+        dispatchLifecycle(.scanCompleted(liveCount: scan.sessions.count))
     }
 
     private struct RunningSurfaceApps {

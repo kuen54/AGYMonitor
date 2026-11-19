@@ -17,7 +17,11 @@ class UsageStore: ObservableObject {
             guard selectedTab != oldValue else { return }
             syncActiveLoadingFlag()
             guard selectedTab == .subscription else { return }
-            if quotaUpdatedAt == nil || Date().timeIntervalSince(quotaUpdatedAt!) > 30 {
+            if QuotaStateReducer.shouldAutoRefreshOnTabEntry(
+                phase: quotaState,
+                cooldownUntil: SubscriptionQuotaService.shared.rateLimitCooldownUntil,
+                now: Date()
+            ) {
                 DispatchQueue.main.async { [weak self] in
                     self?.refreshQuota(force: true)
                 }
@@ -263,7 +267,7 @@ class UsageStore: ObservableObject {
     private let archive = UsageArchive()
 
     private let scriptQueue = DispatchQueue(label: "com.kuen54.AGYMonitor.scripts", qos: .utility)
-    private var fetchGeneration = 0
+    private var historicalLoadGate = HistoricalMonthLoadGate()
     private var refreshQueue = RefreshQueueState()
     private var monthNav: MonthNavigationState
     private var yearLoadGate = YearLoadGate()
@@ -540,7 +544,7 @@ class UsageStore: ObservableObject {
         isSyncingMonthNav = false
 
         selectedWeekMonday = nil
-        fetchGeneration += 1
+        historicalLoadGate.invalidate()
 
         if isCurrentMonth {
             refresh()
@@ -556,6 +560,7 @@ class UsageStore: ObservableObject {
         if !force,
            let snapshot = loadCacheSnapshot(year: y, month: m),
            snapshot.dailyBreakdown != nil, snapshot.time != nil {
+            historicalLoadGate.invalidate()
             let (om, od, ot) = archiveOverlayHistorical(
                 month: snapshot.data, daily: snapshot.dailyBreakdown,
                 time: snapshot.time, yearMonth: ym)
@@ -570,19 +575,23 @@ class UsageStore: ObservableObject {
             self.syncActiveLoadingFlag()
             return
         }
+        guard let generation = historicalLoadGate.beginLoad(yearMonth: ym, force: force) else {
+            return
+        }
         historicalMonthLoadPhase = force
             ? historicalMonthLoadPhase.transitioningToLoading()
             : .loading(cached: nil)
         syncActiveLoadingFlag()
-        fetchGeneration += 1
-        let generation = fetchGeneration
         scriptQueue.async { [weak self] in
             guard let self = self else { return }
             let range = AppDate.monthDateRange(year: y, month: m)
             let (data, daily, time) = self.fetchMonthData(range, yearMonth: ym)
             DispatchQueue.main.async {
-                guard generation == self.fetchGeneration,
-                      self.viewingYear == y && self.viewingMonth == m else { return }
+                self.historicalLoadGate.completeLoad(generation: generation)
+                let currentYM = String(format: "%04d-%02d", self.viewingYear, self.viewingMonth)
+                guard self.historicalLoadGate.isCurrent(
+                    generation: generation, yearMonth: ym, currentYearMonth: currentYM
+                ) else { return }
                 let phase: LoadPhase<HistoricalMonthBundle>
                 if let data = data {
                     self.saveCache(year: y, month: m, data: data, daily: daily, time: time)
@@ -618,7 +627,7 @@ class UsageStore: ObservableObject {
             viewingMonth = monthNav.viewingMonth
             isSyncingMonthNav = false
             selectedWeekMonday = nil
-            fetchGeneration += 1
+            historicalLoadGate.invalidate()
         }
 
         refreshQuota(force: force)

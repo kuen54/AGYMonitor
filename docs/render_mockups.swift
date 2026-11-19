@@ -195,7 +195,9 @@ func makeStore(
     range: TimeRange = .week,
     notch: Bool = false,
     preset: TelemetryThemePreset = .monolith,
-    visualMode: TelemetryVisualMode = .instrument
+    visualMode: TelemetryVisualMode = .instrument,
+    geminiUsed: Double = 22,
+    claudeUsed: Double = 64
 ) -> UsageStore {
     let s = UsageStore()
     let cal = Calendar(identifier: .gregorian)
@@ -234,8 +236,8 @@ func makeStore(
     ))
     s.yearLoadPhase = .loaded(year)
     let quota = OAuthUsage(
-        five_hour: OAuthUsageWindow(utilization: 22, resets_at: resetIn(2.4), label: "Gemini Models"),
-        seven_day: OAuthUsageWindow(utilization: 64, resets_at: resetIn(3.8), label: "Claude & GPT · 5h"),
+        five_hour: OAuthUsageWindow(utilization: geminiUsed, resets_at: resetIn(2.4), label: "Gemini Models"),
+        seven_day: OAuthUsageWindow(utilization: claudeUsed, resets_at: resetIn(3.8), label: "Claude & GPT · 5h"),
         extra_usage: nil,
         seven_day_sonnet: nil,
         limits: OAuthLimitList(items: [
@@ -269,16 +271,17 @@ struct DemoPopover: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Bare Header
-            HStack(spacing: 8) {
-                HStack(spacing: 6) {
+            // Bare Header (pixel-identical to PopoverView)
+            HStack(alignment: .center, spacing: 8) {
+                HStack(alignment: .center, spacing: 6) {
                     DemoAGYLogoShape()
                         .fill(theme.accent)
-                        .frame(width: 13.5, height: 13.5)
+                        .frame(width: 13, height: 13)
                     Text(loc("title").uppercased())
                         .font(.system(size: 10.5, weight: .medium, design: .monospaced))
                         .tracking(1.6)
                         .foregroundColor(theme.inkPrimary)
+                        .lineLimit(1)
 
                     HStack(spacing: 4) {
                         Rectangle()
@@ -289,20 +292,24 @@ struct DemoPopover: View {
                             .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
                             .tracking(0.4)
                             .foregroundColor(theme.signalAmber)
+                            .lineLimit(1)
                     }
                     .padding(.horizontal, 5.5)
                     .padding(.vertical, 2)
                     .background(theme.signalAmber.opacity(theme.isDark ? 0.12 : 0.08))
-                    .overlay(Rectangle().stroke(theme.signalAmber.opacity(0.48), lineWidth: 0.75))
+                    .overlay(Rectangle().strokeBorder(theme.signalAmber.opacity(0.48), lineWidth: 0.75))
                 }
+                .frame(height: 20, alignment: .leading)
 
                 Spacer(minLength: 4)
 
                 headerAccessory
+                    .frame(height: 20, alignment: .trailing)
             }
+            .frame(height: 20)
             .padding(.horizontal, 14)
-            .padding(.top, 11)
-            .padding(.bottom, 9)
+            .padding(.top, 10)
+            .padding(.bottom, 8)
 
             // Full-bleed Grid Tab Bar
             TelemetryTabBar(
@@ -393,10 +400,11 @@ struct DemoPopover: View {
                 .foregroundColor(theme.inkSecondary)
         case .subscription:
             HStack(spacing: 4) {
-                DemoAGYLogoShape().fill(theme.accent).frame(width: 8, height: 8)
+                DemoAGYLogoShape().fill(theme.accentSecondary).frame(width: 8, height: 8)
                 Text("GOOGLE AI ULTRA")
                     .font(.system(size: 9.5, weight: .bold, design: .monospaced))
-                    .foregroundColor(theme.accent)
+                    .foregroundColor(theme.accentSecondary)
+                    .lineLimit(1)
             }
         }
     }
@@ -549,11 +557,34 @@ struct RenderApp {
             let dir = args[darkIdx + 1]
             try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
             render("dark-cost-blueprint", DemoPopover(store: makeStore(tab: .cost, preset: .blueprint), loc: loc, dark: true), to: dir)
-            render("dark-tokens-phosphor", DemoPopover(store: makeStore(tab: .tokens, preset: .phosphor), loc: loc, dark: true), to: dir)
+            render("dark-tokens-risograph", DemoPopover(store: makeStore(tab: .tokens, preset: .risograph), loc: loc, dark: true), to: dir)
             render("dark-plan-amber", DemoPopover(store: makeStore(tab: .subscription, preset: .amber), loc: loc, dark: true), to: dir)
-            render("dark-time-week-phosphor", DemoPopover(store: makeStore(tab: .time, range: .week, preset: .phosphor), loc: loc, dark: true), to: dir)
-            render("dark-time-year-blueprint", DemoPopover(store: makeStore(tab: .time, range: .year, preset: .blueprint), loc: loc, dark: true), to: dir)
+            render("dark-time-week-racing", DemoPopover(store: makeStore(tab: .time, range: .week, preset: .racing), loc: loc, dark: true), to: dir)
+            render("dark-time-year-volt", DemoPopover(store: makeStore(tab: .time, range: .year, preset: .volt), loc: loc, dark: true), to: dir)
             render("dark-session-monolith", DemoPopover(store: makeStore(tab: .session, preset: .monolith), loc: loc, dark: true), to: dir)
+            return
+        }
+
+        if let verifyIdx = args.firstIndex(of: "--duotone-verify"), verifyIdx + 1 < args.count {
+            let dir = args[verifyIdx + 1]
+            try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            for preset in TelemetryThemePreset.allCases {
+                let p = preset.rawValue
+                // Dark mode for ALL 6 presets across Cost, Tokens, Plan (89% / 100%), and Time Year
+                render("\(p)-dark-cost", DemoPopover(store: makeStore(tab: .cost, preset: preset), loc: loc, dark: true), to: dir)
+                render("\(p)-dark-tokens", DemoPopover(store: makeStore(tab: .tokens, preset: preset), loc: loc, dark: true), to: dir)
+                render("\(p)-dark-plan", DemoPopover(store: makeStore(tab: .subscription, preset: preset, geminiUsed: 11, claudeUsed: 0), loc: loc, dark: true), to: dir)
+                render("\(p)-dark-time-year", DemoPopover(store: makeStore(tab: .time, range: .year, preset: preset), loc: loc, dark: true), to: dir)
+            }
+            // Light mode for blueprint, risograph, racing, amber, volt across Cost, Tokens, Plan (89% / 100%), and Time Year
+            let lightPresets: [TelemetryThemePreset] = [.blueprint, .risograph, .amber, .racing, .volt]
+            for preset in lightPresets {
+                let p = preset.rawValue
+                render("\(p)-light-cost", DemoPopover(store: makeStore(tab: .cost, preset: preset), loc: loc, dark: false), to: dir)
+                render("\(p)-light-tokens", DemoPopover(store: makeStore(tab: .tokens, preset: preset), loc: loc, dark: false), to: dir)
+                render("\(p)-light-plan", DemoPopover(store: makeStore(tab: .subscription, preset: preset, geminiUsed: 11, claudeUsed: 0), loc: loc, dark: false), to: dir)
+                render("\(p)-light-time-year", DemoPopover(store: makeStore(tab: .time, range: .year, preset: preset), loc: loc, dark: false), to: dir)
+            }
             return
         }
 

@@ -104,7 +104,7 @@ struct TokensInstrumentView: View {
                     Text(String(format: loc("cacheHitFmt"), Int(hit.rounded())).uppercased())
                         .font(.system(size: 8.5, weight: .medium, design: .monospaced))
                         .monospacedDigit()
-                        .foregroundColor(theme.accent)
+                        .foregroundColor(theme.accentSecondary)
                 }
             }
 
@@ -448,7 +448,7 @@ struct FoldedTokenFlowChart: View {
                 Text("→ \(channelName(ch)) · \(formatTokensShort(chVal).uppercased()) (\(pct)%)")
                     .font(.system(size: 8, weight: .semibold, design: .monospaced))
                     .monospacedDigit()
-                    .foregroundColor(theme.accent)
+                    .foregroundColor(theme.accentSecondary)
             } else if let fid = focusedModelId, let m = modelById[fid] {
                 let hit = UsageTelemetryLogic.cacheHitPercent(input: m.inputTokens, cacheRead: m.cacheRead)
                     .map { "HIT \(Int($0.rounded()))%" } ?? formatTokensShort(m.totalTokens).uppercased()
@@ -457,10 +457,16 @@ struct FoldedTokenFlowChart: View {
                     .monospacedDigit()
                     .foregroundColor(theme.accent)
             } else {
-                Text(String(format: "%02d MOD → %02d CH", layout.leftNodes.count, layout.rightNodes.count))
-                    .font(.system(size: 8, weight: .regular, design: .monospaced))
-                    .monospacedDigit()
-                    .foregroundColor(theme.inkMuted)
+                HStack(spacing: 3) {
+                    Text(String(format: "%02d MOD", layout.leftNodes.count))
+                        .foregroundColor(theme.inkMuted)
+                    Text("→")
+                        .foregroundColor(theme.inkMuted)
+                    Text(String(format: "%02d CH", layout.rightNodes.count))
+                        .foregroundColor(theme.accentSecondary.opacity(theme.isDark ? 0.90 : 0.85))
+                }
+                .font(.system(size: 8, weight: .regular, design: .monospaced))
+                .monospacedDigit()
             }
         }
     }
@@ -487,7 +493,11 @@ struct FoldedTokenFlowChart: View {
                 HStack(spacing: 3) {
                     Text(String(format: "%02d", idx + 1))
                         .font(.system(size: 7, weight: .regular, design: .monospaced))
-                        .foregroundColor(isFocused ? theme.accent : theme.inkMuted.opacity(0.75))
+                        .foregroundColor(
+                            isFocused
+                                ? theme.accent
+                                : (isDominant && !anyFocus ? theme.accent.opacity(0.88) : theme.inkMuted.opacity(0.75))
+                        )
                         .frame(width: 12, alignment: .leading)
 
                     Text(node.label)
@@ -498,9 +508,13 @@ struct FoldedTokenFlowChart: View {
                     Spacer(minLength: 2)
 
                     Text(formatTokensShort(node.value).uppercased())
-                        .font(.system(size: 8.5, weight: .regular, design: .monospaced))
+                        .font(.system(size: 8.5, weight: (isFocused || (isDominant && !anyFocus)) ? .medium : .regular, design: .monospaced))
                         .monospacedDigit()
-                        .foregroundColor(isFocused ? theme.accent : theme.inkSecondary)
+                        .foregroundColor(
+                            isFocused
+                                ? theme.accent
+                                : (isDominant && !anyFocus ? theme.accent.opacity(0.92) : theme.inkSecondary)
+                        )
                         .lineLimit(1)
                 }
                 .padding(.horizontal, 3)
@@ -559,7 +573,13 @@ struct FoldedTokenFlowChart: View {
                 HStack(spacing: 3) {
                     Text(channelName(ch ?? .cacheRead))
                         .font(.system(size: 8.5, weight: (isFocused || (isDominant && !anyFocus)) ? .medium : .regular, design: .monospaced))
-                        .foregroundColor(isFocused ? theme.accent : (isDominant && !anyFocus ? theme.inkPrimary : theme.inkSecondary))
+                        .foregroundColor(
+                            isFocused
+                                ? theme.accentSecondary
+                                : (isDominant && !anyFocus
+                                   ? theme.accentSecondary
+                                   : theme.accentSecondary.opacity(theme.isDark ? 0.80 : 0.78))
+                        )
                         .lineLimit(1)
 
                     Spacer(minLength: 2)
@@ -567,12 +587,16 @@ struct FoldedTokenFlowChart: View {
                     Text("\(pct)%")
                         .font(.system(size: 8.5, weight: (isFocused || (isDominant && !anyFocus)) ? .medium : .regular, design: .monospaced))
                         .monospacedDigit()
-                        .foregroundColor(isFocused ? theme.accent : (isDominant && !anyFocus ? theme.accent.opacity(0.92) : theme.inkMuted))
+                        .foregroundColor(
+                            isFocused
+                                ? theme.accentSecondary
+                                : (isDominant && !anyFocus ? theme.accentSecondary.opacity(0.95) : theme.inkMuted)
+                        )
                         .lineLimit(1)
                 }
                 .padding(.horizontal, 3)
                 .frame(width: Self.rightLabelWidth, height: 15)
-                .background(isFocused ? theme.accent.opacity(theme.isDark ? 0.12 : 0.06) : Color.clear)
+                .background(isFocused ? theme.accentSecondary.opacity(theme.isDark ? 0.14 : 0.08) : Color.clear)
                 .opacity(isDimmed ? 0.36 : 1.0)
                 .position(x: Self.rightLabelWidth * 0.5, y: cy)
                 .allowsHitTesting(false)
@@ -810,7 +834,7 @@ private struct FoldedFlowBaseCanvas: View, Equatable {
                 meridianTicks.addLine(to: CGPoint(x: midX + 1.5, y: tickY))
                 tickY += 16.0
             }
-            context.stroke(meridianTicks, with: .color(theme.reticle.opacity(0.36)), lineWidth: 0.65)
+            context.stroke(meridianTicks, with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.42 : 0.36)), lineWidth: 0.65)
 
             // 2. Micro depth ruler (00 / 50 / 100 + 25/75 ticks) along the left terminal bar (ref2 blueprint craft)
             var majorDepthTicks = Path()
@@ -869,31 +893,104 @@ private struct FoldedFlowBaseCanvas: View, Equatable {
                 }
             }
 
-            // Draw monochrome archival streams underneath (95% carbon/silver ink discipline)
+            // Draw secondary streams bridging archival left ink into Color 2 (accentSecondary) right channels
             if !monoFills.isEmpty {
-                context.fill(monoFills, with: .color(theme.inkPrimary.opacity(theme.isDark ? 0.10 : 0.065)))
-                context.stroke(monoInternal, with: .color(theme.inkPrimary.opacity(theme.isDark ? 0.22 : 0.17)), lineWidth: 0.55)
+                context.fill(
+                    monoFills,
+                    with: .linearGradient(
+                        Gradient(colors: [
+                            theme.inkPrimary.opacity(theme.isDark ? 0.09 : 0.055),
+                            theme.accentSecondary.opacity(theme.isDark ? 0.15 : 0.105),
+                        ]),
+                        startPoint: CGPoint(x: x0, y: 0),
+                        endPoint: CGPoint(x: x1, y: 0)
+                    )
+                )
+                context.stroke(
+                    monoInternal,
+                    with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.28 : 0.22)),
+                    lineWidth: 0.55
+                )
                 if !monoStipple.isEmpty {
-                    context.fill(monoStipple, with: .color(theme.inkPrimary.opacity(theme.isDark ? 0.26 : 0.20)))
+                    context.fill(
+                        monoStipple,
+                        with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.36 : 0.28))
+                    )
                 }
-                context.stroke(monoOuter, with: .color(theme.inkPrimary.opacity(theme.isDark ? 0.44 : 0.36)), lineWidth: 0.75)
+                context.stroke(
+                    monoOuter,
+                    with: .linearGradient(
+                        Gradient(colors: [
+                            theme.inkPrimary.opacity(theme.isDark ? 0.42 : 0.34),
+                            theme.accentSecondary.opacity(theme.isDark ? 0.60 : 0.52),
+                        ]),
+                        startPoint: CGPoint(x: x0, y: 0),
+                        endPoint: CGPoint(x: x1, y: 0)
+                    ),
+                    lineWidth: 0.75
+                )
             }
 
-            // Draw ONLY the single dominant flow ribbon in reserved 1% electric accent (+ dark-mode optical bloom)
+            // Draw dominant flow ribbon bridging Color 1 (left model) -> Color 2 (right channel)
             if !accentFills.isEmpty {
-                context.fill(accentFills, with: .color(theme.accent.opacity(theme.isDark ? 0.16 : 0.10)))
-                context.stroke(accentInternal, with: .color(theme.accent.opacity(theme.isDark ? 0.38 : 0.28)), lineWidth: 0.55)
+                context.fill(
+                    accentFills,
+                    with: .linearGradient(
+                        Gradient(stops: [
+                            .init(color: theme.accent.opacity(theme.isDark ? 0.22 : 0.14), location: 0.0),
+                            .init(color: theme.accent.opacity(theme.isDark ? 0.16 : 0.10), location: 0.55),
+                            .init(color: theme.accentSecondary.opacity(theme.isDark ? 0.18 : 0.12), location: 1.0),
+                        ]),
+                        startPoint: CGPoint(x: x0, y: 0),
+                        endPoint: CGPoint(x: x1, y: 0)
+                    )
+                )
+                context.stroke(
+                    accentInternal,
+                    with: .linearGradient(
+                        Gradient(colors: [
+                            theme.accent.opacity(theme.isDark ? 0.44 : 0.34),
+                            theme.accentSecondary.opacity(theme.isDark ? 0.40 : 0.30),
+                        ]),
+                        startPoint: CGPoint(x: x0, y: 0),
+                        endPoint: CGPoint(x: x1, y: 0)
+                    ),
+                    lineWidth: 0.55
+                )
                 if !accentStipple.isEmpty {
-                    context.fill(accentStipple, with: .color(theme.accent.opacity(theme.isDark ? 0.54 : 0.44)))
+                    context.fill(accentStipple, with: .color(theme.accent.opacity(theme.isDark ? 0.56 : 0.46)))
                 }
                 if theme.isDark {
-                    context.stroke(accentOuter, with: .color(theme.accent.opacity(0.18)), lineWidth: 3.6)
-                    context.stroke(accentOuter, with: .color(theme.accent.opacity(0.24)), lineWidth: 1.8)
+                    context.stroke(
+                        accentOuter,
+                        with: .linearGradient(
+                            Gradient(colors: [
+                                theme.accent.opacity(0.20),
+                                theme.accentSecondary.opacity(0.16),
+                            ]),
+                            startPoint: CGPoint(x: x0, y: 0),
+                            endPoint: CGPoint(x: x1, y: 0)
+                        ),
+                        lineWidth: 3.6
+                    )
+                    context.stroke(accentOuter, with: .color(theme.accent.opacity(0.22)), lineWidth: 1.8)
                 }
-                context.stroke(accentOuter, with: .color(theme.accent.opacity(theme.isDark ? 0.94 : 0.86)), lineWidth: 0.92)
+                context.stroke(
+                    accentOuter,
+                    with: .linearGradient(
+                        Gradient(stops: [
+                            .init(color: theme.accent.opacity(theme.isDark ? 0.96 : 0.90), location: 0.0),
+                            .init(color: theme.accent.opacity(theme.isDark ? 0.88 : 0.82), location: 0.52),
+                            .init(color: theme.accentSecondary.opacity(theme.isDark ? 0.92 : 0.86), location: 1.0),
+                        ]),
+                        startPoint: CGPoint(x: x0, y: 0),
+                        endPoint: CGPoint(x: x1, y: 0)
+                    ),
+                    lineWidth: 0.92
+                )
             }
 
-            // 4. Batched left & right architectural terminal bars (monochrome + single dominant flow accent caps)
+            // 4. Batched left (Color 1 anchor) & right (Color 2 anchor) architectural terminal bars
             var leftBars = Path()
             for node in layout.leftNodes {
                 let y0 = CGFloat(node.y0) * h
@@ -908,17 +1005,21 @@ private struct FoldedFlowBaseCanvas: View, Equatable {
                 let y1 = max(y0 + 2, CGFloat(node.y1) * h)
                 rightBars.addRect(CGRect(x: w - barW, y: y0, width: barW, height: y1 - y0))
             }
-            context.fill(rightBars, with: .color(theme.inkSecondary.opacity(theme.isDark ? 0.68 : 0.62)))
+            context.fill(rightBars, with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.74 : 0.68)))
 
             if let dom = dominantLink {
-                var domCaps = Path()
                 let sy0 = CGFloat(dom.srcY0) * h
                 let sy1 = max(sy0 + 2, CGFloat(dom.srcY1) * h)
                 let dy0 = CGFloat(dom.dstY0) * h
                 let dy1 = max(dy0 + 2, CGFloat(dom.dstY1) * h)
-                domCaps.addRect(CGRect(x: leftBarX, y: sy0, width: barW, height: sy1 - sy0))
-                domCaps.addRect(CGRect(x: w - barW, y: dy0, width: barW, height: dy1 - dy0))
-                context.fill(domCaps, with: .color(theme.accent))
+                context.fill(
+                    Path(CGRect(x: leftBarX, y: sy0, width: barW, height: sy1 - sy0)),
+                    with: .color(theme.accent)
+                )
+                context.fill(
+                    Path(CGRect(x: w - barW, y: dy0, width: barW, height: dy1 - dy0)),
+                    with: .color(theme.accentSecondary)
+                )
             }
         }
     }
@@ -962,33 +1063,84 @@ private struct FoldedFlowFocusCanvas: View {
                 )
             }
 
+            let x0 = leftBarX + barW + 1.0
+            let x1 = w - barW - 1.0
+            let isChannelFocus = (hoveredChannel != nil)
+            let startTint = isChannelFocus ? theme.accent.opacity(0.85) : theme.accent
+            let endTint = theme.accentSecondary
+
             if !fills.isEmpty {
-                context.fill(fills, with: .color(theme.accent.opacity(theme.isDark ? 0.22 : 0.14)))
-                context.stroke(internalFolds, with: .color(theme.accent.opacity(theme.isDark ? 0.46 : 0.36)), lineWidth: 0.55)
+                context.fill(
+                    fills,
+                    with: .linearGradient(
+                        Gradient(colors: [
+                            startTint.opacity(theme.isDark ? 0.24 : 0.15),
+                            endTint.opacity(theme.isDark ? 0.24 : 0.15),
+                        ]),
+                        startPoint: CGPoint(x: x0, y: 0),
+                        endPoint: CGPoint(x: x1, y: 0)
+                    )
+                )
+                context.stroke(
+                    internalFolds,
+                    with: .linearGradient(
+                        Gradient(colors: [
+                            startTint.opacity(theme.isDark ? 0.46 : 0.36),
+                            endTint.opacity(theme.isDark ? 0.46 : 0.36),
+                        ]),
+                        startPoint: CGPoint(x: x0, y: 0),
+                        endPoint: CGPoint(x: x1, y: 0)
+                    ),
+                    lineWidth: 0.55
+                )
                 if !stipple.isEmpty {
-                    context.fill(stipple, with: .color(theme.accent.opacity(theme.isDark ? 0.58 : 0.48)))
+                    context.fill(
+                        stipple,
+                        with: .color((isChannelFocus ? theme.accentSecondary : theme.accent).opacity(theme.isDark ? 0.58 : 0.48))
+                    )
                 }
                 if theme.isDark {
-                    context.stroke(outer, with: .color(theme.accent.opacity(0.22)), lineWidth: 3.8)
+                    context.stroke(
+                        outer,
+                        with: .linearGradient(
+                            Gradient(colors: [startTint.opacity(0.22), endTint.opacity(0.22)]),
+                            startPoint: CGPoint(x: x0, y: 0),
+                            endPoint: CGPoint(x: x1, y: 0)
+                        ),
+                        lineWidth: 3.8
+                    )
                 }
-                context.stroke(outer, with: .color(theme.accent), lineWidth: 1.05)
+                context.stroke(
+                    outer,
+                    with: .linearGradient(
+                        Gradient(colors: [startTint, endTint]),
+                        startPoint: CGPoint(x: x0, y: 0),
+                        endPoint: CGPoint(x: x1, y: 0)
+                    ),
+                    lineWidth: 1.05
+                )
             }
 
-            var termBars = Path()
+            var leftTermBars = Path()
             for node in layout.leftNodes where activeLeftIds.contains(node.id) {
                 let y0 = CGFloat(node.y0) * h
                 let y1 = max(y0 + 2, CGFloat(node.y1) * h)
-                termBars.addRect(CGRect(x: leftBarX, y: y0, width: barW, height: y1 - y0))
+                leftTermBars.addRect(CGRect(x: leftBarX, y: y0, width: barW, height: y1 - y0))
             }
+            if !leftTermBars.isEmpty {
+                context.fill(leftTermBars, with: .color(theme.accent))
+            }
+
+            var rightTermBars = Path()
             for node in layout.rightNodes {
                 if let ch = FoldedTokenFlowChart.channelFromNodeId(node.id), activeRightChannels.contains(ch) {
                     let y0 = CGFloat(node.y0) * h
                     let y1 = max(y0 + 2, CGFloat(node.y1) * h)
-                    termBars.addRect(CGRect(x: w - barW, y: y0, width: barW, height: y1 - y0))
+                    rightTermBars.addRect(CGRect(x: w - barW, y: y0, width: barW, height: y1 - y0))
                 }
             }
-            if !termBars.isEmpty {
-                context.fill(termBars, with: .color(theme.accent))
+            if !rightTermBars.isEmpty {
+                context.fill(rightTermBars, with: .color(theme.accentSecondary))
             }
         }
     }
@@ -1257,10 +1409,14 @@ struct TokenDensityMatrix: View {
                     .font(.system(size: 8, weight: .semibold, design: .monospaced))
                     .foregroundColor(theme.accent)
             } else {
-                Text("\(String(format: loc("avgFmt"), avgText))/D · \(String(format: loc("maxFmt"), maxText))")
-                    .font(.system(size: 8, weight: .regular, design: .monospaced))
-                    .monospacedDigit()
-                    .foregroundColor(theme.inkMuted)
+                HStack(spacing: 3) {
+                    Text("\(String(format: loc("avgFmt"), avgText))/D")
+                        .foregroundColor(theme.accentSecondary.opacity(theme.isDark ? 0.90 : 0.86))
+                    Text("· \(String(format: loc("maxFmt"), maxText))")
+                        .foregroundColor(theme.inkMuted)
+                }
+                .font(.system(size: 8, weight: .regular, design: .monospaced))
+                .monospacedDigit()
             }
         }
     }
@@ -1389,7 +1545,7 @@ private struct TokenSpectrogramStaticCanvas: View, Equatable {
             }
             context.fill(faintMatrixDots, with: .color(theme.hairline.opacity(0.46)))
 
-            // 2. Collision-free monthly AVG dashed hairline
+            // 2. Collision-free monthly AVG dashed hairline (Color 2)
             if ridge.maxValue > 0 && avgValue > 0 {
                 let avgRatio = min(1.0, avgValue / ridge.maxValue)
                 let ay = baseY - CGFloat(avgRatio) * usableH
@@ -1398,15 +1554,15 @@ private struct TokenSpectrogramStaticCanvas: View, Equatable {
                 dash.addLine(to: CGPoint(x: size.width, y: ay))
                 context.stroke(
                     dash,
-                    with: .color(theme.hairlineStrong.opacity(0.72)),
+                    with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.54 : 0.46)),
                     style: StrokeStyle(lineWidth: 0.75, dash: [2.5, 3.5])
                 )
 
                 let leftClear = sampleTokenRidgeCrestNormY(outerPoints: outerPoints, at: 0.04)
                     <= sampleTokenRidgeCrestNormY(outerPoints: outerPoints, at: 0.96)
                 let avgTag = Text("AVG")
-                    .font(.system(size: 6.5, weight: .regular, design: .monospaced))
-                    .foregroundColor(theme.inkMuted.opacity(0.78))
+                    .font(.system(size: 6.5, weight: .medium, design: .monospaced))
+                    .foregroundColor(theme.accentSecondary.opacity(theme.isDark ? 0.88 : 0.82))
                 context.draw(
                     avgTag,
                     at: CGPoint(x: leftClear ? 2 : size.width - 2, y: max(6, ay - 5)),
@@ -1423,25 +1579,27 @@ private struct TokenSpectrogramStaticCanvas: View, Equatable {
                 silhouette.addLine(to: CGPoint(x: toPt(outerPoints[outerPoints.count - 1]).x, y: baseY))
                 silhouette.closeSubpath()
 
-                // 3a. Whisper-light tonal paper-depth wash under signal envelope
+                // 3a. Duotone tonal depth wash: Color 1 peaks shifting into Color 2 valleys
                 context.fill(
                     silhouette,
                     with: .linearGradient(
-                        Gradient(colors: [
-                            theme.inkPrimary.opacity(theme.isDark ? 0.095 : 0.055),
-                            theme.inkPrimary.opacity(0.006),
+                        Gradient(stops: [
+                            .init(color: theme.accent.opacity(theme.isDark ? 0.14 : 0.085), location: 0.0),
+                            .init(color: theme.accentSecondary.opacity(theme.isDark ? 0.10 : 0.065), location: 0.55),
+                            .init(color: theme.accentSecondary.opacity(0.010), location: 1.0),
                         ]),
                         startPoint: CGPoint(x: 0, y: topPad),
                         endPoint: CGPoint(x: 0, y: baseY)
                     )
                 )
 
-                // 3b. Batched Path #2 (midSignalStipple) & Path #3 (densePeakCrest strictly top 15%)
+                // 3b. Batched stipple paths: lowerSecondaryStipple (Color 2), midSignalStipple, densePeakCrest (Color 1)
                 let cellX: CGFloat = 2.5
                 let cellY: CGFloat = 2.5
                 let cols = Int(size.width / cellX)
                 let rows = Int((baseY - topPad + 2) / cellY)
 
+                var lowerSecondaryStipple = Path()
                 var midSignalStipple = Path()
                 var densePeakCrest = Path()
 
@@ -1482,36 +1640,47 @@ private struct TokenSpectrogramStaticCanvas: View, Equatable {
                         let dy = py + jy
                         guard dx >= 0, dx <= size.width - 1.0, dy <= baseY - 1.0 else { continue }
 
-                        if elevNorm >= 0.85 {
-                            // Strictly top 15% peak crest in reserved 1% accent + delicate horizontal dither ticks
+                        if elevNorm >= 0.82 {
+                            // Top peak crest in vivid Color 1 (accent) + delicate horizontal dither ticks
                             if (iy & 1) == 0 && ((h >> 22) & 3) == 0 {
                                 densePeakCrest.addRect(CGRect(x: dx - 1.2, y: dy - 0.42, width: 2.5, height: 0.85))
                             } else {
                                 let sz: CGFloat = ((h >> 24) & 1 == 0) ? 1.15 : 1.35
                                 densePeakCrest.addRect(CGRect(x: dx - sz * 0.5, y: dy - sz * 0.5, width: sz, height: sz))
                             }
+                        } else if elevNorm < 0.48 {
+                            // Lower/mid secondary stipple field weaving Color 2 (accentSecondary)
+                            let sz: CGFloat = relH > 0.52 ? 1.1 : (relH > 0.25 ? 0.95 : 0.85)
+                            lowerSecondaryStipple.addRect(CGRect(x: dx - sz * 0.5, y: dy - sz * 0.5, width: sz, height: sz))
                         } else {
-                            // Below peak: monochrome structured dot-matrix halftone + delicate upper dither ticks
+                            // Mid-upper core: archival dot-matrix halftone + delicate upper dither ticks
                             if relH > 0.72 && (iy & 1) == 0 && ((h >> 22) & 3) == 0 {
                                 midSignalStipple.addRect(CGRect(x: dx - 1.1, y: dy - 0.38, width: 2.2, height: 0.75))
                             } else {
-                                let sz: CGFloat = relH > 0.58 ? 1.18 : (relH > 0.28 ? 1.0 : 0.85)
+                                let sz: CGFloat = relH > 0.58 ? 1.18 : 1.02
                                 midSignalStipple.addRect(CGRect(x: dx - sz * 0.5, y: dy - sz * 0.5, width: sz, height: sz))
                             }
                         }
                     }
                 }
 
+                if !lowerSecondaryStipple.isEmpty {
+                    context.fill(
+                        lowerSecondaryStipple,
+                        with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.56 : 0.50))
+                    )
+                }
+
                 if !midSignalStipple.isEmpty {
                     context.fill(
                         midSignalStipple,
-                        with: .color(theme.inkPrimary.opacity(theme.isDark ? 0.66 : 0.58))
+                        with: .color(theme.inkPrimary.opacity(theme.isDark ? 0.64 : 0.56))
                     )
                 }
 
                 if !densePeakCrest.isEmpty {
                     if theme.isDark {
-                        context.stroke(densePeakCrest, with: .color(theme.accent.opacity(0.22)), lineWidth: 2.2)
+                        context.stroke(densePeakCrest, with: .color(theme.accent.opacity(0.24)), lineWidth: 2.2)
                     }
                     context.fill(
                         densePeakCrest,
@@ -1519,28 +1688,53 @@ private struct TokenSpectrogramStaticCanvas: View, Equatable {
                     )
                 }
 
-                // 3c. 3 whisper-fine elevation contour hairlines (0.55pt)
+                // 3c. 3 elevation contour hairlines: lower/mid ridge bands in Color 2 -> upper band in Color 1
                 for layer in ridge.layers.dropFirst().prefix(3).reversed() {
                     guard layer.points.count >= 2 else { continue }
                     var iso = Path()
                     iso.move(to: toPt(layer.points[0]))
                     for pt in layer.points.dropFirst() { iso.addLine(to: toPt(pt)) }
-                    let alpha = 0.12 + 0.24 * layer.factor
-                    context.stroke(iso, with: .color(theme.inkPrimary.opacity(alpha)), lineWidth: 0.55)
+                    let isoColor: Color
+                    if layer.factor < 0.72 {
+                        let norm = max(0, min(1, layer.factor / 0.72))
+                        isoColor = theme.accentSecondary.opacity(0.30 + 0.25 * norm)
+                    } else {
+                        isoColor = theme.accent.opacity(theme.isDark ? 0.50 : 0.42)
+                    }
+                    context.stroke(iso, with: .color(isoColor), lineWidth: 0.62)
                 }
 
-                // 3d. Crisp primary throughput envelope crest hairline (+ delicate dark-mode bloom)
+                // 3d. Primary throughput envelope crest hairline (+ Color 1 peak bloom & duotone vertical shift)
                 var crestPath = Path()
                 crestPath.move(to: firstPt)
                 for pt in outerPoints.dropFirst() { crestPath.addLine(to: toPt(pt)) }
+                context.stroke(
+                    crestPath,
+                    with: .linearGradient(
+                        Gradient(stops: [
+                            .init(color: theme.accent.opacity(theme.isDark ? 0.24 : 0.12), location: 0.0),
+                            .init(color: theme.accent.opacity(0.0), location: 0.62),
+                        ]),
+                        startPoint: CGPoint(x: 0, y: topPad),
+                        endPoint: CGPoint(x: 0, y: baseY)
+                    ),
+                    lineWidth: theme.isDark ? 3.8 : 2.6
+                )
                 if theme.isDark {
-                    context.stroke(crestPath, with: .color(theme.accent.opacity(0.14)), lineWidth: 3.6)
                     context.stroke(crestPath, with: .color(theme.inkPrimary.opacity(0.20)), lineWidth: 1.8)
                 }
                 context.stroke(
                     crestPath,
-                    with: .color(theme.inkPrimary.opacity(0.86)),
-                    lineWidth: 1.0
+                    with: .linearGradient(
+                        Gradient(stops: [
+                            .init(color: theme.accent, location: 0.0),
+                            .init(color: theme.inkPrimary.opacity(0.86), location: 0.56),
+                            .init(color: theme.accentSecondary.opacity(0.80), location: 1.0),
+                        ]),
+                        startPoint: CGPoint(x: 0, y: topPad),
+                        endPoint: CGPoint(x: 0, y: baseY)
+                    ),
+                    lineWidth: 1.05
                 )
             }
 
@@ -1695,7 +1889,7 @@ private struct TokenSpectrogramOverlayCanvas: View {
                 }
             }
             if !skyCrosses.isEmpty {
-                context.stroke(skyCrosses, with: .color(theme.reticle.opacity(0.32)), lineWidth: 0.72)
+                context.stroke(skyCrosses, with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.44 : 0.36)), lineWidth: 0.72)
             }
 
             // 2. Interactive 60Hz hover crosshair + magnetic vertex lock
@@ -1722,7 +1916,7 @@ private struct TokenSpectrogramOverlayCanvas: View {
                 var vline = Path()
                 vline.move(to: CGPoint(x: pt.x, y: 0))
                 vline.addLine(to: CGPoint(x: pt.x, y: baseY))
-                context.stroke(vline, with: .color(theme.reticle.opacity(0.75)), lineWidth: 0.75)
+                context.stroke(vline, with: .color(theme.accent.opacity(0.55)), lineWidth: 0.75)
 
                 if val > 0 {
                     var hline = Path()
@@ -1730,7 +1924,7 @@ private struct TokenSpectrogramOverlayCanvas: View {
                     hline.addLine(to: CGPoint(x: size.width, y: pt.y))
                     context.stroke(
                         hline,
-                        with: .color(theme.reticle.opacity(0.44)),
+                        with: .color(theme.accent.opacity(0.36)),
                         style: StrokeStyle(lineWidth: 0.75, dash: [2, 2.5])
                     )
 

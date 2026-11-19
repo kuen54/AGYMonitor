@@ -39,6 +39,142 @@ public enum SessionPollCadence {
     }
 }
 
+// MARK: - SessionMonitor Runtime Lifecycle State Machine
+
+public struct SessionMonitorLifecycleState: Equatable, Sendable {
+    public var isStarted: Bool
+    public var isActive: Bool
+    public var fsHealthy: Bool
+    public var lastFSAttemptAt: Date?
+    public var pollInterval: TimeInterval?
+    public var lastLiveCount: Int
+
+    public init(
+        isStarted: Bool = false,
+        isActive: Bool = false,
+        fsHealthy: Bool = false,
+        lastFSAttemptAt: Date? = nil,
+        pollInterval: TimeInterval? = nil,
+        lastLiveCount: Int = 0
+    ) {
+        self.isStarted = isStarted
+        self.isActive = isActive
+        self.fsHealthy = fsHealthy
+        self.lastFSAttemptAt = lastFSAttemptAt
+        self.pollInterval = pollInterval
+        self.lastLiveCount = lastLiveCount
+    }
+}
+
+public enum SessionMonitorLifecycleEvent: Equatable, Sendable {
+    case start(now: Date)
+    case stop
+    case setActive(Bool, now: Date)
+    case fsWatcherAttempted(healthy: Bool, at: Date)
+    case fsEventReceived
+    case fsCoalesceFired(now: Date)
+    case pollTimerFired(now: Date)
+    case scanCompleted(liveCount: Int)
+}
+
+public enum SessionMonitorLifecycleEffect: Equatable, Sendable {
+    case startFSWatcher
+    case stopFSWatcher
+    case scheduleFSCoalesce
+    case cancelFSCoalesce
+    case runScan
+    case setPollTimer(TimeInterval?)
+}
+
+/// Pure lifecycle reducer for `SessionMonitor`. Replaces 7 loose mutable vars
+/// (`started`, `isActive`, `fsHealthy`, `lastFSAttemptAt`, `pollInterval`,
+/// `lastLiveCount`, `fsCoalesceWork`) and guarantees post-`stop()` FS or timer
+/// callbacks can NEVER spawn `ps`/`lsof` or emit stale `onChange` updates.
+public enum SessionMonitorLifecycleMachine {
+
+    @discardableResult
+    public static func reduce(
+        _ state: inout SessionMonitorLifecycleState,
+        event: SessionMonitorLifecycleEvent
+    ) -> [SessionMonitorLifecycleEffect] {
+        switch event {
+        case .start(let now):
+            guard !state.isStarted else { return [] }
+            state.isStarted = true
+            state.lastFSAttemptAt = now
+            return [.startFSWatcher, .runScan]
+
+        case .stop:
+            guard state.isStarted else { return [] }
+            state.isStarted = false
+            state.fsHealthy = false
+            state.pollInterval = nil
+            return [.cancelFSCoalesce, .setPollTimer(nil), .stopFSWatcher]
+
+        case .setActive(let active, let now):
+            guard state.isStarted, state.isActive != active else { return [] }
+            state.isActive = active
+            var effects: [SessionMonitorLifecycleEffect] = []
+            if SessionPollCadence.shouldRetryFSWatcher(
+                started: state.isStarted,
+                fsHealthy: state.fsHealthy,
+                now: now,
+                lastAttemptAt: state.lastFSAttemptAt
+            ) {
+                state.lastFSAttemptAt = now
+                effects.append(.startFSWatcher)
+            }
+            effects.append(.runScan)
+            return effects
+
+        case .fsWatcherAttempted(let healthy, let at):
+            state.lastFSAttemptAt = at
+            state.fsHealthy = state.isStarted ? healthy : false
+            return reconcilePollEffects(&state)
+
+        case .fsEventReceived:
+            guard state.isStarted else { return [] }
+            return [.scheduleFSCoalesce]
+
+        case .fsCoalesceFired(let now), .pollTimerFired(let now):
+            guard state.isStarted else { return [] }
+            var effects: [SessionMonitorLifecycleEffect] = []
+            if SessionPollCadence.shouldRetryFSWatcher(
+                started: state.isStarted,
+                fsHealthy: state.fsHealthy,
+                now: now,
+                lastAttemptAt: state.lastFSAttemptAt
+            ) {
+                state.lastFSAttemptAt = now
+                effects.append(.startFSWatcher)
+            }
+            effects.append(.runScan)
+            return effects
+
+        case .scanCompleted(let liveCount):
+            guard state.isStarted else { return [] }
+            state.lastLiveCount = max(0, liveCount)
+            return reconcilePollEffects(&state)
+        }
+    }
+
+    private static func reconcilePollEffects(
+        _ state: inout SessionMonitorLifecycleState
+    ) -> [SessionMonitorLifecycleEffect] {
+        let desired = SessionPollCadence.interval(
+            started: state.isStarted,
+            fsHealthy: state.fsHealthy,
+            isActive: state.isActive,
+            liveCount: state.lastLiveCount
+        )
+        if state.pollInterval != desired {
+            state.pollInterval = desired
+            return [.setPollTimer(desired)]
+        }
+        return []
+    }
+}
+
 public struct FSEventsThrottleState: Equatable, Sendable {
     public let debounceSeconds: TimeInterval
     public let minGapSeconds: TimeInterval

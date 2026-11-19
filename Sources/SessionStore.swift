@@ -50,6 +50,7 @@ final class SessionStore: ObservableObject {
     }
 
     private let jumper = SessionJumper()
+    private var jumpHintBanner = TransientBannerState()
     private var jumpHintClear: DispatchWorkItem?
 
     // MARK: Lifecycle
@@ -88,9 +89,18 @@ final class SessionStore: ObservableObject {
 
     private func setJumpHint(_ key: String?) {
         jumpHintClear?.cancel()
-        jumpHint = key
-        guard key != nil else { return }
-        let work = DispatchWorkItem { [weak self] in self?.jumpHint = nil }
+        jumpHintClear = nil
+        let token = jumpHintBanner.show(key)
+        if jumpHint != jumpHintBanner.messageKey {
+            jumpHint = jumpHintBanner.messageKey
+        }
+        guard let token = token else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            if self.jumpHintBanner.expire(generation: token) {
+                self.jumpHint = self.jumpHintBanner.messageKey
+            }
+        }
         jumpHintClear = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 4.5, execute: work)
     }

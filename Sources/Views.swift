@@ -100,8 +100,8 @@ struct PopoverView: View {
         VStack(spacing: 0) {
             header
                 .padding(.horizontal, 14)
-                .padding(.top, 11)
-                .padding(.bottom, 9)
+                .padding(.top, 10)
+                .padding(.bottom, 8)
 
             TelemetryTabBar(
                 items: visibleTabs,
@@ -144,8 +144,8 @@ struct PopoverView: View {
     // MARK: - Bare Context-Aware Header
 
     private var header: some View {
-        HStack(spacing: 8) {
-            HStack(spacing: 6) {
+        HStack(alignment: .center, spacing: 8) {
+            HStack(alignment: .center, spacing: 6) {
                 SessionAwareLogo(sessionStore: store.sessionStore,
                                  size: 13, color: theme.accent, dotSize: 4.5,
                                  isActive: store.isPanelVisible)
@@ -153,14 +153,18 @@ struct PopoverView: View {
                     .font(.system(size: 10.5, weight: .medium, design: .monospaced))
                     .tracking(1.6)
                     .foregroundColor(theme.inkPrimary)
+                    .lineLimit(1)
 
                 liveHeaderTag
             }
+            .frame(height: 20, alignment: .leading)
 
             Spacer(minLength: 4)
 
             contextHeaderAccessory
+                .frame(height: 20, alignment: .trailing)
         }
+        .frame(height: 20)
     }
 
     @ViewBuilder
@@ -177,11 +181,12 @@ struct PopoverView: View {
                     .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
                     .tracking(0.4)
                     .foregroundColor(theme.signalAmber)
+                    .lineLimit(1)
             }
             .padding(.horizontal, 5.5)
             .padding(.vertical, 2)
             .background(theme.signalAmber.opacity(theme.isDark ? 0.12 : 0.08))
-            .overlay(Rectangle().stroke(theme.signalAmber.opacity(0.48), lineWidth: 0.75))
+            .overlay(Rectangle().strokeBorder(theme.signalAmber.opacity(0.48), lineWidth: 0.75))
             .contentShape(Rectangle())
             .onTapGesture { store.selectedTab = .session }
         } else if busyCount > 0 {
@@ -190,6 +195,7 @@ struct PopoverView: View {
                 Text(String(format: loc("runTagFmt"), busyCount))
                     .font(.system(size: 8.5, weight: .medium, design: .monospaced))
                     .foregroundColor(theme.accent)
+                    .lineLimit(1)
             }
             .contentShape(Rectangle())
             .onTapGesture { store.selectedTab = .session }
@@ -229,15 +235,16 @@ struct PopoverView: View {
             Text(String(format: loc("liveTagFmt"), store.sessionStore.liveCount))
                 .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
                 .foregroundColor(theme.inkSecondary)
+                .lineLimit(1)
         case .subscription:
             if let badge = formatPlanTierBadge(store.subscriptionQuota?.planTier) {
                 HStack(spacing: 4) {
                     LogoShape()
-                        .fill(theme.accent)
+                        .fill(theme.accentSecondary)
                         .frame(width: 8, height: 8)
                     Text(badge)
                         .font(.system(size: 9.5, weight: .bold, design: .monospaced))
-                        .foregroundColor(theme.accent)
+                        .foregroundColor(theme.accentSecondary)
                         .lineLimit(1)
                 }
             }
@@ -265,6 +272,7 @@ struct PopoverView: View {
     private var footer: some View {
         HStack(spacing: 6) {
             statusText
+                .lineLimit(1)
             Spacer()
 
             HStack(spacing: 4) {
@@ -279,6 +287,7 @@ struct PopoverView: View {
                 ToolbarIconButton(systemName: "power", helpText: loc("quit"), action: onQuit)
             }
         }
+        .frame(height: 22)
         .padding(.horizontal, 14)
         .padding(.vertical, 7)
     }

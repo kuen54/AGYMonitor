@@ -11,6 +11,7 @@ private struct QuotaTrackRow: View {
     let usedPercent: Int
     let resetAt: Date?
     let windowDurationSeconds: TimeInterval
+    var useSecondaryAccent: Bool = false
 
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
@@ -20,7 +21,7 @@ private struct QuotaTrackRow: View {
 
     private var statusColor: Color {
         switch remaining {
-        case 30...:   return theme.accent
+        case 30...:   return useSecondaryAccent ? theme.accentSecondary : theme.accent
         case 10..<30: return theme.signalAmber
         default:      return theme.signalRed
         }
@@ -114,6 +115,7 @@ struct FamilySectionHeader: View {
     var indexTag: String? = nil
     let title: String
     let codes: String
+    var useSecondaryAccent: Bool = false
     @Environment(\.agyTheme) private var theme
 
     var body: some View {
@@ -121,7 +123,7 @@ struct FamilySectionHeader: View {
             if let tag = indexTag {
                 Text(tag)
                     .font(.system(size: 8, weight: .semibold, design: .monospaced))
-                    .foregroundColor(theme.accent.opacity(0.9))
+                    .foregroundColor((useSecondaryAccent ? theme.accentSecondary : theme.accent).opacity(0.9))
             }
             Text(title)
                 .font(.system(size: 8.5, weight: .medium, design: .monospaced))
@@ -261,7 +263,7 @@ struct AICreditsSection: View {
                                 .minimumScaleFactor(0.8)
                             CreditHorizonHairline(
                                 ratio: ratio,
-                                fillColor: isLargest ? theme.accent : theme.inkSecondary.opacity(0.45),
+                                fillColor: isLargest ? theme.accent : theme.accentSecondary.opacity(0.65),
                                 trackColor: theme.hairline.opacity(theme.isDark ? 0.80 : 0.85)
                             )
                             .equatable()
@@ -434,14 +436,16 @@ struct SubscriptionView: View {
                     FamilySectionHeader(
                         indexTag: "05.2",
                         title: stripLeadingIndexPrefix(loc("planClaudeFamily")),
-                        codes: "CLD · OTH"
+                        codes: "CLD · OTH",
+                        useSecondaryAccent: true
                     )
                     if hasClaude5h {
                         QuotaTrackRow(
                             label: loc("planWindow5h"),
                             usedPercent: q.seven_day.displayPercent,
                             resetAt: q.sevenDayResetDate,
-                            windowDurationSeconds: QuotaPaceLogic.fiveHourWindowSeconds
+                            windowDurationSeconds: QuotaPaceLogic.fiveHourWindowSeconds,
+                            useSecondaryAccent: true
                         )
                     }
                     ForEach(Array(claudeWeeklyLimits.enumerated()), id: \.offset) { _, lim in
@@ -450,7 +454,8 @@ struct SubscriptionView: View {
                             label: loc("planWindow7d"),
                             usedPercent: lim.displayPercent,
                             resetAt: lim.resetDate,
-                            windowDurationSeconds: QuotaPaceLogic.sevenDayWindowSeconds
+                            windowDurationSeconds: QuotaPaceLogic.sevenDayWindowSeconds,
+                            useSecondaryAccent: true
                         )
                     }
                 }
@@ -465,13 +470,19 @@ struct SubscriptionView: View {
             }
             let rawName = lim.modelDisplayName ?? ""
             let classified = ModelClass.classify(rawName)
+            let isSecondary = (classified == .claude)
             VStack(alignment: .leading, spacing: 8) {
-                FamilySectionHeader(title: rawName.uppercased(), codes: classified.shortCode)
+                FamilySectionHeader(
+                    title: rawName.uppercased(),
+                    codes: classified.shortCode,
+                    useSecondaryAccent: isSecondary
+                )
                 QuotaTrackRow(
                     label: String(format: loc("sub7dScopedFmt"), rawName),
                     usedPercent: lim.displayPercent,
                     resetAt: lim.resetDate,
-                    windowDurationSeconds: QuotaPaceLogic.sevenDayWindowSeconds
+                    windowDurationSeconds: QuotaPaceLogic.sevenDayWindowSeconds,
+                    useSecondaryAccent: isSecondary
                 )
             }
             .padding(.horizontal, 14)
@@ -486,7 +497,8 @@ struct SubscriptionView: View {
                 label: nonEmpty(sonnet.label) ?? loc("sub7dSonnetLabel"),
                 usedPercent: sonnet.displayPercent,
                 resetAt: q.sevenDaySonnetResetDate,
-                windowDurationSeconds: QuotaPaceLogic.fiveHourWindowSeconds
+                windowDurationSeconds: QuotaPaceLogic.fiveHourWindowSeconds,
+                useSecondaryAccent: true
             )
             .padding(.horizontal, 14)
             .padding(.vertical, 10)

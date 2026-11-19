@@ -232,6 +232,44 @@ public struct YearLoadGate: Equatable, Sendable {
     }
 }
 
+/// Generation & deduplication gate for historical-month fetches (`YYYY-MM`),
+/// mirroring `YearLoadGate` so navigating months or midnight rollovers cleanly
+/// invalidates stale in-flight scripts without scattered `fetchGeneration += 1`.
+public struct HistoricalMonthLoadGate: Equatable, Sendable {
+    public private(set) var activeYearMonth: String? = nil
+    public private(set) var generation: Int = 0
+
+    public init() {}
+
+    /// Start a historical-month load. Returns a monotonic generation token, or `nil`
+    /// if an identical non-forced load for the same `yearMonth` is already in flight.
+    public mutating func beginLoad(yearMonth: String, force: Bool) -> Int? {
+        if !force && activeYearMonth == yearMonth {
+            return nil
+        }
+        generation += 1
+        activeYearMonth = yearMonth
+        return generation
+    }
+
+    /// True iff `generation` is still the latest load and matches `currentYearMonth`.
+    public func isCurrent(generation gen: Int, yearMonth: String, currentYearMonth: String) -> Bool {
+        gen == generation && yearMonth == currentYearMonth
+    }
+
+    public mutating func completeLoad(generation gen: Int) {
+        if gen == generation {
+            activeYearMonth = nil
+        }
+    }
+
+    /// Cancel any in-flight historical load (e.g. navigating to another month or back to current).
+    public mutating func invalidate() {
+        activeYearMonth = nil
+        generation += 1
+    }
+}
+
 public struct ArchiveSweepGate: Equatable, Sendable {
     public private(set) var isInFlight: Bool = false
     public private(set) var lastSucceededAt: Date? = nil

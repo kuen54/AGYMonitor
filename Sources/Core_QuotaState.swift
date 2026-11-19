@@ -200,4 +200,126 @@ public enum QuotaStateReducer {
             return .failed(error: error, retryAt: retryAt)
         }
     }
+
+    /// Pure gate for deciding whether entering the Plan tab should trigger a quota refresh.
+    /// Prevents redundant synchronous token probes while already loading or actively cooling down
+    /// from an HTTP 429 rate limit.
+    public static func shouldAutoRefreshOnTabEntry<Snapshot: Equatable & Sendable>(
+        phase: QuotaPhase<Snapshot>,
+        cooldownUntil: Date?,
+        now: Date = Date(),
+        minFreshInterval: TimeInterval = 30
+    ) -> Bool {
+        if case .loading = phase { return false }
+        if let until = cooldownUntil, until > now { return false }
+        if let retryAt = phase.retryAt, retryAt > now { return false }
+        guard let updatedAt = phase.updatedAt else { return true }
+        return now.timeIntervalSince(updatedAt) > minFreshInterval
+    }
+}
+
+// MARK: - Quota Fetch Coalescing & Forced Follow-Up Gate
+
+public enum QuotaFetchDecision: Equatable, Sendable {
+    case serveCache
+    case serveCooldown(retryAt: Date)
+    case startNetworkFetch(force: Bool)
+    case coalesceIntoInFlight
+}
+
+/// Deterministic gate governing `SubscriptionQuotaService.fetch(forceRefresh:)`:
+/// - Serves fresh cache within TTL unless `force == true`.
+/// - Enforces active 429 cooldown windows without hitting the server.
+/// - Coalesces overlapping requests, AND upgrades an in-flight non-forced fetch by
+///   queueing a single forced follow-up if `force == true` (`⌘R`) arrives mid-flight.
+public struct QuotaFetchGate: Equatable, Sendable {
+    public private(set) var isInFlight: Bool = false
+    public private(set) var currentForce: Bool = false
+    public private(set) var pendingForcedFollowUp: Bool = false
+
+    public init() {}
+
+    public mutating func request(
+        force: Bool,
+        cacheTimestamp: Date?,
+        ttl: TimeInterval,
+        cooldownDeadline: Date?,
+        now: Date = Date()
+    ) -> QuotaFetchDecision {
+        if !force, let cachedAt = cacheTimestamp, now.timeIntervalSince(cachedAt) < ttl {
+            return .serveCache
+        }
+        if let until = cooldownDeadline, until > now {
+            return .serveCooldown(retryAt: until)
+        }
+        if !isInFlight {
+            isInFlight = true
+            currentForce = force
+            pendingForcedFollowUp = false
+            return .startNetworkFetch(force: force)
+        }
+        if force && !currentForce {
+            pendingForcedFollowUp = true
+        }
+        return .coalesceIntoInFlight
+    }
+
+    /// Complete the active fetch. Returns `true` if a queued forced follow-up should run immediately.
+    public mutating func complete() -> Bool {
+        if pendingForcedFollowUp {
+            isInFlight = true
+            currentForce = true
+            pendingForcedFollowUp = false
+            return true
+        }
+        isInFlight = false
+        currentForce = false
+        return false
+    }
+
+    public mutating func reset() {
+        isInFlight = false
+        currentForce = false
+        pendingForcedFollowUp = false
+    }
+}
+
+// MARK: - Stale-While-Revalidate Token Presence Probe State Machine
+
+public enum TokenPresenceAction: Equatable, Sendable {
+    case returnCached(Bool)
+    case returnCachedAndRevalidate(Bool)
+    case probeSynchronously
+}
+
+/// Pure SWR state machine for `SubscriptionQuotaService.hasOAuthToken`.
+public struct TokenPresenceProbeState: Equatable, Sendable {
+    public private(set) var cachedValue: Bool?
+    public private(set) var cachedAt: Date?
+    public private(set) var isRevalidating: Bool = false
+    public let ttl: TimeInterval
+
+    public init(ttl: TimeInterval = 60) {
+        self.ttl = ttl
+    }
+
+    public mutating func evaluate(now: Date = Date()) -> TokenPresenceAction {
+        guard let value = cachedValue, let at = cachedAt else {
+            return .probeSynchronously
+        }
+        if now.timeIntervalSince(at) < ttl {
+            return .returnCached(value)
+        }
+        if isRevalidating {
+            return .returnCached(value)
+        }
+        isRevalidating = true
+        return .returnCachedAndRevalidate(value)
+    }
+
+    public mutating func recordResult(_ value: Bool, at now: Date = Date()) {
+        cachedValue = value
+        cachedAt = now
+        isRevalidating = false
+    }
 }

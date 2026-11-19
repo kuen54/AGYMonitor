@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 
 /// App version, single-sourced from Info.plist (CFBundleShortVersionString).
-fileprivate let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.3.0"
+fileprivate let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.4.0"
 
 /// UI-facing subset of QuotaFetchResult (shared with AGYCore `CoreQuotaError`).
 typealias QuotaError = CoreQuotaError
@@ -340,46 +340,44 @@ final class SubscriptionQuotaService {
     private let lock = NSLock()
 
     private let workQueue = DispatchQueue(label: "com.kuen54.AGYMonitor.quota.work", qos: .utility)
-    private var fetchInFlight = false
-    private var pendingCompletions: [(QuotaFetchResult) -> Void] = []
+    private var fetchGate = QuotaFetchGate()
+    private var activeCompletions: [(QuotaFetchResult) -> Void] = []
+    private var queuedForcedCompletions: [(QuotaFetchResult) -> Void] = []
 
-    private var tokenPresenceCache: (value: Bool, at: Date)?
-    private var tokenProbeInFlight = false
+    private var tokenPresence = TokenPresenceProbeState(ttl: 60)
     private let tokenPresenceLock = NSLock()
-    private static let tokenPresenceTTL: TimeInterval = 60
 
     var hasOAuthToken: Bool {
         tokenPresenceLock.lock()
-        if let cached = tokenPresenceCache {
-            let isFresh = Date().timeIntervalSince(cached.at) < Self.tokenPresenceTTL
-            let shouldProbe = !isFresh && !tokenProbeInFlight
-            if shouldProbe { tokenProbeInFlight = true }
-            tokenPresenceLock.unlock()
-            if shouldProbe {
-                workQueue.async { [weak self] in
-                    guard let self = self else { return }
-                    let value = AGYStateStore.probePresenceFast()
-                    self.tokenPresenceLock.lock()
-                    self.tokenPresenceCache = (value, Date())
-                    self.tokenProbeInFlight = false
-                    self.tokenPresenceLock.unlock()
-                }
+        let action = tokenPresence.evaluate(now: Date())
+        tokenPresenceLock.unlock()
+
+        switch action {
+        case .returnCached(let value):
+            return value
+        case .returnCachedAndRevalidate(let value):
+            workQueue.async { [weak self] in
+                guard let self = self else { return }
+                let refreshed = AGYStateStore.probePresenceFast()
+                self.tokenPresenceLock.lock()
+                self.tokenPresence.recordResult(refreshed, at: Date())
+                self.tokenPresenceLock.unlock()
             }
-            return cached.value
+            return value
+        case .probeSynchronously:
+            let value = AGYStateStore.probePresenceFast()
+            tokenPresenceLock.lock()
+            tokenPresence.recordResult(value, at: Date())
+            tokenPresenceLock.unlock()
+            return value
         }
-        tokenPresenceLock.unlock()
-        let value = AGYStateStore.probePresenceFast()
-        tokenPresenceLock.lock()
-        tokenPresenceCache = (value, Date())
-        tokenPresenceLock.unlock()
-        return value
     }
 
     @discardableResult
     func probeTokenPresenceNow() -> Bool {
         let value = AGYStateStore.probePresenceFast()
         tokenPresenceLock.lock()
-        tokenPresenceCache = (value, Date())
+        tokenPresence.recordResult(value, at: Date())
         tokenPresenceLock.unlock()
         return value
     }
@@ -400,13 +398,23 @@ final class SubscriptionQuotaService {
             self.lock.lock()
             let now = Date()
             let cachedTuple = self.cached
-            if !forceRefresh, let c = cachedTuple, now.timeIntervalSince(c.at) < self.ttl {
-                self.lock.unlock()
-                DispatchQueue.main.async { completion(.success(c.quota)) }
-                return
-            }
-            if let until = self.cooldown.activeDeadline(at: now) {
-                self.lock.unlock()
+            let cooldownUntil = self.cooldown.activeDeadline(at: now)
+            self.lock.unlock()
+
+            let decision = self.fetchGate.request(
+                force: forceRefresh,
+                cacheTimestamp: cachedTuple?.at,
+                ttl: self.ttl,
+                cooldownDeadline: cooldownUntil,
+                now: now
+            )
+
+            switch decision {
+            case .serveCache:
+                if let c = cachedTuple {
+                    DispatchQueue.main.async { completion(.success(c.quota)) }
+                }
+            case .serveCooldown(let until):
                 if let c = cachedTuple {
                     DispatchQueue.main.async {
                         completion(.fallbackWithNotice(c.quota, error: .rateLimited, retryAt: until))
@@ -414,26 +422,55 @@ final class SubscriptionQuotaService {
                 } else {
                     DispatchQueue.main.async { completion(.rateLimited) }
                 }
-                return
-            }
-            self.lock.unlock()
-
-            self.pendingCompletions.append(completion)
-            guard !self.fetchInFlight else { return }
-            self.fetchInFlight = true
-
-            self.performAGYFetch(forceRefresh: forceRefresh) { result in
-                self.finishFetch(result)
+            case .startNetworkFetch(let effectiveForce):
+                self.activeCompletions.append(completion)
+                self.performAGYFetch(forceRefresh: effectiveForce) { result in
+                    self.finishFetch(result)
+                }
+            case .coalesceIntoInFlight:
+                if forceRefresh && !self.fetchGate.currentForce {
+                    self.queuedForcedCompletions.append(completion)
+                } else {
+                    self.activeCompletions.append(completion)
+                }
             }
         }
     }
 
     private func finishFetch(_ result: QuotaFetchResult) {
         workQueue.async {
-            let completions = self.pendingCompletions
-            self.pendingCompletions = []
-            self.fetchInFlight = false
+            let completions = self.activeCompletions
+            self.activeCompletions = []
+            let shouldRunForcedFollowUp = self.fetchGate.complete()
             DispatchQueue.main.async { completions.forEach { $0(result) } }
+
+            if shouldRunForcedFollowUp {
+                self.lock.lock()
+                let now = Date()
+                let cachedTuple = self.cached
+                let cooldownUntil = self.cooldown.activeDeadline(at: now)
+                self.lock.unlock()
+
+                let extra = self.queuedForcedCompletions
+                self.queuedForcedCompletions = []
+
+                if let until = cooldownUntil {
+                    self.fetchGate.reset()
+                    let fallbackResult: QuotaFetchResult = cachedTuple.map {
+                        .fallbackWithNotice($0.quota, error: .rateLimited, retryAt: until)
+                    } ?? .rateLimited
+                    DispatchQueue.main.async { extra.forEach { $0(fallbackResult) } }
+                } else {
+                    self.activeCompletions = extra
+                    self.performAGYFetch(forceRefresh: true) { followUpResult in
+                        self.finishFetch(followUpResult)
+                    }
+                }
+            } else if !self.queuedForcedCompletions.isEmpty {
+                let extra = self.queuedForcedCompletions
+                self.queuedForcedCompletions = []
+                DispatchQueue.main.async { extra.forEach { $0(result) } }
+            }
         }
     }
 

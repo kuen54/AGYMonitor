@@ -140,4 +140,24 @@ struct NotchStateTests {
         #expect(armedPres.visible)
         #expect(!armedPres.ignoresMouseEvents)
     }
+
+    @Test("Clickable Live Wing accepts clicks when visible, NEVER intercepts clicks while hidden in fullscreen")
+    func clickableWingFullscreenClickSafety() {
+        let onWingOnly = NotchPointerSample(
+            onScreen: true, inHoverBand: false, inContentRect: false,
+            inRevealEdge: false, inRevealBand: false, inClickableWing: true
+        )
+
+        // Visible closed pill: pointer over Live Wing pill enables clicks
+        let normalState = NotchState(phase: .closedPill, isFullscreen: false)
+        let normalPres = NotchMachine.panelPresentation(for: normalState, pointer: onWingOnly)
+        #expect(normalPres.visible)
+        #expect(!normalPres.ignoresMouseEvents)
+
+        // Hidden fullscreen pill: even if pointer crosses wing rect, invisible panel MUST pass clicks through!
+        let hiddenFSState = NotchState(phase: .hidden, isFullscreen: true, revealArmed: false)
+        let hiddenPres = NotchMachine.panelPresentation(for: hiddenFSState, pointer: onWingOnly)
+        #expect(!hiddenPres.visible)
+        #expect(hiddenPres.ignoresMouseEvents)
+    }
 }

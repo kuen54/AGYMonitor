@@ -155,7 +155,6 @@ final class NotchInstance {
     var openWork: DispatchWorkItem?
     var closeWork: DispatchWorkItem?
     var lastPointerSample: NotchPointerSample? = nil
-    var lastOnClickableWing: Bool = false
 
     init(panel: NotchPanel, screen: NotchScreen, isFullscreen: Bool = false) {
         self.panel = panel
@@ -172,12 +171,14 @@ final class NotchInstance {
 final class NotchController: NSObject {
     private let store: UsageStore
     private let onQuit: () -> Void
+    private let onOpenStateChanged: ((Bool) -> Void)?
 
     private let maxWindowSize = CGSize(width: 600, height: 860)
     private let syntheticWidth: CGFloat = 200
     private let hoverShoulder: CGFloat = 84
     private let revealEdge: CGFloat = 8
 
+    private var isStarted = false
     private var instances: [CGDirectDisplayID: NotchInstance] = [:]
 
     private var globalMonitor: Any?
@@ -187,9 +188,14 @@ final class NotchController: NSObject {
     private var wingTimer: DispatchWorkItem?
     private var sessionWingObserver: AnyCancellable?
 
-    init(store: UsageStore, onQuit: @escaping () -> Void) {
+    init(
+        store: UsageStore,
+        onQuit: @escaping () -> Void,
+        onOpenStateChanged: ((Bool) -> Void)? = nil
+    ) {
         self.store = store
         self.onQuit = onQuit
+        self.onOpenStateChanged = onOpenStateChanged
         super.init()
     }
 
@@ -198,6 +204,8 @@ final class NotchController: NSObject {
     // MARK: Lifecycle
 
     func start() {
+        guard !isStarted else { return }
+        isStarted = true
         NotificationCenter.default.addObserver(
             self, selector: #selector(screenParametersChanged),
             name: NSApplication.didChangeScreenParametersNotification, object: nil)
@@ -213,6 +221,8 @@ final class NotchController: NSObject {
     }
 
     func stop() {
+        guard isStarted || !instances.isEmpty || globalMonitor != nil || localMonitor != nil else { return }
+        isStarted = false
         NotificationCenter.default.removeObserver(self)
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         rebuildWork?.cancel(); rebuildWork = nil
@@ -332,12 +342,17 @@ final class NotchController: NSObject {
     private func pointerSample(for inst: NotchInstance,
                                mouse: NSPoint = NSEvent.mouseLocation) -> NotchPointerSample {
         let onScreen = hit(mouse, inst.screen.screen.frame)
+        let inClickableWing = !inst.state.isOpen
+            && inst.vm.activeWing != nil
+            && onScreen
+            && hit(mouse, closedWingRect(inst))
         return NotchPointerSample(
             onScreen: onScreen,
             inHoverBand: onScreen && hit(mouse, hoverRect(inst)),
             inContentRect: onScreen && hit(mouse, contentRect(inst)),
             inRevealEdge: onScreen && hit(mouse, edgeRect(inst.screen)),
-            inRevealBand: onScreen && hit(mouse, revealRect(inst.screen))
+            inRevealBand: onScreen && hit(mouse, revealRect(inst.screen)),
+            inClickableWing: inClickableWing
         )
     }
 
@@ -368,13 +383,18 @@ final class NotchController: NSObject {
             case .refreshUsage:
                 store.refresh()
             case .applyPanelPresentation:
-                applyPresentation(inst, pointer: sample, mouse: mouse)
+                applyPresentation(inst, pointer: sample)
             }
         }
     }
 
     private func syncSessionMonitorActive() {
-        store.setSessionMonitorActive(instances.values.contains { $0.state.isOpen })
+        let anyOpen = instances.values.contains { $0.state.isOpen }
+        if let onOpenStateChanged = onOpenStateChanged {
+            onOpenStateChanged(anyOpen)
+        } else {
+            store.setSessionMonitorActive(anyOpen)
+        }
     }
 
     func reveal() {
@@ -416,15 +436,10 @@ final class NotchController: NSObject {
         let mouse = NSEvent.mouseLocation
         for inst in instances.values {
             let sample = pointerSample(for: inst, mouse: mouse)
-            let onWing: Bool = !inst.state.isOpen
-                && inst.vm.activeWing != nil
-                && sample.onScreen
-                && hit(mouse, closedWingRect(inst))
-            if sample == inst.lastPointerSample && onWing == inst.lastOnClickableWing {
+            if sample == inst.lastPointerSample {
                 continue
             }
             inst.lastPointerSample = sample
-            inst.lastOnClickableWing = onWing
             dispatch(inst, event: .pointerMoved(sample), pointer: sample, mouse: mouse)
         }
     }
@@ -576,20 +591,15 @@ final class NotchController: NSObject {
     private func applyPanelState() {
         let mouse = NSEvent.mouseLocation
         for inst in instances.values {
-            applyPresentation(inst, pointer: pointerSample(for: inst, mouse: mouse), mouse: mouse)
+            applyPresentation(inst, pointer: pointerSample(for: inst, mouse: mouse))
         }
     }
 
-    private func applyPresentation(_ inst: NotchInstance, pointer: NotchPointerSample, mouse: NSPoint) {
+    private func applyPresentation(_ inst: NotchInstance, pointer: NotchPointerSample) {
         let pres = NotchMachine.panelPresentation(for: inst.state, pointer: pointer)
-        let onClickableWing = !inst.state.isOpen
-            && inst.vm.activeWing != nil
-            && pointer.onScreen
-            && hit(mouse, closedWingRect(inst))
         setVisible(inst, pres.visible)
-        let nextIgnores = pres.ignoresMouseEvents && !onClickableWing
-        if inst.panel.ignoresMouseEvents != nextIgnores {
-            inst.panel.ignoresMouseEvents = nextIgnores
+        if inst.panel.ignoresMouseEvents != pres.ignoresMouseEvents {
+            inst.panel.ignoresMouseEvents = pres.ignoresMouseEvents
         }
     }
 

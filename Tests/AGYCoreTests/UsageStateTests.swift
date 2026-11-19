@@ -145,4 +145,27 @@ struct UsageStateTests {
         )
         #expect(curFail == .failed(.scriptFailed, cached: nil))
     }
+
+    @Test("HistoricalMonthLoadGate deduplicates overlapping month fetches and rejects stale completions")
+    func historicalMonthLoadGateBehavior() {
+        var gate = HistoricalMonthLoadGate()
+
+        let g1 = gate.beginLoad(yearMonth: "2026-10", force: false)
+        #expect(g1 == 1)
+        #expect(gate.activeYearMonth == "2026-10")
+
+        // Duplicate non-forced fetch for same month deduplicates cleanly
+        #expect(gate.beginLoad(yearMonth: "2026-10", force: false) == nil)
+
+        // Forced reload or navigating to a new month advances generation
+        let g2 = gate.beginLoad(yearMonth: "2026-09", force: false)
+        #expect(g2 == 2)
+        #expect(!gate.isCurrent(generation: 1, yearMonth: "2026-10", currentYearMonth: "2026-09"))
+        #expect(gate.isCurrent(generation: 2, yearMonth: "2026-09", currentYearMonth: "2026-09"))
+
+        // Invalidating (e.g. navigating back to current month) rejects in-flight g2
+        gate.invalidate()
+        #expect(gate.activeYearMonth == nil)
+        #expect(!gate.isCurrent(generation: 2, yearMonth: "2026-09", currentYearMonth: "2026-09"))
+    }
 }
