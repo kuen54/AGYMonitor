@@ -4,17 +4,17 @@
 
 <table>
   <tr>
-    <td align="center"><img src="docs/cost.png" width="250" alt="Cost tab"/><br/><sub><b>Cost</b> — Today / Week / Month API-equivalent spend, model split, daily chart</sub></td>
-    <td align="center"><img src="docs/tokens.png" width="250" alt="Tokens tab"/><br/><sub><b>Tokens</b> — by type (in / out / cache) and by Antigravity model family</sub></td>
-    <td align="center"><img src="docs/plan.png" width="250" alt="Plan tab"/><br/><sub><b>Plan</b> — rolling Gemini &amp; Claude quota left + Google One AI Credits</sub></td>
+    <td align="center"><img src="docs/cost.png" width="250" alt="Cost tab"/><br/><sub><b>Cost</b> — Stratigraphic Core breakdown &amp; Topographic Ridge daily elevation</sub></td>
+    <td align="center"><img src="docs/tokens.png" width="250" alt="Tokens tab"/><br/><sub><b>Tokens</b> — Folded Token Stream (model → channel) &amp; 30-day Throughput Density matrix</sub></td>
+    <td align="center"><img src="docs/plan.png" width="250" alt="Plan tab"/><br/><sub><b>Plan</b> — Dual 270° Orbital Phase dials with pace ray + Google One AI Credits</sub></td>
   </tr>
   <tr>
-    <td align="center"><img src="docs/time-week.png" width="250" alt="Time — week view"/><br/><sub><b>Time · Week</b> — Apple-Health-style timeline, colored by model</sub></td>
-    <td align="center"><img src="docs/time-month.png" width="250" alt="Time — month view"/><br/><sub><b>Time · Month</b> — one row per week of the month</sub></td>
-    <td align="center"><img src="docs/time-year.png" width="250" alt="Time — year heatmap"/><br/><sub><b>Time · Year</b> — GitHub-style activity heatmap</sub></td>
+    <td align="center"><img src="docs/time-week.png" width="250" alt="Time — week view"/><br/><sub><b>Time · Week</b> — 24h Polar Chronometer with 7 Mon–Sun rings &amp; live NOW ray</sub></td>
+    <td align="center"><img src="docs/time-month.png" width="250" alt="Time — month view"/><br/><sub><b>Time · Month</b> — per-week timeline cells with elevation wash</sub></td>
+    <td align="center"><img src="docs/time-year.png" width="250" alt="Time — year contour"/><br/><sub><b>Time · Year</b> — Marching-Squares Topographic Contour Field &amp; [H] peaks</sub></td>
   </tr>
   <tr>
-    <td align="center" colspan="3"><img src="docs/session.png" width="360" alt="Session tab"/><br/><sub><b>Sessions</b> — live Antigravity sessions grouped by workspace, click to jump to terminal or IDE</sub></td>
+    <td align="center" colspan="3"><img src="docs/session.png" width="360" alt="Session tab"/><br/><sub><b>Sessions</b> — Agent Telemetry Radar (clickable nodes &amp; swarm links) + workspace groups</sub></td>
   </tr>
 </table>
 
@@ -52,18 +52,19 @@ Antigravity runs across multiple surfaces — the `agy` CLI in your terminal, An
 
 ### What you get
 
-- **Cost & Tokens** — switch seamlessly between API-equivalent spend and token volume, broken down by Antigravity model family (**Gemini Carbon**, **Gemini Argon**, **Gemini Neon**, **Gemini Hydrogen**, **Gemini Flash**, **Claude**, and **Other**)
+- **Swiss Telemetry & 5 Instrument Visualizations (`⌘I` to toggle `Instrument` / `Classic`)** — scientific Instrument visualizations on every tab (`Borehole Strata` + `Topographic Ridge` for Cost, `Folded Token Stream` + `Density Matrix` for Tokens, `24h Polar Chronometer` + `Year Contour Field` for Time, clickable `Agent Telemetry Radar` for Sessions, and `Orbital Phase Dials` with burn-pace vectors for Plan), plus one-key Classic charts fallback
+- **4 Switchable Studio Themes (`⌘T`)** — `Monolith` (Archival Paper / Void + Cobalt + Vector Hatches), `Polar Blueprint`, `Phosphor` (Cold Spectrum), and `Braun Amber CRT`, following system Light/Dark
+- **Cost & Tokens** — switch seamlessly between API-equivalent spend and token volume across Today / Week / Month, broken down by Antigravity model family (**Gemini Carbon**, **Gemini Argon**, **Gemini Neon**, **Gemini Hydrogen**, **Gemini Flash**, **Claude**, and **Other**)
 - **Time** — *when* you actually worked with Antigravity, computed from 10-minute gap-merged step timestamps:
-  - **Week** — an Apple-Health-style timeline (`Mon–Sun × 0–24h`), each active block colored by dominant model family
+  - **Week** — **24h Polar Chronometer** (7 concentric Mon–Sun rings + live `NOW` radar ray) or Classic `Mon–Sun × 0–24h` traces
   - **Month** — one timeline row per week of the month
-  - **Year** — a 53×7 Monday-first GitHub-style activity heatmap
-- **Sessions** — live list of running Antigravity sessions grouped by workspace folder with surface badges (`CLI` / `Desktop` / `IDE`). Each row shows a priority status dot (**working** / **waiting for input** / **just finished, unseen** / **idle**), conversation title, and latest prompt. **Click any row to jump straight to its terminal pane/tab** (Otty, Apple Terminal, iTerm2, WezTerm, plus Ghostty/Kitty/Alacritty/Antigravity IDE app-activate). The **Antigravity icon spins smoothly while any session is working** — in the menu bar, the notch, and the popover header — and displays an amber/green attention dot until viewed
-- **Plan & AI Credits** — dedicated tab showing how much quota is **left** across Antigravity's rolling ~5-hour model buckets (**Gemini Models** and **Claude & Partner**) with live reset countdowns, alongside your **Plan Tier** and **Google One AI Credits** (`Prompt`, `Flow`, `Flex`)
-- **Today / This Week / This Month** — summary cards with token distribution by type (uncached input, output + thinking, cache read, cache write)
-- **Daily stacked bar chart** — hover any day for exact per-day cost or token details
+  - **Year** — **Marching-Squares Topographic Contour Field** with `[H]` peaks or Classic 53×7 activity heatmap
+- **Sessions** — **Agent Telemetry Radar** plotting workspace hubs, swarm worker links (`parentSessionId`), amber target-lock brackets on waiting sessions, and busy optical pulses — click any radar beacon or workspace row below (`↑↓` + `↵`) to jump straight to its terminal pane/tab (Otty, Apple Terminal, iTerm2, WezTerm, Ghostty, Kitty, Alacritty, Antigravity IDE)
+- **Plan & AI Credits** — dual **270° Orbital Phase Dials** with burn-rate pace vectors & deficit warning wedges across Antigravity's rolling buckets (**Gemini Models** and **Claude & Partner**) alongside weekly horizons, plan tier, and **Google One AI Credits** (`Prompt`, `Flow`, `Flex`)
+- **Notch Live Activity Wing & Customizable Status Bar** — Waiting sessions hold a clickable alert wing beside the hardware notch; Finished sessions announce for 5s and retract cleanly. Customize status bar readout (`Follow Tab`, `Today Cost`, `5h Quota`, `Live Sessions`, `Cost + 5h Quota`) via right-click or `⋯` menu
 - **Month navigation & durable archive** — browse historical months; local daily archive (`~/Library/Application Support/AGYMonitor/`) preserves stats even if old transcripts are cleaned up
 - **4 languages** — English, 简体中文, 繁體中文, 日本語
-- **Auto-refresh & ⌘R** — FSEvents file watching updates shortly after real usage (coalesced and rate-limited), backed by a 30-minute timer and screen-wake observer. **⌘R** forces an immediate full scan and live quota refresh
+- **Zero-permission Global Hotkey (`⌥⇧A`) & Auto-refresh (`⌘R`)** — Carbon hotkey toggle without Accessibility prompts, FSEvents file watching + 30-min timer + screen-wake observer
 - **Menu bar or Notch** — `LSUIElement=true` accessory app with no Dock icon
 
 ### Requirements
@@ -151,11 +152,12 @@ Sources/
   Models.swift                ← app-layer quota, DisplayTab, TimeRange & DisplayMode models
   NotchFullscreen.swift       ← runtime SkyLight fullscreen space & detector wrappers
   NotchController.swift       ← per-display NotchPanel geometry, hover dwell & fullscreen edge gate
-  NotchView.swift             ← NotchShape + compact pill ↔ expanded popover transition
-  Views*.swift                ← SwiftUI popover, cards, charts, Time, Sessions, Plan & menus
+  NotchView.swift             ← NotchShape + compact pill / Live Wing ↔ expanded popover
+  GlobalHotKey.swift          ← zero-permission Carbon RegisterEventHotKey (⌥⇧A)
+  Views*.swift                ← Swiss Telemetry drafting views + 5 Instrument charts (Views_Instrument*.swift)
   Core_*.swift                ← pure Foundation-only core (models, ModelClass, usage/date/time
                                  math, monotonic archive, session/transcript/quota parsers,
-                                 AGYLocator, & explicit Notch/Usage/Quota/Monitor state machines)
+                                 instrument geometry & contour fields, & explicit state machines)
 Tests/
   AGYCoreTests/               ← Swift Testing unit test suites covering Core_*.swift
   test_analyze_usage.py       ← Python unit tests for the local usage scanner
@@ -170,7 +172,7 @@ setup_signing.sh              ← optional one-time self-signed certificate setu
 fix_swift.sh                  ← Command Line Tools SwiftBridging modulemap workaround
 .github/workflows/build.yml   ← CI: plist lint → py_compile & unittest → swift test → DMG build
 AGENTS.md                     ← developer & coding-agent architecture contract
-Info.plist                    ← LSUIElement=true; single source of app version (1.1.0)
+Info.plist                    ← LSUIElement=true; single source of app version (1.2.0)
 ```
 
 ### On pricing accuracy
@@ -199,17 +201,19 @@ Antigravity 同时运行在多个入口：终端里的 `agy` CLI、Antigravity 2
 
 ### 功能亮点
 
-- **费用 & Tokens 双视图** — 按 Antigravity 模型家族精细拆分（**Gemini Carbon**、**Gemini Argon**、**Gemini Neon**、**Gemini Hydrogen**、**Gemini Flash**、**Claude** 与 **Other**）
+- **Swiss Telemetry 与 5 大非常规仪器图表（`⌘I` 一键切换 `仪器风格` / `经典图表`）** — 5 个标签页默认提供仪器级可视化（Cost：**地质岩芯剖面 + 等高山脊**；Tokens：**折叠贝塞尔流向 + 吞吐脉冲矩阵**；Time：**24h 极坐标日晷 + 全年等高地形场**；Sessions：**可点击跳转的 Agent 态势雷达**；Plan：**270° 极坐标燃速罗盘与配速警告扇区**），也可随时切回经典柱图/热力图
+- **4 套工程主题配色（`⌘T` 循环切换）** — 内置 `Monolith`（纸白/暗夜 + 钴蓝 + 矢量纹理）、`Polar 蓝图`、`Phosphor`（冷光谱）与 `Braun 琥珀 CRT`，自动随系统浅色/深色模式适配
+- **费用 & Tokens 双视图** — 支持切换今日/本周/本月汇总，按 Antigravity 模型家族拆分（**Gemini Carbon**、**Gemini Argon**、**Gemini Neon**、**Gemini Hydrogen**、**Gemini Flash**、**Claude** 与 **Other**）
 - **活跃时长（Time）** — 基于 10 分钟间隔合并算法还原你**何时**在使用 Antigravity：
-  - **周视图** — Apple 健康睡眠风格的 `周一~周日 × 0–24h` 时间轴，按各时段主力模型着色
-  - **月视图** — 按周分行展示整月时间轴
-  - **年视图** — 53×7 GitHub 风格年度活跃热力图
-- **实时会话（Sessions）** — 按工作区文件夹分组展示正在运行的 Antigravity 会话，实时显示状态圆点（**运行中** / **等待输入** / **刚完成未读** / **空闲**）、会话标题与最新指令。**点击任意会话即可直接跳转到对应终端分屏/标签页**（支持 Otty、系统 Terminal、iTerm2、WezTerm 精确定位，以及 Ghostty / Kitty / Alacritty / Antigravity IDE 前台唤起）。当任一会话正在工作时，**Antigravity 图标会平滑旋转**，并在需要确认或刚完成时亮起琥珀色/绿色提醒点
-- **套餐配额 & AI Credits（Plan）** — 独立标签页展示 Antigravity ~5 小时滚动模型配额池（**Gemini Models**、**Claude & Partner**）的**剩余百分比**与重置倒计时，同时展示当前订阅等级与 **Google One AI Credits**（`Prompt`、`Flow`、`Flex` 积分）
-- **今日 / 本周 / 本月卡片 & 每日堆叠柱状图** — 按未缓存输入、输出（含思考 Token）、缓存命中、缓存写入清晰拆分，支持按日悬浮查看明细
+  - **周视图** — **24h 极坐标日晷**（周一至周日 7 圈同心轨道 + 实时 `NOW` 扫频指针，或经典 `周一~周日 × 0–24h` 时间轴）
+  - **月视图** — 按周分行展示整月时间轴与每日热度
+  - **年视图** — **Marching Squares 全年等高地形场**（自动标注 `[H]` 高峰时长，支持切回 53×7 GitHub 格子热力图）
+- **实时会话（Sessions）** — 顶部 **Agent 态势雷达** 按工作区聚簇展示节点与 Swarm 子 Agent 连线，等待确认会亮起琥珀目标锁定角标；下方按工作区列出会话标题与最新指令（支持 `↑↓` + `↵` 键盘导航，点击雷达信标或列表行均可直接跳转到 Otty / Terminal / iTerm2 / WezTerm / Antigravity IDE）
+- **套餐配额 & AI Credits（Plan）** — 双环 **270° 极坐标燃速罗盘** 与配速预警展示 Antigravity 滚动配额池（**Gemini Models**、**Claude & Partner**）的剩余百分比、7D 周配额、重置倒计时及 **Google One AI Credits**（`Prompt`、`Flow`、`Flex` 积分）
+- **刘海灵动翼（Notch Live Wing）& 状态栏自定义** — 刘海模式下支持等待会话持久警示与完成后 5 秒自动收起；右键或 `⋯` 菜单可自定义状态栏指标（跟随当前标签 / 今日花费 / 5h 剩余配额 / 实时会话 / 花费 + 配额）
 - **月份导航 & 本地持久归档** — 自由翻阅历史月份；每日汇总自动归档至 `~/Library/Application Support/AGYMonitor/`（默认开启），清理旧日志后历史统计依然完整保留
 - **4 种语言** — English、简体中文、繁體中文、日本語
-- **智能自动刷新 & ⌘R** — FSEvents 监听本地目录变化并合并限频刷新，配合 30 分钟定时兜底与唤醒刷新；按 **⌘R** 立即强制全量扫描并拉取最新配额
+- **免授权全局快捷键（`⌥⇧A`）& 智能自动刷新（`⌘R`）** — 内置 Carbon 全局热键（无需辅助功能权限）；FSEvents 监听本地目录变化 + 30 分钟定时器 + 唤醒刷新
 - **纯粹菜单栏 / 刘海体验** — 无 Dock 图标；可在底部 **⋯** → **显示位置** → **刘海** 开启全屏友好的刘海模式（外接显示器亦支持合成刘海）
 
 ### 系统要求

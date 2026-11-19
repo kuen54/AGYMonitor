@@ -1,7 +1,5 @@
-// Render real SwiftUI popover views to PNGs with synthetic data, via
-// ImageRenderer — so the README screenshots are pixel-faithful to the app
-// (native-style segmented controls, real cards, real fonts). Compiled together
-// with Sources/*.swift (minus main.swift) into a standalone renderer. Mock data only.
+// Render real SwiftUI views to PNGs with synthetic data via ImageRenderer —
+// pixel-faithful to the live AGY // TELEMETRY V2 UI. Mock data only.
 import SwiftUI
 import AppKit
 
@@ -19,7 +17,6 @@ func m(_ id: String, _ name: String, _ cost: Double, _ msgs: Int,
                inputTokens: i, outputTokens: o, cacheRead: cr, cacheWrite: cw)
 }
 
-// Scaled copies of one Antigravity model mix (high-to-low tier order)
 func period(_ scale: Double) -> PeriodUsage {
     let models = [
         m("carbon",   "Carbon",   108.6 * scale, max(1, Int(390 * scale)), Int(9_200_000 * scale), Int(510_000 * scale), Int(64_200_000 * scale)),
@@ -77,7 +74,7 @@ func dayKey(_ d: Date) -> String {
 func timeMock() -> (TimeData, [String: Int]) {
     let cal = Calendar(identifier: .gregorian)
     let today = Date()
-    let wd = cal.component(.weekday, from: today) // 1=Sun..7=Sat
+    let wd = cal.component(.weekday, from: today)
     let backToMon = (wd + 5) % 7
     let monday = cal.date(byAdding: .day, value: -backToMon, to: today)!
     let C = "carbon", A = "argon", N = "neon", H = "hydrogen", F = "flash", CL = "claude"
@@ -129,14 +126,15 @@ func timeMock() -> (TimeData, [String: Int]) {
     return (TimeData(gapMinutes: 10, days: days), year)
 }
 
-// ── synthetic live Antigravity session data ──
 func sess(_ pid: Int, _ id: String, _ cwd: String, _ status: SessionStatus,
-          waitingFor: String? = nil, agoSec: Double, entrypoint: String = "cli") -> SessionInfo {
+          waitingFor: String? = nil, agoSec: Double, entrypoint: String = "cli",
+          parentSessionId: String? = nil) -> SessionInfo {
     let now = Date().timeIntervalSince1970 * 1000
     return SessionInfo(pid: pid, sessionId: id, cwd: cwd, status: status,
                        waitingFor: waitingFor, startedAt: now - agoSec * 1000 - 7_200_000,
                        updatedAt: now - agoSec * 1000, statusUpdatedAt: now - agoSec * 1000,
-                       version: "1.5.9", kind: nil, entrypoint: entrypoint)
+                       version: "1.5.9", kind: nil, entrypoint: entrypoint,
+                       isInternal: parentSessionId != nil, parentSessionId: parentSessionId)
 }
 
 @MainActor
@@ -146,9 +144,10 @@ func populateSessions(_ s: UsageStore) {
     let hf   = "/Users/lijiakun/Developer/hyperframes"
     s.sessionStore.sessions = [
         sess(6101, "a1aa0001-0000-0000-0000-000000000001", agym, .busy, agoSec: 38, entrypoint: "cli"),
-        sess(6102, "a1aa0002-0000-0000-0000-000000000002", agym, .idle, agoSec: 5 * 60, entrypoint: "antigravity-ide"),
+        sess(6102, "a1aa0002-0000-0000-0000-000000000002", agym, .idle, agoSec: 5 * 60, entrypoint: "antigravity-ide",
+             parentSessionId: "a1aa0001-0000-0000-0000-000000000001"),
         sess(6201, "b2bb0001-0000-0000-0000-000000000001", hf,   .waiting,
-             waitingFor: "input needed", agoSec: 2 * 60, entrypoint: "cli"),
+             waitingFor: "permission prompt", agoSec: 2 * 60, entrypoint: "cli"),
         sess(6202, "b2bb0002-0000-0000-0000-000000000002", hf,   .idle, agoSec: 44 * 60, entrypoint: "antigravity"),
         sess(6301, "c3cc0001-0000-0000-0000-000000000001", mia,  .idle, agoSec: 9 * 60, entrypoint: "cli"),
         sess(6302, "c3cc0002-0000-0000-0000-000000000002", mia,  .idle, agoSec: 2 * 3600, entrypoint: "antigravity-ide"),
@@ -191,36 +190,57 @@ func scopedCap(_ id: String?, _ model: String, used: Double, resetHours: Double)
 }
 
 @MainActor
-func makeStore(tab: DisplayTab, range: TimeRange = .week) -> UsageStore {
+func makeStore(
+    tab: DisplayTab,
+    range: TimeRange = .week,
+    notch: Bool = false,
+    preset: TelemetryThemePreset = .monolith,
+    visualMode: TelemetryVisualMode = .instrument
+) -> UsageStore {
     let s = UsageStore()
     let cal = Calendar(identifier: .gregorian)
     let now = cal.dateComponents([.year, .month], from: Date())
     s.language = .en
-    s.isLoading = false
+    s.themePreset = preset
+    s.visualMode = visualMode
+    s.displayMode = notch ? .notch : .menubar
     s.hasOAuthToken = true
     s.selectedTab = tab
     s.viewingYear = now.year!
     s.viewingMonth = now.month!
     s.viewingTimeYear = now.year!
-    s.today = period(0.14)
-    s.week = period(0.68)
-    s.month = period(1.0)
-    s.currentMonthData = s.month
-    s.dailyBreakdown = dailyMock(year: now.year!, month: now.month!)
-    s.lastUpdate = Date()
+    s.isLoading = false
+    let tPeriod = period(0.14)
+    let wPeriod = period(0.68)
+    let mPeriod = period(1.0)
+    let daily = dailyMock(year: now.year!, month: now.month!)
     let (td, year) = timeMock()
+    s.today = tPeriod
+    s.week = wPeriod
+    s.month = mPeriod
+    s.currentMonthData = mPeriod
+    s.dailyBreakdown = daily
+    s.lastUpdate = Date()
     s.currentTimeData = td
     s.viewingTimeData = td
     s.yearTimeDays = year
     s.timeRange = range
-    s.subscriptionQuota = OAuthUsage(
-        five_hour: OAuthUsageWindow(utilization: 9, resets_at: resetIn(4.6), label: "Gemini Models"),
-        seven_day: OAuthUsageWindow(utilization: 14, resets_at: resetIn(4.9), label: "Claude & GPT · 5h"),
+    s.currentMonthLoadPhase = .loaded(CurrentMonthBundle(
+        today: tPeriod,
+        week: wPeriod,
+        month: mPeriod,
+        dailyBreakdown: daily,
+        time: td
+    ))
+    s.yearLoadPhase = .loaded(year)
+    let quota = OAuthUsage(
+        five_hour: OAuthUsageWindow(utilization: 22, resets_at: resetIn(2.4), label: "Gemini Models"),
+        seven_day: OAuthUsageWindow(utilization: 64, resets_at: resetIn(3.8), label: "Claude & GPT · 5h"),
         extra_usage: nil,
         seven_day_sonnet: nil,
         limits: OAuthLimitList(items: [
-            scopedCap("gemini_weekly", "Gemini · Weekly", used: 41, resetHours: 147),
-            scopedCap("claude_partner_weekly", "Claude & GPT · Weekly", used: 12, resetHours: 164),
+            scopedCap("gemini_weekly", "Gemini · Weekly", used: 41, resetHours: 120),
+            scopedCap("claude_partner_weekly", "Claude & GPT · Weekly", used: 12, resetHours: 144),
         ]),
         accountEmail: "jiakun@google-one.demo",
         planTier: "Google AI Ultra",
@@ -228,332 +248,151 @@ func makeStore(tab: DisplayTab, range: TimeRange = .week) -> UsageStore {
         flowCredits: 4200,
         flexCredits: 950
     )
+    s.subscriptionQuota = quota
+    s.quotaState = .ready(snapshot: quota, source: .live, updatedAt: Date(), notice: .none)
     populateSessions(s)
     return s
 }
 
-struct SegmentedBar: View {
-    let items: [(label: String, icon: String?)]
-    let selected: Int
-    var body: some View {
-        HStack(spacing: 0) {
-            ForEach(Array(items.enumerated()), id: \.offset) { i, it in
-                HStack(spacing: 3) {
-                    if let ic = it.icon {
-                        Image(systemName: ic).font(.system(size: 10.5, weight: .regular))
-                    }
-                    Text(it.label)
-                        .font(.system(size: 11.5, weight: i == selected ? .semibold : .regular))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.85)
-                }
-                .foregroundColor(i == selected ? .primary : .secondary)
-                .frame(maxWidth: .infinity)
-                .frame(height: 22)
-                .background(
-                    RoundedRectangle(cornerRadius: 6)
-                        .fill(i == selected ? Color(nsColor: .controlColor) : .clear)
-                        .shadow(color: .black.opacity(i == selected ? 0.12 : 0), radius: 1, y: 0.5)
-                        .padding(1.5)
-                )
-            }
-        }
-        .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.08)))
-    }
-}
-
-struct DemoYearHeatmap: View {
-    let year: Int
-    let days: [String: Int]
-    let loc: Localizer
-    private let cell: CGFloat = 7, sp: CGFloat = 1
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Image(systemName: "chevron.left").font(.system(size: 11, weight: .semibold))
-                    .frame(width: 22, height: 20, alignment: .leading).foregroundColor(.primary)
-                Spacer()
-                Text(String(year)).font(.system(size: 12, weight: .semibold)).foregroundColor(.primary)
-                Spacer()
-                Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold))
-                    .frame(width: 22, height: 20, alignment: .trailing).foregroundColor(.primary).opacity(0.3)
-            }
-            Color.clear.frame(height: 12)
-            let startMonday = TimeLogic.yearGridStartMonday(year: year)
-            let yearPrefix = String(format: "%04d-", year)
-            VStack(alignment: .leading, spacing: sp) {
-                ForEach(0..<7, id: \.self) { row in
-                    HStack(spacing: sp) {
-                        ForEach(0..<53, id: \.self) { col in
-                            let key = startMonday.flatMap { TimeLogic.dayKey(col: col, row: row, startMonday: $0) }
-                            if let key = key, key.hasPrefix(yearPrefix) {
-                                RoundedRectangle(cornerRadius: 1.5)
-                                    .fill(YearHeatmap.levelColor(TimeLogic.heatLevel(days[key] ?? 0), dark: false))
-                                    .frame(width: cell, height: cell)
-                            } else {
-                                Color.clear.frame(width: cell, height: cell)
-                            }
-                        }
-                    }
-                }
-            }
-            HStack(spacing: 3) {
-                Spacer()
-                Text(loc("timeLess")).font(.system(size: 8)).foregroundColor(.secondary)
-                ForEach(0..<5, id: \.self) { l in
-                    RoundedRectangle(cornerRadius: 1.5)
-                        .fill(YearHeatmap.levelColor(l, dark: false)).frame(width: cell, height: cell)
-                }
-                Text(loc("timeMore")).font(.system(size: 8)).foregroundColor(.secondary)
-            }
-        }
-        .padding(.horizontal, 12).padding(.vertical, 10)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.03)))
-    }
-}
-
-struct DemoWeekTimeChart: View {
-    @ObservedObject var store: UsageStore
-    let timeData: TimeData
-    let loc: Localizer
-
-    private let rowHeight: CGFloat = 20
-    private let labelWidth: CGFloat = 34
-    private let totalWidth: CGFloat = 40
-    private let gridHours = [0, 6, 12, 18, 24]
-
-    private var monthPrefix: String {
-        String(format: "%04d-%02d-", store.viewingYear, store.viewingMonth)
-    }
-    private var weeks: [Date] {
-        TimeLogic.weeksOfMonth(year: store.viewingYear, month: store.viewingMonth)
-    }
-    private var selectedWeekIndex: Int? {
-        store.resolvedWeekMonday.flatMap { TimeLogic.weekIndex(of: $0, in: weeks) }
-    }
-    private var dayKeys: [String] {
-        store.resolvedWeekMonday.map(TimeLogic.weekDayKeys) ?? []
-    }
-    private var renderedDayKeys: [String] {
-        TimeLogic.renderedDayKeys(dayKeys, monthPrefix: monthPrefix, days: timeData.days)
-    }
-    private var todayKey: String { AppDate.dayKey(Date()) }
-    private var weekTotal: Int {
-        TimeLogic.totalSeconds(in: timeData.days, dayKeys: renderedDayKeys)
-    }
-    private var avgDivisor: Int {
-        TimeLogic.avgDivisor(dayKeys: dayKeys, todayKey: todayKey, renderedCount: renderedDayKeys.count)
-    }
-    private var weekdaySymbols: [String] {
-        let df = DateFormatter()
-        df.locale = Locale(identifier: loc.language.rawValue)
-        let s = df.shortWeekdaySymbols ?? []
-        guard s.count == 7 else { return ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] }
-        return (0..<7).map { s[($0 + 1) % 7] }
-    }
-
-    private func shortDate(_ key: String) -> String {
-        guard let d = TimeLogic.date(fromDayKey: key) else { return key }
-        let cal = AppDate.gregorian
-        return "\(cal.component(.month, from: d))/\(cal.component(.day, from: d))"
-    }
-
-    private func stat(_ label: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            Text(label).font(.system(size: 9)).foregroundColor(.secondary)
-            Text(value).font(.system(size: 13, weight: .bold, design: .rounded)).foregroundColor(.primary)
-        }
-    }
-
-    var body: some View {
-        let index = selectedWeekIndex
-        let atFirst = (index ?? 0) <= 0
-        let atLast = index.map { $0 >= weeks.count - 1 } ?? true
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Image(systemName: "chevron.left").font(.system(size: 11, weight: .semibold))
-                    .frame(width: 22, height: 20, alignment: .leading)
-                    .foregroundColor(.primary).opacity(atFirst ? 0.3 : 1)
-                Spacer()
-                Text("\(shortDate(dayKeys.first ?? "")) – \(shortDate(dayKeys.last ?? ""))")
-                    .font(.system(size: 12, weight: .semibold)).foregroundColor(.primary)
-                Spacer()
-                Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold))
-                    .frame(width: 22, height: 20, alignment: .trailing)
-                    .foregroundColor(.primary).opacity(atLast ? 0.3 : 1)
-            }
-            HStack(spacing: 18) {
-                stat(loc("timeWeekTotal"), TimeLogic.formatDurationShort(weekTotal))
-                stat(loc("timeDailyAvg"), TimeLogic.formatDurationShort(weekTotal / avgDivisor))
-                stat(loc("timeLongest"), TimeLogic.formatDurationShort(
-                    TimeLogic.longestIntervalSeconds(in: timeData.days, dayKeys: renderedDayKeys)))
-                Spacer()
-            }
-            Color.clear.frame(height: 12)
-            VStack(spacing: 2) {
-                ForEach(Array(dayKeys.enumerated()), id: \.element) { idx, key in
-                    let inMonth = key.hasPrefix(monthPrefix)
-                    let d = timeData.days[key]
-                    let total = d?.totalSeconds ?? 0
-                    let isToday = key == todayKey
-                    HStack(spacing: 6) {
-                        Text(weekdaySymbols.indices.contains(idx) ? weekdaySymbols[idx] : "")
-                            .font(.system(size: 9, weight: isToday ? .semibold : .regular))
-                            .foregroundColor(isToday ? .primary : .secondary)
-                            .frame(width: labelWidth, alignment: .leading)
-                        GeometryReader { geo in
-                            let w = geo.size.width
-                            ZStack(alignment: .leading) {
-                                if !inMonth {
-                                    RoundedRectangle(cornerRadius: 3)
-                                        .fill(Color.primary.opacity(0.025))
-                                        .frame(width: max(0, w - 2), height: rowHeight - 2)
-                                        .offset(x: 1)
-                                }
-                                ForEach(gridHours, id: \.self) { h in
-                                    Rectangle()
-                                        .fill(Color.primary.opacity(0.07))
-                                        .frame(width: 1)
-                                        .offset(x: min(w - 1, w * CGFloat(h) / 24.0))
-                                }
-                                ForEach(Array((d?.intervals ?? []).enumerated()), id: \.offset) { _, iv in
-                                    let capW = max(2, w * CGFloat(max(iv.durationSeconds, 120)) / 86400.0)
-                                    let x = min(max(0, w * CGFloat(iv.startSec) / 86400.0), w - capW)
-                                    Capsule()
-                                        .fill(modelClassColor(iv.model).opacity(0.85))
-                                        .frame(width: capW, height: 8)
-                                        .offset(x: x)
-                                }
-                            }
-                        }
-                        .frame(height: rowHeight)
-                        Text(inMonth || d != nil ? TimeLogic.formatDurationShort(total) : "")
-                            .font(.system(size: 9, design: .monospaced))
-                            .foregroundColor(total > 0 ? .primary : .secondary.opacity(0.6))
-                            .frame(width: totalWidth, alignment: .trailing)
-                    }
-                    .padding(.vertical, 1)
-                    .background(isToday ? RoundedRectangle(cornerRadius: 4).fill(Color.primary.opacity(0.04)) : nil)
-                }
-            }
-            HStack(spacing: 6) {
-                Color.clear.frame(width: labelWidth, height: 1)
-                GeometryReader { geo in
-                    let w = geo.size.width
-                    ZStack(alignment: .leading) {
-                        ForEach(gridHours, id: \.self) { h in
-                            Text("\(h)")
-                                .font(.system(size: 8))
-                                .foregroundColor(.secondary.opacity(0.7))
-                                .position(x: min(max(w * CGFloat(h) / 24.0, 4), w - 7), y: 5)
-                        }
-                    }
-                }
-                .frame(height: 10)
-                Color.clear.frame(width: totalWidth, height: 1)
-            }
-        }
-        .padding(.horizontal, 12).padding(.vertical, 10)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.03)))
-    }
-}
-
-struct DemoTimeTab: View {
-    @ObservedObject var store: UsageStore
-    let loc: Localizer
-    var body: some View {
-        VStack(spacing: 8) {
-            SegmentedBar(items: TimeRange.allCases.map { ($0.label(loc), nil) },
-                         selected: store.timeRange.rawValue)
-            switch store.timeRange {
-            case .week:  DemoWeekTimeChart(store: store, timeData: store.viewingTimeData!, loc: loc)
-            case .month: MonthTimeChart(timeData: store.viewingTimeData!,
-                                        year: store.viewingYear, month: store.viewingMonth)
-            case .year:  DemoYearHeatmap(year: store.viewingTimeYear,
-                                         days: store.yearTimeDays ?? [:], loc: loc)
-            }
-        }
-        .padding(.horizontal, 10).padding(.bottom, 6)
-        .environment(\.localizer, loc)
-    }
-}
+// MARK: - Pixel-faithful SwiftUI Popover Chrome (for ImageRenderer)
 
 struct DemoPopover: View {
     @ObservedObject var store: UsageStore
     let loc: Localizer
-    var bg: Color = Color(nsColor: .windowBackgroundColor)
+    var dark: Bool = false
     var notch: Bool = false
+
+    private var theme: AGYTheme {
+        AGYTheme(preset: store.themePreset, colorScheme: dark || notch ? .dark : .light, isNotch: notch)
+    }
     private var visibleTabs: [DisplayTab] { [.cost, .tokens, .time, .session, .subscription] }
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 6) {
-                DemoAGYLogoShape().fill(Color.agyBrand)
-                    .frame(width: 14, height: 14)
-                Text(loc("title")).font(.system(size: 13, weight: .bold)).foregroundColor(.primary)
-                Spacer()
-            }
-            .padding(.horizontal, 14).padding(.top, 14).padding(.bottom, 6)
+            // Bare Header
+            HStack(spacing: 8) {
+                HStack(spacing: 6) {
+                    DemoAGYLogoShape()
+                        .fill(theme.accent)
+                        .frame(width: 13.5, height: 13.5)
+                    Text(loc("title").uppercased())
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        .tracking(1.1)
+                        .foregroundColor(theme.inkPrimary)
 
-            HStack {
-                Image(systemName: "chevron.left").font(.system(size: 13, weight: .semibold))
-                    .frame(width: 28, height: 28, alignment: .leading).foregroundColor(.primary)
-                Spacer()
-                Text(store.viewingMonthLabel).font(.system(size: 14, weight: .semibold)).foregroundColor(.primary)
-                Spacer()
-                Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold))
-                    .frame(width: 28, height: 28, alignment: .trailing).foregroundColor(.primary).opacity(0.3)
-            }
-            .padding(.horizontal, 14).padding(.bottom, 8)
+                    Text("▲ \(String(format: loc("waitTagFmt"), 1))")
+                        .font(.system(size: 8.5, weight: .bold, design: .monospaced))
+                        .foregroundColor(.black)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1.5)
+                        .background(theme.signalAmber)
+                }
 
+                Spacer(minLength: 4)
+
+                headerAccessory
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 11)
+            .padding(.bottom, 9)
+
+            // Full-bleed Grid Tab Bar
+            TelemetryTabBar(
+                items: visibleTabs,
+                selection: $store.selectedTab,
+                sessionStore: store.sessionStore,
+                loc: loc
+            )
+
+            // Live production SwiftUI content
             Group {
-                if notch {
-                    TabSelector(isNotch: true, items: visibleTabs,
-                                selection: $store.selectedTab, label: { $0.label(loc) })
-                } else {
-                    SegmentedBar(items: visibleTabs.map { ($0.label(loc), $0.icon) },
-                                 selected: visibleTabs.firstIndex(of: store.selectedTab) ?? 0)
+                switch store.selectedTab {
+                case .cost, .tokens:
+                    UsageOverviewSection(store: store)
+                case .time:
+                    TimeTabView(store: store)
+                case .session:
+                    SessionTabView(sessionStore: store.sessionStore, visualMode: store.visualMode)
+                case .subscription:
+                    SubscriptionView(store: store)
                 }
             }
-            .padding(.horizontal, 10).padding(.bottom, 8)
 
-            content
+            HairlineRule(showCrosshairs: true)
 
-            Divider().padding(.horizontal, 10)
-
-            HStack(spacing: 12) {
-                Text(String(format: loc("updated"), loc("justNow")))
-                    .font(.system(size: 10.5)).foregroundColor(.secondary)
+            // Bare Statusline Footer
+            HStack(spacing: 6) {
+                HStack(spacing: 6) {
+                    Text(String(format: loc("updated"), loc("justNow")).uppercased())
+                        .font(.system(size: 9, weight: .medium, design: .monospaced))
+                        .foregroundColor(theme.inkSecondary)
+                    Text("· ⌘R · ⌘T · ⌘I")
+                        .font(.system(size: 8.5, weight: .medium, design: .monospaced))
+                        .foregroundColor(theme.inkMuted)
+                }
                 Spacer()
-                Image(systemName: "globe").font(.system(size: 11, weight: .medium)).foregroundColor(.secondary)
-                Image(systemName: "ellipsis.circle").font(.system(size: 11, weight: .medium)).foregroundColor(.secondary)
-                Image(systemName: "arrow.clockwise").font(.system(size: 11, weight: .medium)).foregroundColor(.secondary)
-                Image(systemName: "power").font(.system(size: 11, weight: .medium)).foregroundColor(.secondary)
+                HStack(spacing: 4) {
+                    Text("EN")
+                        .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                        .foregroundColor(theme.inkSecondary)
+                        .frame(width: 26, height: 22)
+                    Rectangle().fill(theme.hairline).frame(width: 1, height: 11)
+                    demoBareIcon("ellipsis")
+                    Rectangle().fill(theme.hairline).frame(width: 1, height: 11)
+                    demoBareIcon("arrow.clockwise")
+                    Rectangle().fill(theme.hairline).frame(width: 1, height: 11)
+                    demoBareIcon("power")
+                }
             }
-            .padding(.horizontal, 14).padding(.vertical, 10)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
         }
-        .frame(width: (store.selectedTab == .time || store.selectedTab == .session) ? 480 : 360)
-        .background(bg)
+        .frame(width: AGYTheme.panelWidth)
+        .background(notch ? Color.clear : theme.canvas)
         .environment(\.localizer, loc)
+        .environment(\.agyTheme, theme)
+        .environment(\.telemetryStaticRender, true)
+        .environment(\.colorScheme, (dark || notch) ? .dark : .light)
     }
 
-    @ViewBuilder private var content: some View {
-        if store.selectedTab == .time {
-            DemoTimeTab(store: store, loc: loc)
-        } else if store.selectedTab == .session {
-            SessionTabView(sessionStore: store.sessionStore)
-                .environment(\.localizer, loc)
-        } else if store.selectedTab == .subscription {
-            SubscriptionView(store: store)
-        } else {
-            VStack(spacing: 8) {
-                PeriodCard(metric: store.selectedTab, icon: "calendar", title: loc("today"), usage: store.today!)
-                PeriodCard(metric: store.selectedTab, icon: "calendar.badge.clock", title: loc("thisWeek"), usage: store.week!)
-                PeriodCard(metric: store.selectedTab, icon: "chart.bar", title: loc("thisMonth"), usage: store.month!, showStats: true)
-                DailyChart(data: store.dailyBreakdown!, mode: store.selectedTab, year: store.viewingYear, month: store.viewingMonth)
+    @ViewBuilder
+    private var headerAccessory: some View {
+        switch store.selectedTab {
+        case .cost, .tokens:
+            TelemetryStepper(
+                label: store.viewingMonthCompactLabel,
+                canDecrement: true,
+                canIncrement: false,
+                onDecrement: {},
+                onIncrement: {}
+            )
+        case .time:
+            TelemetryStepper(
+                label: store.timeRange == .year ? String(store.viewingTimeYear) : store.viewingMonthCompactLabel,
+                canDecrement: true,
+                canIncrement: false,
+                onDecrement: {},
+                onIncrement: {}
+            )
+        case .session:
+            Text(String(format: loc("liveTagFmt"), store.sessionStore.liveCount))
+                .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                .foregroundColor(theme.inkSecondary)
+        case .subscription:
+            HStack(spacing: 4) {
+                DemoAGYLogoShape().fill(theme.accent).frame(width: 8, height: 8)
+                Text("GOOGLE AI ULTRA")
+                    .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                    .foregroundColor(theme.accent)
             }
-            .padding(.horizontal, 10).padding(.bottom, 6)
         }
+    }
+
+    private func demoBareIcon(_ name: String) -> some View {
+        Image(systemName: name)
+            .font(.system(size: 10.5, weight: .medium))
+            .foregroundColor(theme.inkSecondary)
+            .frame(width: 24, height: 22)
     }
 }
 
@@ -566,9 +405,9 @@ struct DemoNotch: View {
     private var wallpaper: some View {
         LinearGradient(
             colors: [
-                Color(red: 0.05, green: 0.08, blue: 0.22),
-                Color(red: 0.16, green: 0.24, blue: 0.56),
-                Color(red: 0.31, green: 0.49, blue: 1.00),
+                Color(red: 0.02, green: 0.04, blue: 0.12),
+                Color(red: 0.08, green: 0.14, blue: 0.36),
+                Color(red: 0.19, green: 0.34, blue: 0.78),
             ],
             startPoint: .topLeading, endPoint: .bottomTrailing)
     }
@@ -586,28 +425,66 @@ struct DemoNotch: View {
         .foregroundColor(.white.opacity(0.9))
         .padding(.horizontal, 16)
         .frame(height: menuBarHeight)
-        .background(Color.black.opacity(0.24))
+        .background(Color.black.opacity(0.28))
         .frame(maxHeight: .infinity, alignment: .top)
     }
 
+    private var liveWingPreview: some View {
+        let vm = NotchViewModel()
+        vm.closedNotchSize = CGSize(width: 185, height: 28)
+        vm.activeWing = .waiting(
+            sessionId: "b2bb0001-0000-0000-0000-000000000001",
+            workspace: "hyperframes",
+            surface: "CLI",
+            needsConfirm: true
+        )
+        return VStack(spacing: 5) {
+            Text("LIVE WING // ALERT STATE")
+                .font(.system(size: 8.5, weight: .bold, design: .monospaced))
+                .tracking(0.8)
+                .foregroundColor(.white.opacity(0.75))
+            CompactNotchView(
+                store: store,
+                sessionStore: store.sessionStore,
+                vm: vm,
+                notchWidth: 185,
+                notchHeight: 28
+            )
+            .environment(\.telemetryStaticRender, true)
+            .background(Color.black)
+            .overlay(
+                NotchShape(topCornerRadius: 6, bottomCornerRadius: 11)
+                    .stroke(Color.white.opacity(0.18), lineWidth: 1)
+            )
+            .clipShape(NotchShape(topCornerRadius: 6, bottomCornerRadius: 11))
+        }
+    }
+
     var body: some View {
+        let shape = NotchShape(topCornerRadius: 11, bottomCornerRadius: 20)
         ZStack(alignment: .top) {
             wallpaper
             menuBar
-            DemoPopover(store: store, loc: loc, bg: .clear, notch: true)
-                .padding(.horizontal, 18)
-                .padding(.top, menuBarHeight)
-                .padding(.bottom, 14)
-                .background(Color.black)
-                .clipShape(NotchShape(topCornerRadius: 10, bottomCornerRadius: 22))
-                .environment(\.colorScheme, .dark)
+            VStack(spacing: 14) {
+                DemoPopover(store: store, loc: loc, dark: true, notch: true)
+                    .padding(.horizontal, 18)
+                    .padding(.top, menuBarHeight + 4)
+                    .padding(.bottom, 14)
+                    .background(Color.black)
+                    .overlay(shape.stroke(Color.white.opacity(0.14), lineWidth: 1))
+                    .clipShape(shape)
+                    .environment(\.colorScheme, .dark)
+
+                liveWingPreview
+                    .environment(\.colorScheme, .dark)
+            }
         }
-        .frame(width: 720, height: 920)
+        .frame(width: 720, height: 760)
     }
 }
 
 @MainActor
-func render(_ name: String, _ view: some View, scale: CGFloat = 2) {
+func render(_ name: String, _ view: some View, to dir: String, scale: CGFloat = 2) {
     let r = ImageRenderer(content: view)
     r.scale = scale
     guard let img = r.nsImage,
@@ -616,8 +493,7 @@ func render(_ name: String, _ view: some View, scale: CGFloat = 2) {
           let png = rep.representation(using: .png, properties: [:]) else {
         print("FAILED \(name)"); return
     }
-    let out = URL(fileURLWithPath: CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : ".")
-        .appendingPathComponent("\(name).png")
+    let out = URL(fileURLWithPath: dir).appendingPathComponent("\(name).png")
     try? png.write(to: out)
     print("wrote \(name).png \(Int(img.size.width))x\(Int(img.size.height))")
 }
@@ -628,13 +504,54 @@ struct RenderApp {
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
         let loc = Localizer(language: .en)
-        render("cost", DemoPopover(store: makeStore(tab: .cost), loc: loc))
-        render("tokens", DemoPopover(store: makeStore(tab: .tokens), loc: loc))
-        render("plan", DemoPopover(store: makeStore(tab: .subscription), loc: loc))
-        render("time-week", DemoPopover(store: makeStore(tab: .time, range: .week), loc: loc))
-        render("time-month", DemoPopover(store: makeStore(tab: .time, range: .month), loc: loc))
-        render("time-year", DemoPopover(store: makeStore(tab: .time, range: .year), loc: loc))
-        render("session", DemoPopover(store: makeStore(tab: .session), loc: loc))
-        render("notch", DemoNotch(store: makeStore(tab: .cost), loc: loc))
+        let args = Array(CommandLine.arguments.dropFirst())
+
+        if let themeIdx = args.firstIndex(of: "--themes"), themeIdx + 1 < args.count {
+            let dir = args[themeIdx + 1]
+            try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            for preset in TelemetryThemePreset.allCases {
+                render("theme-\(preset.rawValue)-light",
+                       DemoPopover(store: makeStore(tab: .cost, preset: preset), loc: loc, dark: false),
+                       to: dir)
+                render("theme-\(preset.rawValue)-dark",
+                       DemoPopover(store: makeStore(tab: .cost, preset: preset), loc: loc, dark: true),
+                       to: dir)
+            }
+            return
+        }
+
+        if let classicIdx = args.firstIndex(of: "--classic"), classicIdx + 1 < args.count {
+            let dir = args[classicIdx + 1]
+            try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            render("classic-cost", DemoPopover(store: makeStore(tab: .cost, visualMode: .classic), loc: loc), to: dir)
+            render("classic-tokens", DemoPopover(store: makeStore(tab: .tokens, visualMode: .classic), loc: loc), to: dir)
+            render("classic-plan", DemoPopover(store: makeStore(tab: .subscription, visualMode: .classic), loc: loc), to: dir)
+            render("classic-time-week", DemoPopover(store: makeStore(tab: .time, range: .week, visualMode: .classic), loc: loc), to: dir)
+            render("classic-time-year", DemoPopover(store: makeStore(tab: .time, range: .year, visualMode: .classic), loc: loc), to: dir)
+            render("classic-session", DemoPopover(store: makeStore(tab: .session, visualMode: .classic), loc: loc), to: dir)
+            return
+        }
+
+        if let darkIdx = args.firstIndex(of: "--dark-instruments"), darkIdx + 1 < args.count {
+            let dir = args[darkIdx + 1]
+            try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            render("dark-cost-blueprint", DemoPopover(store: makeStore(tab: .cost, preset: .blueprint), loc: loc, dark: true), to: dir)
+            render("dark-tokens-phosphor", DemoPopover(store: makeStore(tab: .tokens, preset: .phosphor), loc: loc, dark: true), to: dir)
+            render("dark-plan-amber", DemoPopover(store: makeStore(tab: .subscription, preset: .amber), loc: loc, dark: true), to: dir)
+            render("dark-time-week-phosphor", DemoPopover(store: makeStore(tab: .time, range: .week, preset: .phosphor), loc: loc, dark: true), to: dir)
+            render("dark-time-year-blueprint", DemoPopover(store: makeStore(tab: .time, range: .year, preset: .blueprint), loc: loc, dark: true), to: dir)
+            render("dark-session-monolith", DemoPopover(store: makeStore(tab: .session, preset: .monolith), loc: loc, dark: true), to: dir)
+            return
+        }
+
+        let dir = args.first ?? "."
+        render("cost", DemoPopover(store: makeStore(tab: .cost), loc: loc), to: dir)
+        render("tokens", DemoPopover(store: makeStore(tab: .tokens), loc: loc), to: dir)
+        render("plan", DemoPopover(store: makeStore(tab: .subscription), loc: loc), to: dir)
+        render("time-week", DemoPopover(store: makeStore(tab: .time, range: .week), loc: loc), to: dir)
+        render("time-month", DemoPopover(store: makeStore(tab: .time, range: .month), loc: loc), to: dir)
+        render("time-year", DemoPopover(store: makeStore(tab: .time, range: .year), loc: loc), to: dir)
+        render("session", DemoPopover(store: makeStore(tab: .session), loc: loc), to: dir)
+        render("notch", DemoNotch(store: makeStore(tab: .cost, notch: true), loc: loc), to: dir)
     }
 }

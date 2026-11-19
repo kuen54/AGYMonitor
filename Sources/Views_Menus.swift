@@ -1,27 +1,37 @@
 import SwiftUI
 import AppKit
 
-// Footer menus (language switcher + options) — AppKit NSMenu coordinators.
+// Footer menus (language switcher + options) — AppKit NSMenu coordinators
+// styled as bare hairline statusline controls matching AGY // TELEMETRY.
 
-// ── Language switcher (plain button → NSMenu, avoids accent color tinting) ──
+// MARK: - Language Switcher
+
 struct LanguageSwitcher: NSViewRepresentable {
     @ObservedObject var store: UsageStore
 
     func makeNSView(context: Context) -> NSButton {
-        let btn = NSButton(frame: .zero)
-        btn.image = NSImage(systemSymbolName: "globe", accessibilityDescription: nil)
-        btn.imageScaling = .scaleProportionallyDown
+        let btn = NSButton(frame: NSRect(x: 0, y: 0, width: 26, height: 22))
+        btn.bezelStyle = .inline
         btn.isBordered = false
-        btn.contentTintColor = .secondaryLabelColor
+        btn.font = NSFont.monospacedSystemFont(ofSize: 9.5, weight: .semibold)
         btn.target = context.coordinator
         btn.action = #selector(Coordinator.showMenu(_:))
         btn.setContentHuggingPriority(.required, for: .horizontal)
+        btn.widthAnchor.constraint(equalToConstant: 26).isActive = true
+        btn.heightAnchor.constraint(equalToConstant: 22).isActive = true
         return btn
     }
 
     func updateNSView(_ btn: NSButton, context: Context) {
         context.coordinator.notchVM = context.environment.notchViewModel
-        btn.contentTintColor = .secondaryLabelColor
+        let theme = context.environment.agyTheme
+        let ink = NSColor(theme.inkSecondary)
+        let titleAttr: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedSystemFont(ofSize: 9.5, weight: .semibold),
+            .foregroundColor: ink,
+        ]
+        btn.attributedTitle = NSAttributedString(string: store.language.displayName, attributes: titleAttr)
+        btn.needsDisplay = true
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(store: store) }
@@ -55,27 +65,34 @@ struct LanguageSwitcher: NSViewRepresentable {
     }
 }
 
-/// Footer "⋯" menu: Display location (Menu bar / Notch) + durable local archive toggle & clear.
+// MARK: - Options Menu
+
+/// Footer "⋯" menu: Display location, Theme preset, Status bar readout,
+/// Global Hotkey (⌥⇧A), and durable local archive toggle & clear.
 struct OptionsMenu: NSViewRepresentable {
     @ObservedObject var store: UsageStore
     let loc: Localizer
 
     func makeNSView(context: Context) -> NSButton {
-        let btn = NSButton(frame: .zero)
-        btn.image = NSImage(systemSymbolName: "ellipsis.circle", accessibilityDescription: nil)
+        let btn = NSButton(frame: NSRect(x: 0, y: 0, width: 24, height: 22))
+        btn.image = NSImage(systemSymbolName: "ellipsis", accessibilityDescription: nil)
+        btn.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 10.5, weight: .semibold)
         btn.imageScaling = .scaleProportionallyDown
         btn.isBordered = false
-        btn.contentTintColor = .secondaryLabelColor
         btn.target = context.coordinator
         btn.action = #selector(Coordinator.showMenu(_:))
         btn.setContentHuggingPriority(.required, for: .horizontal)
+        btn.widthAnchor.constraint(equalToConstant: 24).isActive = true
+        btn.heightAnchor.constraint(equalToConstant: 22).isActive = true
         return btn
     }
 
     func updateNSView(_ btn: NSButton, context: Context) {
         context.coordinator.loc = loc
         context.coordinator.notchVM = context.environment.notchViewModel
-        btn.contentTintColor = .secondaryLabelColor
+        let theme = context.environment.agyTheme
+        btn.contentTintColor = NSColor(theme.inkSecondary)
+        btn.needsDisplay = true
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(store: store, loc: loc) }
@@ -90,6 +107,7 @@ struct OptionsMenu: NSViewRepresentable {
             let menu = NSMenu()
             menu.delegate = self
 
+            // Display location
             let modeHeader = NSMenuItem(title: loc("displayModeHeader"), action: nil, keyEquivalent: "")
             modeHeader.isEnabled = false
             menu.addItem(modeHeader)
@@ -103,6 +121,57 @@ struct OptionsMenu: NSViewRepresentable {
             }
             menu.addItem(.separator())
 
+            // Theme preset submenu
+            let themeSubItem = NSMenuItem(title: loc("themeHeader"), action: nil, keyEquivalent: "")
+            let themeMenu = NSMenu()
+            for preset in TelemetryThemePreset.allCases {
+                let item = NSMenuItem(title: preset.label(loc),
+                                      action: #selector(pickThemePreset(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = preset.rawValue
+                item.state = store.themePreset == preset ? .on : .off
+                themeMenu.addItem(item)
+            }
+            themeSubItem.submenu = themeMenu
+            menu.addItem(themeSubItem)
+
+            // Visual style submenu (Instrument vs Classic)
+            let visualSubItem = NSMenuItem(title: loc("visualModeHeader"), action: nil, keyEquivalent: "")
+            let visualMenu = NSMenu()
+            for vMode in TelemetryVisualMode.allCases {
+                let item = NSMenuItem(title: vMode.label(loc),
+                                      action: #selector(pickVisualMode(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = vMode.rawValue
+                item.state = store.visualMode == vMode ? .on : .off
+                visualMenu.addItem(item)
+            }
+            visualSubItem.submenu = visualMenu
+            menu.addItem(visualSubItem)
+
+            // Status bar readout submenu
+            let metricSubItem = NSMenuItem(title: loc("metricHeader"), action: nil, keyEquivalent: "")
+            let metricMenu = NSMenu()
+            for metric in MenuBarMetricPreference.allCases {
+                let item = NSMenuItem(title: metric.label(loc),
+                                      action: #selector(pickMetric(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = metric.rawValue
+                item.state = store.menuBarMetric == metric ? .on : .off
+                metricMenu.addItem(item)
+            }
+            metricSubItem.submenu = metricMenu
+            menu.addItem(metricSubItem)
+
+            // Global Hotkey toggle
+            let hk = NSMenuItem(title: loc("hotkeyToggle"),
+                                action: #selector(toggleHotkey), keyEquivalent: "")
+            hk.target = self
+            hk.state = store.globalHotkeyEnabled ? .on : .off
+            menu.addItem(hk)
+            menu.addItem(.separator())
+
+            // Archive section
             let toggle = NSMenuItem(title: loc("archiveToggle"),
                                     action: #selector(toggleArchive), keyEquivalent: "")
             toggle.target = self
@@ -130,6 +199,31 @@ struct OptionsMenu: NSViewRepresentable {
                let mode = DisplayMode(rawValue: raw) {
                 store.setDisplayMode(mode)
             }
+        }
+
+        @objc func pickThemePreset(_ item: NSMenuItem) {
+            if let raw = item.representedObject as? String,
+               let preset = TelemetryThemePreset(rawValue: raw) {
+                store.setThemePreset(preset)
+            }
+        }
+
+        @objc func pickVisualMode(_ item: NSMenuItem) {
+            if let raw = item.representedObject as? String,
+               let vMode = TelemetryVisualMode(rawValue: raw) {
+                store.setVisualMode(vMode)
+            }
+        }
+
+        @objc func pickMetric(_ item: NSMenuItem) {
+            if let raw = item.representedObject as? String,
+               let metric = MenuBarMetricPreference(rawValue: raw) {
+                store.setMenuBarMetric(metric)
+            }
+        }
+
+        @objc func toggleHotkey() {
+            store.setGlobalHotkeyEnabled(!store.globalHotkeyEnabled)
         }
 
         @objc func toggleArchive() {

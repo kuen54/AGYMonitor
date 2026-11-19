@@ -291,3 +291,35 @@ enum DisplayMode: String, CaseIterable {
         }
     }
 }
+
+extension MenuBarMetricPreference {
+    func label(_ loc: Localizer) -> String {
+        switch self {
+        case .followTab:    return loc("metricFollowTab")
+        case .todayCost:    return loc("metricTodayCost")
+        case .quota5h:      return loc("metricQuota5h")
+        case .liveSessions: return loc("metricLiveSessions")
+        case .costAndQuota: return loc("metricCostAndQuota")
+        }
+    }
+}
+
+extension TelemetryThemePreset {
+    func label(_ loc: Localizer) -> String {
+        switch self {
+        case .monolith:  return loc("themeMonolith")
+        case .blueprint: return loc("themeBlueprint")
+        case .phosphor:  return loc("themePhosphor")
+        case .amber:     return loc("themeAmber")
+        }
+    }
+}
+
+extension TelemetryVisualMode {
+    func label(_ loc: Localizer) -> String {
+        switch self {
+        case .instrument: return loc("visualModeInstrument")
+        case .classic:    return loc("visualModeClassic")
+        }
+    }
+}

@@ -46,6 +46,19 @@ public enum ModelClass: String, Codable, CaseIterable, Sendable {
         }
     }
 
+    /// Three-letter telemetry channel code used in compact ledgers and charts.
+    public var shortCode: String {
+        switch self {
+        case .carbon:   return "CRB"
+        case .argon:    return "ARG"
+        case .neon:     return "NEO"
+        case .hydrogen: return "HYD"
+        case .flash:    return "FLS"
+        case .claude:   return "CLD"
+        case .other:    return "OTH"
+        }
+    }
+
     /// True when this class belongs to Google's first-party Gemini quota family.
     public var isGeminiFamily: Bool {
         switch self {

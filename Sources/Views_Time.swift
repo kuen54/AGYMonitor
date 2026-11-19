@@ -1,41 +1,53 @@
 import SwiftUI
 import AppKit
 
-// Time tab + its Week / Month / Year active-time charts.
+// Time tab + oscilloscope Week / Month / Year single-plane precision charts.
 
-// MARK: - Time tab (active usage time)
+// MARK: - Time Tab
 
 struct TimeTabView: View {
     @ObservedObject var store: UsageStore
     @Environment(\.localizer) private var loc
+    @Environment(\.agyTheme) private var theme
 
     var body: some View {
-        VStack(spacing: 8) {
-            TabSelector(isNotch: store.displayMode == .notch,
-                        items: TimeRange.allCases,
-                        selection: $store.timeRange,
-                        label: { $0.label(loc) })
+        VStack(spacing: 0) {
+            TelemetrySegmentedStrip(
+                items: TimeRange.allCases,
+                selection: $store.timeRange,
+                label: { $0.label(loc) }
+            )
 
             switch store.timeRange {
             case .week:
                 if let data = activeTimeData {
-                    WeekTimeChart(store: store, timeData: data)
+                    if store.visualMode == .instrument {
+                        PolarChronometerWeekChart(store: store, timeData: data)
+                    } else {
+                        WeekTimeChart(store: store, timeData: data)
+                    }
                 } else {
                     timeStateView
                 }
             case .month:
                 if let data = activeTimeData {
-                    MonthTimeChart(timeData: data,
-                                   year: store.viewingYear, month: store.viewingMonth)
+                    MonthTimeChart(
+                        timeData: data,
+                        year: store.viewingYear,
+                        month: store.viewingMonth,
+                        instrumentElevation: store.visualMode == .instrument
+                    )
                 } else {
                     timeStateView
                 }
             case .year:
-                YearHeatmap(store: store)
+                if store.visualMode == .instrument {
+                    TopographicYearContourChart(store: store)
+                } else {
+                    YearHeatmap(store: store)
+                }
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.bottom, 6)
     }
 
     private var activeTimeData: TimeData? {
@@ -53,48 +65,85 @@ struct TimeTabView: View {
         let isLoadingScope = store.isCurrentMonth
             ? store.effectiveCurrentMonthPhase.isLoading
             : store.effectiveHistoricalMonthPhase.isLoading
-        VStack(spacing: 8) {
-            if isLoadingScope || store.isLoading {
-                ProgressView().controlSize(.small)
-                Text(loc("loading"))
-                    .font(.system(size: 11)).foregroundColor(.secondary)
-            } else if isFailed {
-                Image(systemName: "exclamationmark.triangle")
-                    .font(.system(size: 20)).foregroundColor(.orange)
-                Text(loc("loadFailed"))
-                    .font(.system(size: 11)).foregroundColor(.secondary)
-                Button(loc("retry")) {
-                    store.refresh(force: true)
+
+        if isLoadingScope || store.isLoading {
+            TelemetrySkeleton()
+        } else {
+            VStack(spacing: 8) {
+                Image(systemName: isFailed ? "exclamationmark.triangle" : "tray")
+                    .font(.system(size: 18))
+                    .foregroundColor(isFailed ? theme.signalAmber : theme.inkMuted)
+                Text(loc(isFailed ? "loadFailed" : "noData"))
+                    .font(.system(size: 10.5, design: .monospaced))
+                    .foregroundColor(theme.inkSecondary)
+                if isFailed {
+                    Text(loc("retry").uppercased())
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .foregroundColor(theme.invertedInk)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(theme.invertedBg)
+                        .contentShape(Rectangle())
+                        .onTapGesture { store.refresh(force: true) }
                 }
-                .buttonStyle(.borderless)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(.accentColor)
-            } else {
-                Image(systemName: "tray")
-                    .font(.system(size: 20)).foregroundColor(.secondary)
-                Text(loc("noData"))
-                    .font(.system(size: 11)).foregroundColor(.secondary)
             }
+            .frame(maxWidth: .infinity)
+            .frame(height: 120)
         }
-        .frame(maxWidth: .infinity)
-        .frame(height: 120)
     }
 }
 
 /// Monday-first localized short weekday symbols.
-private func mondayFirstWeekdaySymbols(_ loc: Localizer) -> [String] {
+func mondayFirstWeekdaySymbols(_ loc: Localizer) -> [String] {
     let df = DateFormatter()
     df.locale = Locale(identifier: loc.language.rawValue)
     let symbols = df.shortWeekdaySymbols ?? []
-    guard symbols.count == 7 else { return Array(repeating: "", count: 7) }
+    guard symbols.count == 7 else { return ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] }
     return (0..<7).map { symbols[($0 + 1) % 7] }
 }
 
-// ── Week view: 7 rows Mon–Sun × 0–24h timeline ──
+/// Edge-to-edge 3-column hairline KPI strip.
+struct TimeKpiStrip: View {
+    let items: [(label: String, value: String)]
+    @Environment(\.agyTheme) private var theme
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                ForEach(Array(items.enumerated()), id: \.offset) { idx, item in
+                    VStack(alignment: .leading, spacing: 1.5) {
+                        Text(item.label.uppercased())
+                            .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
+                            .foregroundColor(theme.inkMuted)
+                        Text(item.value.uppercased())
+                            .font(.system(size: 13.5, weight: .bold, design: .monospaced))
+                            .monospacedDigit()
+                            .foregroundColor(theme.inkPrimary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+
+                    if idx < items.count - 1 {
+                        Rectangle().fill(theme.hairline).frame(width: 1)
+                    }
+                }
+            }
+            .fixedSize(horizontal: false, vertical: true)
+
+            HairlineRule(showCrosshairs: true)
+        }
+    }
+}
+
+// MARK: - Week View (Oscilloscope Traces)
+
 struct WeekTimeChart: View {
     @ObservedObject var store: UsageStore
     let timeData: TimeData
+
     @Environment(\.localizer) private var loc
+    @Environment(\.agyTheme) private var theme
 
     private struct HoveredInterval {
         let dayKey: String
@@ -102,9 +151,9 @@ struct WeekTimeChart: View {
     }
     @State private var hovered: HoveredInterval? = nil
 
-    private let rowHeight: CGFloat = 20
-    private let labelWidth: CGFloat = 34
-    private let totalWidth: CGFloat = 40
+    private let rowHeight: CGFloat = 21
+    private let labelWidth: CGFloat = 32
+    private let totalWidth: CGFloat = 44
     private let gridHours = [0, 6, 12, 18, 24]
 
     private var monthPrefix: String {
@@ -131,98 +180,71 @@ struct WeekTimeChart: View {
     }
     private var weekdaySymbols: [String] { mondayFirstWeekdaySymbols(loc) }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            weekNav
-            summaryHeader
-            hoverStrip
-            VStack(spacing: 2) {
-                ForEach(Array(dayKeys.enumerated()), id: \.element) { index, key in
-                    weekRow(index: index, dayKey: key)
-                }
-            }
-            axisLabels
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(
-            RoundedRectangle(cornerRadius: 8)
-                .fill(Color.primary.opacity(0.03))
-        )
+    private var nowFractionOfDay: CGFloat {
+        let cal = AppDate.gregorian
+        let comps = cal.dateComponents([.hour, .minute], from: Date())
+        let secs = (comps.hour ?? 0) * 3600 + (comps.minute ?? 0) * 60
+        return CGFloat(min(max(secs, 0), 86400)) / 86400.0
     }
 
-    private var weekNav: some View {
+    var body: some View {
         let index = selectedWeekIndex
         let atFirst = (index ?? 0) <= 0
         let atLast = index.map { $0 >= weeks.count - 1 } ?? true
-        return HStack {
-            Button(action: { store.navigateTimeWeek(offset: -1) }) {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 11, weight: .semibold))
-                    .frame(width: 22, height: 20, alignment: .leading)
-                    .contentShape(Rectangle())
+
+        VStack(alignment: .leading, spacing: 0) {
+            TimeKpiStrip(items: [
+                (loc("timeWeekTotal"), TimeLogic.formatDurationShort(weekTotal)),
+                (loc("timeDailyAvg"), TimeLogic.formatDurationShort(weekTotal / avgDivisor)),
+                (loc("timeLongest"), TimeLogic.formatDurationShort(
+                    TimeLogic.longestIntervalSeconds(in: timeData.days, dayKeys: renderedDayKeys))),
+            ])
+
+            VStack(alignment: .leading, spacing: 7) {
+                HStack {
+                    TelemetryStepper(
+                        label: "\(shortDate(dayKeys.first ?? "")) – \(shortDate(dayKeys.last ?? ""))",
+                        canDecrement: !atFirst,
+                        canIncrement: !atLast,
+                        onDecrement: { store.navigateTimeWeek(offset: -1) },
+                        onIncrement: { store.navigateTimeWeek(offset: 1) }
+                    )
+                    Spacer()
+                    hoverReadout
+                }
+
+                VStack(spacing: 2) {
+                    ForEach(Array(dayKeys.enumerated()), id: \.element) { idx, key in
+                        weekRow(index: idx, dayKey: key)
+                    }
+                }
+                .background(DotGraticuleBackground(spacing: 12))
+
+                axisLabels
             }
-            .buttonStyle(.borderless)
-            .disabled(atFirst)
-            .opacity(atFirst ? 0.3 : 1)
-
-            Spacer()
-
-            Text("\(shortDate(dayKeys.first ?? "")) – \(shortDate(dayKeys.last ?? ""))")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundColor(.primary)
-
-            Spacer()
-
-            Button(action: { store.navigateTimeWeek(offset: 1) }) {
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 11, weight: .semibold))
-                    .frame(width: 22, height: 20, alignment: .trailing)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.borderless)
-            .disabled(atLast)
-            .opacity(atLast ? 0.3 : 1)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
         }
     }
 
-    private var summaryHeader: some View {
-        HStack(spacing: 18) {
-            stat(loc("timeWeekTotal"), TimeLogic.formatDurationShort(weekTotal))
-            stat(loc("timeDailyAvg"), TimeLogic.formatDurationShort(weekTotal / avgDivisor))
-            stat(loc("timeLongest"), TimeLogic.formatDurationShort(
-                TimeLogic.longestIntervalSeconds(in: timeData.days, dayKeys: renderedDayKeys)))
-            Spacer()
-        }
-    }
-
-    private func stat(_ label: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            Text(label)
-                .font(.system(size: 9))
-                .foregroundColor(.secondary)
-            Text(value)
-                .font(.system(size: 13, weight: .bold, design: .rounded))
-                .foregroundColor(.primary)
-        }
-    }
-
-    private var hoverStrip: some View {
-        HStack(spacing: 4) {
+    private var hoverReadout: some View {
+        HStack(spacing: 5) {
             if let h = hovered {
+                Rectangle()
+                    .fill(theme.modelColor(h.interval.model))
+                    .frame(width: 5, height: 5)
                 Text(shortDate(h.dayKey))
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundColor(.primary.opacity(0.8))
+                    .font(.system(size: 9.5, design: .monospaced))
+                    .foregroundColor(theme.inkSecondary)
                 Text("\(TimeLogic.formatClock(h.interval.startSec))–\(TimeLogic.formatClock(h.interval.endSec))")
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .foregroundColor(.primary)
-                Text(TimeLogic.formatDurationShort(h.interval.durationSeconds))
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundColor(.secondary)
+                    .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                    .foregroundColor(theme.inkPrimary)
+                Text(TimeLogic.formatDurationShort(h.interval.durationSeconds).uppercased())
+                    .font(.system(size: 9.5, design: .monospaced))
+                    .foregroundColor(theme.accent)
             }
-            Spacer()
         }
-        .frame(height: 12)
+        .frame(height: 14)
     }
 
     private func shortDate(_ dayKey: String) -> String {
@@ -236,60 +258,71 @@ struct WeekTimeChart: View {
         let day = timeData.days[dayKey]
         let total = day?.totalSeconds ?? 0
         let isToday = dayKey == todayKey
+
         return HStack(spacing: 6) {
-            Text(weekdaySymbols.indices.contains(index) ? weekdaySymbols[index] : "")
-                .font(.system(size: 9, weight: isToday ? .semibold : .regular))
-                .foregroundColor(isToday ? .primary : .secondary)
+            Text((weekdaySymbols.indices.contains(index) ? weekdaySymbols[index] : "").uppercased())
+                .font(.system(size: 8.5, weight: isToday ? .bold : .medium, design: .monospaced))
+                .foregroundColor(isToday ? theme.accent : theme.inkSecondary)
                 .frame(width: labelWidth, alignment: .leading)
-            timeline(day: day, dayKey: dayKey, dimmed: !inMonth)
+
+            timeline(day: day, dayKey: dayKey, dimmed: !inMonth, isToday: isToday)
                 .frame(height: rowHeight)
-            Text(inMonth || day != nil ? TimeLogic.formatDurationShort(total) : "")
-                .font(.system(size: 9, design: .monospaced))
-                .foregroundColor(total > 0 ? .primary : .secondary.opacity(0.6))
+
+            Text(inMonth || day != nil ? TimeLogic.formatDurationShort(total).uppercased() : "")
+                .font(.system(size: 9, weight: total > 0 ? .semibold : .regular, design: .monospaced))
+                .foregroundColor(total > 0 ? theme.inkPrimary : theme.inkMuted)
                 .frame(width: totalWidth, alignment: .trailing)
         }
         .padding(.vertical, 1)
-        .background(
-            isToday
-                ? RoundedRectangle(cornerRadius: 4).fill(Color.primary.opacity(0.04))
-                : nil
-        )
+        .background(isToday ? theme.accentSoft : Color.clear)
     }
 
-    private func timeline(day: DayTimeUsage?, dayKey: String, dimmed: Bool) -> some View {
+    private func timeline(day: DayTimeUsage?, dayKey: String, dimmed: Bool, isToday: Bool) -> some View {
         GeometryReader { geo in
             let w = geo.size.width
             ZStack(alignment: .leading) {
                 if dimmed {
-                    RoundedRectangle(cornerRadius: 3)
-                        .fill(Color.primary.opacity(0.025))
+                    Rectangle()
+                        .fill(theme.hairline.opacity(0.4))
                         .frame(width: max(0, w - 2), height: rowHeight - 2)
                         .offset(x: 1)
                 }
                 ForEach(gridHours, id: \.self) { h in
                     Rectangle()
-                        .fill(Color.primary.opacity(0.07))
+                        .fill(theme.hairline)
                         .frame(width: 1)
                         .offset(x: min(w - 1, w * CGFloat(h) / 24.0))
                 }
+                Rectangle()
+                    .fill(theme.hairline)
+                    .frame(width: w, height: 1)
+                if isToday {
+                    Rectangle()
+                        .fill(theme.accent)
+                        .frame(width: 1.2, height: rowHeight)
+                        .offset(x: min(w - 1.2, w * nowFractionOfDay))
+                }
                 ForEach(Array((day?.intervals ?? []).enumerated()), id: \.offset) { _, interval in
-                    intervalCapsule(interval, dayKey: dayKey, width: w)
+                    intervalTrace(interval, dayKey: dayKey, width: w)
                 }
             }
         }
     }
 
-    private func intervalCapsule(_ interval: ActiveInterval, dayKey: String,
-                                 width w: CGFloat) -> some View {
-        let capWidth = max(2, w * CGFloat(max(interval.durationSeconds, 120)) / 86400.0)
-        let x = min(max(0, w * CGFloat(interval.startSec) / 86400.0), w - capWidth)
-        return Capsule()
-            .fill(modelClassColor(interval.model).opacity(0.85))
-            .frame(width: capWidth, height: 8)
-            .offset(x: x)
-            .onHover { h in
-                hovered = h ? HoveredInterval(dayKey: dayKey, interval: interval) : nil
-            }
+    private func intervalTrace(_ interval: ActiveInterval, dayKey: String, width w: CGFloat) -> some View {
+        let barW = max(3, w * CGFloat(max(interval.durationSeconds, 120)) / 86400.0)
+        let x = min(max(0, w * CGFloat(interval.startSec) / 86400.0), w - barW)
+        let color = theme.modelColor(interval.model)
+
+        return HStack(spacing: 0) {
+            Rectangle().fill(color).frame(width: 1, height: 8)
+            Rectangle().fill(color.opacity(0.92)).frame(width: max(1, barW - 2), height: 4)
+            Rectangle().fill(color).frame(width: 1, height: 8)
+        }
+        .frame(width: barW, height: 10)
+        .offset(x: x)
+        .contentShape(Rectangle())
+        .onHover { h in hovered = h ? HoveredInterval(dayKey: dayKey, interval: interval) : nil }
     }
 
     private var axisLabels: some View {
@@ -299,10 +332,10 @@ struct WeekTimeChart: View {
                 let w = geo.size.width
                 ZStack(alignment: .leading) {
                     ForEach(gridHours, id: \.self) { h in
-                        Text("\(h)")
-                            .font(.system(size: 8))
-                            .foregroundColor(.secondary.opacity(0.7))
-                            .position(x: min(max(w * CGFloat(h) / 24.0, 4), w - 7), y: 5)
+                        Text(String(format: "%02d", h))
+                            .font(.system(size: 8, design: .monospaced))
+                            .foregroundColor(theme.inkMuted)
+                            .position(x: min(max(w * CGFloat(h) / 24.0, 6), w - 8), y: 5)
                     }
                 }
             }
@@ -312,12 +345,16 @@ struct WeekTimeChart: View {
     }
 }
 
-// ── Month view: week-per-row timeline ──
+// MARK: - Month View
+
 struct MonthTimeChart: View {
     let timeData: TimeData
     let year: Int
     let month: Int
+    var instrumentElevation: Bool = false
+
     @Environment(\.localizer) private var loc
+    @Environment(\.agyTheme) private var theme
 
     private struct HoveredInterval {
         let dayKey: String
@@ -325,9 +362,9 @@ struct MonthTimeChart: View {
     }
     @State private var hovered: HoveredInterval? = nil
 
-    private let rowHeight: CGFloat = 20
-    private let labelWidth: CGFloat = 34
-    private let totalWidth: CGFloat = 40
+    private let rowHeight: CGFloat = 25
+    private let labelWidth: CGFloat = 32
+    private let totalWidth: CGFloat = 44
 
     private var monthPrefix: String { String(format: "%04d-%02d-", year, month) }
     private var todayKey: String { AppDate.dayKey(Date()) }
@@ -349,68 +386,53 @@ struct MonthTimeChart: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            summaryHeader
-            hoverStrip
-            weekdayHeader
-            VStack(spacing: 2) {
-                ForEach(Array(weeks.enumerated()), id: \.offset) { _, dayKeys in
-                    weekRow(dayKeys: dayKeys)
+        VStack(alignment: .leading, spacing: 0) {
+            TimeKpiStrip(items: [
+                (loc("timeMonthTotal"), TimeLogic.formatDurationShort(monthTotal)),
+                (loc("timeDailyAvg"), TimeLogic.formatDurationShort(activeDays > 0 ? monthTotal / activeDays : 0)),
+                (loc("timeLongest"), TimeLogic.formatDurationShort(
+                    TimeLogic.longestIntervalSeconds(in: timeData.days, dayKeys: monthDayKeys))),
+            ])
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    if let h = hovered {
+                        Rectangle()
+                            .fill(theme.modelColor(h.interval.model))
+                            .frame(width: 5, height: 5)
+                        Text("\(shortDate(h.dayKey)) · \(TimeLogic.formatClock(h.interval.startSec))–\(TimeLogic.formatClock(h.interval.endSec))")
+                            .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                            .foregroundColor(theme.inkPrimary)
+                        Text(TimeLogic.formatDurationShort(h.interval.durationSeconds).uppercased())
+                            .font(.system(size: 9.5, design: .monospaced))
+                            .foregroundColor(theme.accent)
+                    }
+                    Spacer()
+                }
+                .frame(height: 12)
+
+                weekdayHeader
+
+                VStack(spacing: 2) {
+                    ForEach(Array(weeks.enumerated()), id: \.offset) { _, dayKeys in
+                        weekRow(dayKeys: dayKeys)
+                    }
                 }
             }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(
-            RoundedRectangle(cornerRadius: 8)
-                .fill(Color.primary.opacity(0.03))
-        )
-    }
-
-    private var summaryHeader: some View {
-        HStack(spacing: 18) {
-            stat(loc("timeMonthTotal"), TimeLogic.formatDurationShort(monthTotal))
-            stat(loc("timeDailyAvg"),
-                 TimeLogic.formatDurationShort(activeDays > 0 ? monthTotal / activeDays : 0))
-            stat(loc("timeLongest"), TimeLogic.formatDurationShort(
-                TimeLogic.longestIntervalSeconds(in: timeData.days, dayKeys: monthDayKeys)))
-            Spacer()
-        }
-    }
-
-    private func stat(_ label: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            Text(label)
-                .font(.system(size: 9))
-                .foregroundColor(.secondary)
-            Text(value)
-                .font(.system(size: 13, weight: .bold, design: .rounded))
-                .foregroundColor(.primary)
-        }
-    }
-
-    private var hoverStrip: some View {
-        HStack(spacing: 4) {
-            if let h = hovered {
-                Text(shortDate(h.dayKey))
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundColor(.primary.opacity(0.8))
-                Text("\(TimeLogic.formatClock(h.interval.startSec))–\(TimeLogic.formatClock(h.interval.endSec))")
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .foregroundColor(.primary)
-                Text(TimeLogic.formatDurationShort(h.interval.durationSeconds))
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundColor(.secondary)
-            }
-            Spacer()
-        }
-        .frame(height: 12)
     }
 
     private func shortDate(_ dayKey: String) -> String {
         guard let date = TimeLogic.date(fromDayKey: dayKey) else { return dayKey }
         let cal = AppDate.gregorian
         return "\(cal.component(.month, from: date))/\(cal.component(.day, from: date))"
+    }
+
+    private func dayNumString(_ dayKey: String) -> String {
+        guard let date = TimeLogic.date(fromDayKey: dayKey) else { return "" }
+        return String(format: "%02d", AppDate.gregorian.component(.day, from: date))
     }
 
     private var weekdayHeader: some View {
@@ -421,9 +443,9 @@ struct MonthTimeChart: View {
                 let dayW = geo.size.width / 7
                 ZStack(alignment: .leading) {
                     ForEach(0..<7, id: \.self) { i in
-                        Text(symbols[i])
-                            .font(.system(size: 8))
-                            .foregroundColor(.secondary.opacity(0.7))
+                        Text(symbols[i].uppercased())
+                            .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                            .foregroundColor(theme.inkMuted)
                             .position(x: dayW * (CGFloat(i) + 0.5), y: 5)
                     }
                 }
@@ -438,14 +460,14 @@ struct MonthTimeChart: View {
         let total = TimeLogic.totalSeconds(in: timeData.days, dayKeys: inMonthKeys)
         return HStack(spacing: 6) {
             Text(shortDate(dayKeys.first ?? ""))
-                .font(.system(size: 9))
-                .foregroundColor(.secondary)
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundColor(theme.inkSecondary)
                 .frame(width: labelWidth, alignment: .leading)
             timeline(dayKeys: dayKeys)
                 .frame(height: rowHeight)
-            Text(TimeLogic.formatDurationShort(total))
-                .font(.system(size: 9, design: .monospaced))
-                .foregroundColor(total > 0 ? .primary : .secondary.opacity(0.6))
+            Text(TimeLogic.formatDurationShort(total).uppercased())
+                .font(.system(size: 9, weight: total > 0 ? .semibold : .regular, design: .monospaced))
+                .foregroundColor(total > 0 ? theme.inkPrimary : theme.inkMuted)
                 .frame(width: totalWidth, alignment: .trailing)
         }
         .padding(.vertical, 1)
@@ -457,28 +479,43 @@ struct MonthTimeChart: View {
             let dayW = w / 7
             ZStack(alignment: .leading) {
                 ForEach(Array(dayKeys.enumerated()), id: \.offset) { i, key in
-                    if !key.hasPrefix(monthPrefix) {
-                        RoundedRectangle(cornerRadius: 3)
-                            .fill(Color.primary.opacity(0.025))
-                            .frame(width: max(0, dayW - 2), height: rowHeight - 2)
-                            .offset(x: dayW * CGFloat(i) + 1)
-                    } else if key == todayKey {
-                        RoundedRectangle(cornerRadius: 3)
-                            .fill(Color.primary.opacity(0.045))
-                            .frame(width: max(0, dayW - 2), height: rowHeight - 2)
-                            .offset(x: dayW * CGFloat(i) + 1)
+                    let inMonth = key.hasPrefix(monthPrefix)
+                    let isToday = (key == todayKey)
+                    let cellW = max(0, dayW - 2)
+                    let cellX = dayW * CGFloat(i) + 1
+
+                    Rectangle()
+                        .fill(isToday ? theme.accentSoft : (!inMonth ? theme.hairline.opacity(0.4) : theme.surface.opacity(0.75)))
+                        .frame(width: cellW, height: rowHeight - 2)
+                        .overlay(
+                            Rectangle()
+                                .strokeBorder(isToday ? theme.accent : theme.hairline.opacity(inMonth ? 0.5 : 0.25), lineWidth: 1)
+                        )
+                        .offset(x: cellX)
+
+                    if inMonth {
+                        Text(dayNumString(key))
+                            .font(.system(size: 7.5, weight: isToday ? .bold : .regular, design: .monospaced))
+                            .foregroundColor(isToday ? theme.accent : theme.inkMuted)
+                            .offset(x: cellX + 3, y: -5.5)
                     }
                 }
-                ForEach(0...7, id: \.self) { i in
-                    Rectangle()
-                        .fill(Color.primary.opacity(0.07))
-                        .frame(width: 1)
-                        .offset(x: min(w - 1, dayW * CGFloat(i)))
-                }
+
                 ForEach(Array(dayKeys.enumerated()), id: \.offset) { i, key in
                     if key.hasPrefix(monthPrefix), let day = timeData.days[key] {
+                        if instrumentElevation && day.totalSeconds > 0 {
+                            let hrs = min(1.0, Double(day.totalSeconds) / (8.0 * 3600.0))
+                            let elevH = max(2.0, CGFloat(hrs) * (rowHeight - 4))
+                            let cellW = max(0, dayW - 2)
+                            let cellX = dayW * CGFloat(i) + 1
+                            Rectangle()
+                                .fill(theme.accent.opacity(theme.isDark ? 0.16 : 0.10))
+                                .frame(width: cellW, height: elevH)
+                                .offset(x: cellX, y: (rowHeight - 2 - elevH) * 0.5)
+                                .allowsHitTesting(false)
+                        }
                         ForEach(Array(day.intervals.enumerated()), id: \.offset) { _, interval in
-                            intervalCapsule(interval, dayKey: key, dayIndex: i, dayWidth: dayW)
+                            intervalBar(interval, dayKey: key, dayIndex: i, dayWidth: dayW)
                         }
                     }
                 }
@@ -486,141 +523,127 @@ struct MonthTimeChart: View {
         }
     }
 
-    private func intervalCapsule(_ interval: ActiveInterval, dayKey: String,
-                                 dayIndex: Int, dayWidth: CGFloat) -> some View {
-        let capWidth = max(1.5, dayWidth * CGFloat(max(interval.durationSeconds, 120)) / 86400.0)
-        let x = dayWidth * CGFloat(dayIndex)
-            + min(max(0, dayWidth * CGFloat(interval.startSec) / 86400.0), dayWidth - capWidth)
-        return Capsule()
-            .fill(modelClassColor(interval.model).opacity(0.85))
-            .frame(width: capWidth, height: 8)
-            .offset(x: x)
-            .onHover { h in
-                hovered = h ? HoveredInterval(dayKey: dayKey, interval: interval) : nil
-            }
+    private func intervalBar(_ interval: ActiveInterval, dayKey: String,
+                             dayIndex: Int, dayWidth: CGFloat) -> some View {
+        let capWidth = max(2, (dayWidth - 4) * CGFloat(max(interval.durationSeconds, 120)) / 86400.0)
+        let x = dayWidth * CGFloat(dayIndex) + 2
+            + min(max(0, (dayWidth - 4) * CGFloat(interval.startSec) / 86400.0), max(0, dayWidth - 4 - capWidth))
+        return Rectangle()
+            .fill(theme.modelColor(interval.model).opacity(0.92))
+            .frame(width: capWidth, height: 4)
+            .offset(x: x, y: 5)
+            .onHover { h in hovered = h ? HoveredInterval(dayKey: dayKey, interval: interval) : nil }
     }
 }
 
-// ── Year view: GitHub-style heatmap, 53 cols × 7 rows, Monday-first ──
+// MARK: - Year View (Precision Matrix Heatmap + Theme Ramp)
+
 struct YearHeatmap: View {
     @ObservedObject var store: UsageStore
     @Environment(\.localizer) private var loc
-    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.agyTheme) private var theme
 
     @State private var hoveredKey: String? = nil
 
-    private let cellSize: CGFloat = 7
-    private let cellSpacing: CGFloat = 1
-
-    private var currentYear: Int { AppDate.gregorian.component(.year, from: Date()) }
-
-    private static let lightRamp: [Color] = [
-        Color(red: 0.608, green: 0.914, blue: 0.659), // #9be9a8
-        Color(red: 0.251, green: 0.769, blue: 0.388), // #40c463
-        Color(red: 0.188, green: 0.631, blue: 0.306), // #30a14e
-        Color(red: 0.129, green: 0.431, blue: 0.224), // #216e39
-    ]
-    private static let darkRamp: [Color] = [
-        Color(red: 0.055, green: 0.267, blue: 0.161), // #0e4429
-        Color(red: 0.000, green: 0.427, blue: 0.196), // #006d32
-        Color(red: 0.149, green: 0.651, blue: 0.255), // #26a641
-        Color(red: 0.224, green: 0.827, blue: 0.325), // #39d353
-    ]
-
-    static func levelColor(_ level: Int, dark: Bool) -> Color {
-        guard (1...4).contains(level) else { return Color.primary.opacity(0.06) }
-        return (dark ? darkRamp : lightRamp)[level - 1]
-    }
+    private let cellSize: CGFloat = 5.9
+    private let cellSpacing: CGFloat = 1.1
+    private let weekdayAxisWidth: CGFloat = 14
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            yearNav
+        VStack(alignment: .leading, spacing: 0) {
             switch store.effectiveYearPhase {
             case .loaded(let days), .loading(cached: .some(let days)), .failed(_, cached: .some(let days)):
-                hoverStrip(days)
-                grid(days)
-                legend
+                yearContent(days)
             case .empty:
-                hoverStrip([:])
-                grid([:])
-                legend
+                yearContent([:])
             case .failed(_, cached: nil):
                 VStack(spacing: 8) {
                     Image(systemName: "exclamationmark.triangle")
-                        .font(.system(size: 18)).foregroundColor(.orange)
+                        .font(.system(size: 18)).foregroundColor(theme.signalAmber)
                     Text(loc("loadFailed"))
-                        .font(.system(size: 11)).foregroundColor(.secondary)
-                    Button(loc("retry")) {
-                        store.loadYearTime(store.viewingTimeYear, force: true)
-                    }
-                    .buttonStyle(.borderless)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(.accentColor)
+                        .font(.system(size: 10.5, design: .monospaced)).foregroundColor(theme.inkSecondary)
+                    Text(loc("retry").uppercased())
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .foregroundColor(theme.invertedInk)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(theme.invertedBg)
+                        .contentShape(Rectangle())
+                        .onTapGesture { store.loadYearTime(store.viewingTimeYear, force: true) }
                 }
                 .frame(maxWidth: .infinity)
-                .frame(height: 90)
+                .frame(height: 120)
             case .idle, .loading(cached: nil):
-                VStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text(loc("timeLoadingYear"))
-                        .font(.system(size: 11)).foregroundColor(.secondary)
-                }
-                .frame(maxWidth: .infinity)
-                .frame(height: 90)
+                TelemetrySkeleton()
             }
+        }
+        .onAppear {
+            if case .idle = store.effectiveYearPhase {
+                store.loadYearTime(store.viewingTimeYear)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func yearContent(_ days: [String: Int]) -> some View {
+        let year = store.viewingTimeYear
+        let summary = TimeLogic.yearSummary(days: days, year: year)
+
+        TimeKpiStrip(items: [
+            (loc("timeYearTotal"), TimeLogic.formatDurationShort(summary.totalSeconds)),
+            (loc("timeActiveDays"), String(format: loc("daysUnitFmt"), summary.activeDays)),
+            (loc("timeStreak"), String(format: loc("daysUnitFmt"), summary.longestStreakDays)),
+        ])
+
+        VStack(alignment: .leading, spacing: 6) {
+            monthAxisHeader(year: year)
+
+            HStack(alignment: .top, spacing: 4) {
+                VStack(spacing: cellSpacing) {
+                    ForEach(0..<7, id: \.self) { row in
+                        let label = (row == 0 ? "M" : (row == 2 ? "W" : (row == 4 ? "F" : "")))
+                        Text(label)
+                            .font(.system(size: 7.5, weight: .medium, design: .monospaced))
+                            .foregroundColor(theme.inkMuted)
+                            .frame(width: weekdayAxisWidth, height: cellSize, alignment: .trailing)
+                    }
+                }
+
+                grid(days)
+            }
+
+            HStack {
+                if let key = hoveredKey {
+                    Text("+ \(displayDate(key)) · \(TimeLogic.formatDurationShort(days[key] ?? 0).uppercased())")
+                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                        .foregroundColor(theme.inkPrimary)
+                }
+                Spacer()
+                legend
+            }
+            .frame(height: 12)
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(
-            RoundedRectangle(cornerRadius: 8)
-                .fill(Color.primary.opacity(0.03))
-        )
-        .onAppear { store.loadYearTime(store.viewingTimeYear) }
+        .padding(.vertical, 9)
     }
 
-    private var yearNav: some View {
-        HStack {
-            Button(action: { store.navigateTimeYear(offset: -1) }) {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 11, weight: .semibold))
-                    .frame(width: 22, height: 20, alignment: .leading)
-                    .contentShape(Rectangle())
+    private func monthAxisHeader(year: Int) -> some View {
+        let months = TimeLogic.monthLabelColumns(year: year)
+        let names = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
+        let stride = cellSize + cellSpacing
+
+        return HStack(spacing: 4) {
+            Color.clear.frame(width: weekdayAxisWidth, height: 1)
+            ZStack(alignment: .leading) {
+                ForEach(months, id: \.month) { entry in
+                    Text(names[entry.month - 1])
+                        .font(.system(size: 7.5, weight: .medium, design: .monospaced))
+                        .foregroundColor(theme.inkMuted)
+                        .offset(x: CGFloat(entry.col) * stride)
+                }
             }
-            .buttonStyle(.borderless)
-
-            Spacer()
-
-            Text(String(store.viewingTimeYear))
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundColor(.primary)
-
-            Spacer()
-
-            Button(action: { store.navigateTimeYear(offset: 1) }) {
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 11, weight: .semibold))
-                    .frame(width: 22, height: 20, alignment: .trailing)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.borderless)
-            .disabled(store.viewingTimeYear >= currentYear)
-            .opacity(store.viewingTimeYear >= currentYear ? 0.3 : 1)
+            .frame(width: 53 * cellSize + 52 * cellSpacing, height: 10, alignment: .leading)
         }
-    }
-
-    private func hoverStrip(_ days: [String: Int]) -> some View {
-        HStack(spacing: 4) {
-            if let key = hoveredKey {
-                Text(displayDate(key))
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundColor(.primary.opacity(0.8))
-                Text(TimeLogic.formatDurationShort(days[key] ?? 0))
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .foregroundColor(.primary)
-            }
-            Spacer()
-        }
-        .frame(height: 12)
     }
 
     private func displayDate(_ dayKey: String) -> String {
@@ -651,34 +674,36 @@ struct YearHeatmap: View {
     @ViewBuilder
     private func cell(col: Int, row: Int, startMonday: Date?, yearPrefix: String,
                       days: [String: Int]) -> some View {
-        let key = startMonday.flatMap {
-            TimeLogic.dayKey(col: col, row: row, startMonday: $0)
-        }
+        let key = startMonday.flatMap { TimeLogic.dayKey(col: col, row: row, startMonday: $0) }
         if let key = key, key.hasPrefix(yearPrefix) {
-            RoundedRectangle(cornerRadius: 1.5)
-                .fill(Self.levelColor(TimeLogic.heatLevel(days[key] ?? 0),
-                                      dark: colorScheme == .dark))
+            let isHovered = (hoveredKey == key)
+            Rectangle()
+                .fill(theme.heatmapColor(level: TimeLogic.heatLevel(days[key] ?? 0)))
                 .frame(width: cellSize, height: cellSize)
-                .onHover { h in hoveredKey = h ? key : nil }
+                .overlay(
+                    isHovered
+                        ? Rectangle().stroke(theme.inkPrimary, lineWidth: 1)
+                        : nil
+                )
+                .onHover { h in hoveredKey = h ? key : (hoveredKey == key ? nil : hoveredKey) }
         } else {
             Color.clear.frame(width: cellSize, height: cellSize)
         }
     }
 
     private var legend: some View {
-        HStack(spacing: 3) {
-            Spacer()
-            Text(loc("timeLess"))
-                .font(.system(size: 8))
-                .foregroundColor(.secondary)
+        HStack(spacing: 2.5) {
+            Text(loc("timeLess").uppercased())
+                .font(.system(size: 7.5, design: .monospaced))
+                .foregroundColor(theme.inkMuted)
             ForEach(0..<5, id: \.self) { level in
-                RoundedRectangle(cornerRadius: 1.5)
-                    .fill(Self.levelColor(level, dark: colorScheme == .dark))
+                Rectangle()
+                    .fill(theme.heatmapColor(level: level))
                     .frame(width: cellSize, height: cellSize)
             }
-            Text(loc("timeMore"))
-                .font(.system(size: 8))
-                .foregroundColor(.secondary)
+            Text(loc("timeMore").uppercased())
+                .font(.system(size: 7.5, design: .monospaced))
+                .foregroundColor(theme.inkMuted)
         }
     }
 }

@@ -205,4 +205,77 @@ public enum TimeLogic {
         return AppDate.gregorian.date(byAdding: .day, value: col * 7 + row, to: start)
             .map(AppDate.dayKey)
     }
+
+    // MARK: Year summary & axis layout
+
+    public struct YearTimeSummary: Equatable, Sendable {
+        public let totalSeconds: Int
+        public let activeDays: Int
+        public let longestStreakDays: Int
+
+        public init(totalSeconds: Int, activeDays: Int, longestStreakDays: Int) {
+            self.totalSeconds = totalSeconds
+            self.activeDays = activeDays
+            self.longestStreakDays = longestStreakDays
+        }
+    }
+
+    /// Aggregate active time, active day count, and longest consecutive-day streak
+    /// across Jan 1..Dec 31 of `year` using the pinned Gregorian calendar.
+    public static func yearSummary(days: [String: Int], year: Int) -> YearTimeSummary {
+        guard year >= 1 else {
+            return YearTimeSummary(totalSeconds: 0, activeDays: 0, longestStreakDays: 0)
+        }
+        let cal = AppDate.gregorian
+        var startComps = DateComponents()
+        startComps.year = year
+        startComps.month = 1
+        startComps.day = 1
+        guard let jan1 = cal.date(from: startComps),
+              let nextJan1 = cal.date(byAdding: .year, value: 1, to: jan1) else {
+            return YearTimeSummary(totalSeconds: 0, activeDays: 0, longestStreakDays: 0)
+        }
+
+        var totalSeconds = 0
+        var activeDays = 0
+        var currentStreak = 0
+        var longestStreak = 0
+
+        var cursor = jan1
+        while cursor < nextJan1 {
+            let key = AppDate.dayKey(cursor)
+            let secs = max(0, days[key] ?? 0)
+            if secs > 0 {
+                totalSeconds += secs
+                activeDays += 1
+                currentStreak += 1
+                if currentStreak > longestStreak {
+                    longestStreak = currentStreak
+                }
+            } else {
+                currentStreak = 0
+            }
+            guard let nextDay = cal.date(byAdding: .day, value: 1, to: cursor) else { break }
+            cursor = nextDay
+        }
+        return YearTimeSummary(
+            totalSeconds: totalSeconds,
+            activeDays: activeDays,
+            longestStreakDays: longestStreak
+        )
+    }
+
+    /// Starting column index (`0..<53`) for each month `1...12` on the Monday-first
+    /// year heatmap grid.
+    public static func monthLabelColumns(year: Int) -> [(month: Int, col: Int)] {
+        guard let startMonday = yearGridStartMonday(year: year) else { return [] }
+        var out: [(month: Int, col: Int)] = []
+        for month in 1...12 {
+            let firstKey = String(format: "%04d-%02d-01", year, month)
+            if let pos = gridPosition(dayKey: firstKey, startMonday: startMonday) {
+                out.append((month: month, col: pos.col))
+            }
+        }
+        return out
+    }
 }

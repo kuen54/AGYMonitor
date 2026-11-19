@@ -1,57 +1,48 @@
 import SwiftUI
 import AppKit
 
-// PopoverView (the root popover) + the segmented tab selectors.
+// PopoverView (single-plane Swiss Telemetry drafting board), context-aware header,
+// grid tab bar, and bare hairline statusline footer.
 
-// MARK: - Segmented tab selector
+/// Bare monospace stepper (`< 2026.11 >`) shared by Header & WeekTimeChart.
+struct TelemetryStepper: View {
+    let label: String
+    let canDecrement: Bool
+    let canIncrement: Bool
+    let onDecrement: () -> Void
+    let onIncrement: () -> Void
 
-/// Pure-SwiftUI segmented control used in the NOTCH (avoids NSSegmentedControl
-/// height mis-measurement inside a borderless non-key NSPanel).
-struct NotchSegmentedControl<Value: Hashable>: View {
-    let items: [Value]
-    @Binding var selection: Value
-    let label: (Value) -> String
+    @Environment(\.agyTheme) private var theme
+    @State private var hoverLeft = false
+    @State private var hoverRight = false
 
     var body: some View {
         HStack(spacing: 2) {
-            ForEach(items, id: \.self) { item in
-                let selected = item == selection
-                Text(label(item))
-                    .font(.system(size: 12, weight: selected ? .semibold : .regular))
-                    .foregroundColor(selected ? .white : Color.white.opacity(0.55))
-                    .lineLimit(1)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 22)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(selected ? Color.white.opacity(0.18) : Color.clear))
-                    .contentShape(Rectangle())
-                    .onTapGesture { selection = item }
-            }
-        }
-        .padding(2)
-        .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(Color.white.opacity(0.07)))
-    }
-}
+            Image(systemName: "chevron.left")
+                .font(.system(size: 8.5, weight: .bold))
+                .foregroundColor(canDecrement ? (hoverLeft ? theme.accent : theme.inkSecondary) : theme.inkMuted)
+                .frame(width: 18, height: 18)
+                .background(hoverLeft && canDecrement ? theme.surfaceRaised : Color.clear)
+                .contentShape(Rectangle())
+                .opacity(canDecrement ? 1 : 0.3)
+                .onHover { hoverLeft = $0 }
+                .onTapGesture { if canDecrement { onDecrement() } }
 
-/// Tab selector: custom dark control in the notch, native segmented Picker in menu bar.
-struct TabSelector<Value: Hashable>: View {
-    let isNotch: Bool
-    let items: [Value]
-    @Binding var selection: Value
-    let label: (Value) -> String
+            Text(label)
+                .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                .foregroundColor(theme.inkPrimary)
+                .padding(.horizontal, 2)
+                .fixedSize()
 
-    var body: some View {
-        if isNotch {
-            NotchSegmentedControl(items: items, selection: $selection, label: label)
-        } else {
-            Picker("", selection: $selection) {
-                ForEach(items, id: \.self) { Text(label($0)).tag($0) }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
+            Image(systemName: "chevron.right")
+                .font(.system(size: 8.5, weight: .bold))
+                .foregroundColor(canIncrement ? (hoverRight ? theme.accent : theme.inkSecondary) : theme.inkMuted)
+                .frame(width: 18, height: 18)
+                .background(hoverRight && canIncrement ? theme.surfaceRaised : Color.clear)
+                .contentShape(Rectangle())
+                .opacity(canIncrement ? 1 : 0.3)
+                .onHover { hoverRight = $0 }
+                .onTapGesture { if canIncrement { onIncrement() } }
         }
     }
 }
@@ -59,10 +50,16 @@ struct TabSelector<Value: Hashable>: View {
 struct PopoverView: View {
     @ObservedObject var store: UsageStore
     let onQuit: () -> Void
+    var onClose: (() -> Void)? = nil
+
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var contentHeight: CGFloat = 460
 
     private var loc: Localizer { Localizer(language: store.language) }
-
-    @State private var contentHeight: CGFloat = 0
+    private var isNotch: Bool { store.displayMode == .notch }
+    private var theme: AGYTheme {
+        AGYTheme(preset: store.themePreset, colorScheme: colorScheme, isNotch: isNotch)
+    }
 
     private struct ContentHeightKey: PreferenceKey {
         static var defaultValue: CGFloat = 0
@@ -73,254 +70,256 @@ struct PopoverView: View {
 
     private var maxContentHeight: CGFloat {
         let screenH = NSScreen.main?.visibleFrame.height ?? 900
-        return max(240, screenH - 190)
+        return max(260, screenH - 170)
     }
 
-    /// Cost + Tokens + Time + Sessions always; Plan tab when quota/account state is available.
+    private var currentYear: Int {
+        AppDate.gregorian.component(.year, from: Date())
+    }
+
     private var visibleTabs: [DisplayTab] {
         store.hasOAuthToken
             ? [.cost, .tokens, .time, .session, .subscription]
             : [.cost, .tokens, .time, .session]
     }
 
-    private var notchWidthAnimation: Animation? {
-        guard store.displayMode == .notch else { return nil }
-        return NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-            ? NotchAnimations.reduced : NotchAnimations.open
-    }
-
     var body: some View {
         VStack(spacing: 0) {
-            // ── Header ──
-            HStack {
-                HStack(spacing: 6) {
-                    SessionAwareLogo(sessionStore: store.sessionStore,
-                                     size: 14, color: .agyBrand, dotSize: 5)
-                    Text(loc("title"))
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundColor(.primary)
-                }
-                Spacer()
-                if store.isLoading {
-                    ProgressView()
-                        .controlSize(.small)
-                        .scaleEffect(0.7)
-                }
-            }
-            .padding(.horizontal, 14)
-            .padding(.top, 14)
-            .padding(.bottom, 6)
+            header
+                .padding(.horizontal, 12)
+                .padding(.top, 11)
+                .padding(.bottom, 9)
 
-            // ── Month Navigator ──
-            HStack {
-                Button(action: { store.navigateMonth(offset: -1) }) {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 13, weight: .semibold))
-                        .frame(width: 28, height: 28, alignment: .leading)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.borderless)
+            TelemetryTabBar(
+                items: visibleTabs,
+                selection: $store.selectedTab,
+                sessionStore: store.sessionStore,
+                loc: loc
+            )
 
-                Spacer()
-
-                Text(store.viewingMonthLabel)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(.primary)
-
-                Spacer()
-
-                Button(action: { store.navigateMonth(offset: 1) }) {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 13, weight: .semibold))
-                        .frame(width: 28, height: 28, alignment: .trailing)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.borderless)
-                .disabled(store.isCurrentMonth)
-                .opacity(store.isCurrentMonth ? 0.3 : 1)
-            }
-            .padding(.horizontal, 14)
-            .padding(.bottom, 8)
-
-            // ── Tab selector (Cost / Tokens / Time / Sessions / Plan) ──
-            TabSelector(isNotch: store.displayMode == .notch,
-                        items: visibleTabs,
-                        selection: $store.selectedTab,
-                        label: { $0.label(loc) })
-                .padding(.horizontal, 10)
-                .padding(.bottom, 8)
-
-            // ── Content (sized to fit, scrolls only when taller than the screen) ──
             ScrollView(showsIndicators: false) {
                 contentSection
                     .background(GeometryReader { geo in
-                        Color.clear.preference(key: ContentHeightKey.self,
-                                               value: geo.size.height)
+                        Color.clear.preference(key: ContentHeightKey.self, value: geo.size.height)
                     })
             }
-            .onPreferenceChange(ContentHeightKey.self) { contentHeight = $0 }
+            .onPreferenceChange(ContentHeightKey.self) { next in
+                if abs(next - contentHeight) > 0.5, next > 1 {
+                    contentHeight = next
+                }
+            }
             .frame(height: min(max(contentHeight, 1), maxContentHeight))
 
-            Divider()
-                .padding(.horizontal, 10)
+            HairlineRule(showCrosshairs: true)
 
             footer
         }
-        // Compact 360pt on Cost/Tokens/Plan; 480pt on Time/Sessions.
-        .frame(width: (store.selectedTab == .time || store.selectedTab == .session) ? 480 : 360)
-        .animation(notchWidthAnimation, value: store.selectedTab)
+        .overlay(keyboardShortcutsOverlay)
+        .frame(width: AGYTheme.panelWidth)
+        .background(isNotch ? Color.clear : theme.canvas)
         .environment(\.localizer, loc)
+        .environment(\.agyTheme, theme)
     }
+
+    // MARK: - Bare Context-Aware Header
+
+    private var header: some View {
+        HStack(spacing: 8) {
+            HStack(spacing: 6) {
+                SessionAwareLogo(sessionStore: store.sessionStore,
+                                 size: 13.5, color: theme.accent, dotSize: 5)
+                Text(loc("title").uppercased())
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .tracking(1.1)
+                    .foregroundColor(theme.inkPrimary)
+
+                liveHeaderTag
+            }
+
+            Spacer(minLength: 4)
+
+            contextHeaderAccessory
+        }
+    }
+
+    @ViewBuilder
+    private var liveHeaderTag: some View {
+        let waitingCount = store.sessionStore.sessions.filter { $0.status == .waiting }.count
+        let busyCount = store.sessionStore.sessions.filter { $0.status == .busy }.count
+        if waitingCount > 0 {
+            Text("▲ \(String(format: loc("waitTagFmt"), waitingCount))")
+                .font(.system(size: 8.5, weight: .bold, design: .monospaced))
+                .foregroundColor(.black)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1.5)
+                .background(theme.signalAmber)
+                .contentShape(Rectangle())
+                .onTapGesture { store.selectedTab = .session }
+        } else if busyCount > 0 {
+            HStack(spacing: 3) {
+                Circle().fill(theme.accent).frame(width: 4.5, height: 4.5)
+                Text(String(format: loc("runTagFmt"), busyCount))
+                    .font(.system(size: 8.5, weight: .bold, design: .monospaced))
+                    .foregroundColor(theme.accent)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture { store.selectedTab = .session }
+        }
+    }
+
+    @ViewBuilder
+    private var contextHeaderAccessory: some View {
+        switch store.selectedTab {
+        case .cost, .tokens:
+            TelemetryStepper(
+                label: store.viewingMonthCompactLabel,
+                canDecrement: true,
+                canIncrement: !store.isCurrentMonth,
+                onDecrement: { store.navigateMonth(offset: -1) },
+                onIncrement: { store.navigateMonth(offset: 1) }
+            )
+        case .time:
+            if store.timeRange == .year {
+                TelemetryStepper(
+                    label: String(store.viewingTimeYear),
+                    canDecrement: true,
+                    canIncrement: store.viewingTimeYear < currentYear,
+                    onDecrement: { store.navigateTimeYear(offset: -1) },
+                    onIncrement: { store.navigateTimeYear(offset: 1) }
+                )
+            } else {
+                TelemetryStepper(
+                    label: store.viewingMonthCompactLabel,
+                    canDecrement: true,
+                    canIncrement: !store.isCurrentMonth,
+                    onDecrement: { store.navigateMonth(offset: -1) },
+                    onIncrement: { store.navigateMonth(offset: 1) }
+                )
+            }
+        case .session:
+            Text(String(format: loc("liveTagFmt"), store.sessionStore.liveCount))
+                .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                .foregroundColor(theme.inkSecondary)
+        case .subscription:
+            if let badge = formatPlanTierBadge(store.subscriptionQuota?.planTier) {
+                HStack(spacing: 4) {
+                    LogoShape()
+                        .fill(theme.accent)
+                        .frame(width: 8, height: 8)
+                    Text(badge)
+                        .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                        .foregroundColor(theme.accent)
+                        .lineLimit(1)
+                }
+            }
+        }
+    }
+
+    // MARK: - Content Routing
 
     @ViewBuilder
     private var contentSection: some View {
-        if store.selectedTab == .time {
+        switch store.selectedTab {
+        case .time:
             TimeTabView(store: store)
-        } else if store.selectedTab == .session {
-            SessionTabView(sessionStore: store.sessionStore)
-        } else if store.selectedTab == .subscription {
+        case .session:
+            SessionTabView(sessionStore: store.sessionStore, visualMode: store.visualMode, onClose: onClose)
+        case .subscription:
             SubscriptionView(store: store)
-        } else if store.isCurrentMonth {
-            switch store.effectiveCurrentMonthPhase {
-            case .loaded(let bundle), .loading(cached: .some(let bundle)), .failed(_, cached: .some(let bundle)):
-                cardsWithChart(daily: bundle.dailyBreakdown) {
-                    PeriodCard(metric: store.selectedTab, icon: "calendar",
-                               title: loc("today"), usage: bundle.today)
-                    PeriodCard(metric: store.selectedTab, icon: "calendar.badge.clock",
-                               title: loc("thisWeek"), usage: bundle.week)
-                    PeriodCard(metric: store.selectedTab, icon: "chart.bar",
-                               title: loc("thisMonth"), usage: bundle.month,
-                               showStats: true)
+        case .cost, .tokens:
+            UsageOverviewSection(store: store)
+        }
+    }
+
+    // MARK: - Bare Statusline Footer (Zero Floating Bug)
+
+    private var footer: some View {
+        HStack(spacing: 6) {
+            statusText
+            Spacer()
+
+            HStack(spacing: 4) {
+                LanguageSwitcher(store: store)
+                footerSeparator
+                OptionsMenu(store: store, loc: loc)
+                footerSeparator
+                RefreshToolbarButton(isLoading: store.isLoading, helpText: loc("refresh")) {
+                    store.refresh(force: true)
                 }
-            case .loading(cached: nil), .idle:
-                loadingView
-            case .empty:
-                noDataView
-            case .failed(_, cached: nil):
-                errorView
-            }
-        } else {
-            switch store.effectiveHistoricalMonthPhase {
-            case .loaded(let bundle), .loading(cached: .some(let bundle)), .failed(_, cached: .some(let bundle)):
-                cardsWithChart(daily: bundle.dailyBreakdown) {
-                    PeriodCard(metric: store.selectedTab, icon: "chart.bar",
-                               title: loc("monthlyTotal"), usage: bundle.month,
-                               showStats: true)
-                }
-            case .loading(cached: nil), .idle:
-                loadingView
-            case .empty:
-                noDataView
-            case .failed(_, cached: nil):
-                errorView
+                footerSeparator
+                ToolbarIconButton(systemName: "power", helpText: loc("quit"), action: onQuit)
             }
         }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+    }
+
+    private var footerSeparator: some View {
+        Rectangle()
+            .fill(theme.hairline)
+            .frame(width: 1, height: 11)
     }
 
     @ViewBuilder
-    private func cardsWithChart<Cards: View>(daily: [DailyUsage]?, @ViewBuilder cards: () -> Cards) -> some View {
-        VStack(spacing: 8) {
-            cards()
-            if let daily = daily, !daily.isEmpty {
-                DailyChart(data: daily, mode: store.selectedTab,
-                           year: store.viewingYear, month: store.viewingMonth)
+    private var statusText: some View {
+        HStack(spacing: 6) {
+            if store.isLoading {
+                Circle().fill(theme.accent).frame(width: 4.5, height: 4.5)
+                Text(loc("syncing"))
+                    .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                    .foregroundColor(theme.accent)
+            } else if store.selectedTab == .subscription, let qt = store.quotaUpdatedAt {
+                Text(String(format: loc("updated"), timeAgo(qt, loc)).uppercased())
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .foregroundColor(theme.inkSecondary)
+            } else if !store.isCurrentMonth && (store.selectedTab == .cost || store.selectedTab == .tokens || store.selectedTab == .time) {
+                Text(loc("cachedData").uppercased())
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .foregroundColor(theme.inkSecondary)
+            } else if let time = store.lastUpdate {
+                Text(String(format: loc("updated"), timeAgo(time, loc)).uppercased())
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .foregroundColor(theme.inkSecondary)
             }
-            if store.selectedTab == .cost {
-                HStack(spacing: 4) {
-                    Image(systemName: "info.circle")
-                        .font(.system(size: 9.5))
-                    Text(loc("costApiEquivNote"))
-                        .font(.system(size: 9.5))
-                    Spacer(minLength: 0)
-                }
-                .foregroundColor(.secondary.opacity(0.8))
-                .padding(.horizontal, 4)
-            }
+
+            Text("· ⌘R · ⌘T · ⌘I")
+                .font(.system(size: 8.5, weight: .medium, design: .monospaced))
+                .foregroundColor(theme.inkMuted)
         }
-        .padding(.horizontal, 10)
-        .padding(.bottom, 6)
     }
 
-    // ── Footer ──
-    private var footer: some View {
-        HStack(spacing: 12) {
-            if store.selectedTab == .subscription {
-                if let qt = store.quotaUpdatedAt {
-                    Text(String(format: loc("updated"), timeAgo(qt, loc)))
-                        .font(.system(size: 10.5))
-                        .foregroundColor(.secondary)
-                }
-            } else if let time = store.lastUpdate, store.isCurrentMonth {
-                Text(String(format: loc("updated"), timeAgo(time, loc)))
-                    .font(.system(size: 10.5))
-                    .foregroundColor(.secondary)
-            } else if !store.isCurrentMonth {
-                Text(loc("cachedData"))
-                    .font(.system(size: 10.5))
-                    .foregroundColor(.secondary)
-            }
-            Spacer()
+    // MARK: - Hidden Keyboard Shortcuts
 
-            LanguageSwitcher(store: store)
-            OptionsMenu(store: store, loc: loc)
-
-            Button(action: { store.refresh(force: true) }) {
-                Image(systemName: "arrow.clockwise")
-                    .font(.system(size: 11, weight: .medium))
-            }
-            .buttonStyle(.borderless)
-            .help(loc("refresh"))
-            .keyboardShortcut("r", modifiers: .command)
-
-            Button(action: onQuit) {
-                Image(systemName: "power")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(.secondary)
-            }
-            .buttonStyle(.borderless)
-            .help(loc("quit"))
+    private var keyboardShortcutsOverlay: some View {
+        Group {
+            Button("") { selectTabIndex(0) }.keyboardShortcut("1", modifiers: .command)
+            Button("") { selectTabIndex(1) }.keyboardShortcut("2", modifiers: .command)
+            Button("") { selectTabIndex(2) }.keyboardShortcut("3", modifiers: .command)
+            Button("") { selectTabIndex(3) }.keyboardShortcut("4", modifiers: .command)
+            Button("") { selectTabIndex(4) }.keyboardShortcut("5", modifiers: .command)
+            Button("") { stepContext(offset: -1) }.keyboardShortcut("[", modifiers: .command)
+            Button("") { stepContext(offset: 1) }.keyboardShortcut("]", modifiers: .command)
+            Button("") { store.refresh(force: true) }.keyboardShortcut("r", modifiers: .command)
+            Button("") { store.cycleThemePreset() }.keyboardShortcut("t", modifiers: .command)
+            Button("") { store.toggleVisualMode() }.keyboardShortcut("i", modifiers: .command)
+            Button("") { onClose?() }.keyboardShortcut(.escape, modifiers: [])
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .frame(width: 0, height: 0)
+        .opacity(0)
+        .allowsHitTesting(false)
     }
 
-    private var loadingView: some View {
-        VStack(spacing: 12) {
-            ProgressView()
-            Text(loc("loading"))
-                .font(.system(size: 12))
-                .foregroundColor(.secondary)
-        }
-        .frame(height: 120)
+    private func selectTabIndex(_ index: Int) {
+        let tabs = visibleTabs
+        guard index < tabs.count else { return }
+        store.selectedTab = tabs[index]
     }
 
-    private var errorView: some View {
-        VStack(spacing: 8) {
-            Image(systemName: "exclamationmark.triangle")
-                .font(.system(size: 24))
-                .foregroundColor(.orange)
-            Text(loc("loadFailed"))
-                .font(.system(size: 12))
-                .foregroundColor(.secondary)
-            Button(loc("retry")) {
-                store.refresh(force: true)
-            }
-            .buttonStyle(.borderless)
-            .font(.system(size: 11, weight: .semibold))
-            .foregroundColor(.accentColor)
+    private func stepContext(offset: Int) {
+        if store.selectedTab == .time && store.timeRange == .year {
+            store.navigateTimeYear(offset: offset)
+        } else if store.selectedTab == .cost || store.selectedTab == .tokens || store.selectedTab == .time {
+            store.navigateMonth(offset: offset)
         }
-        .frame(height: 120)
-    }
-
-    private var noDataView: some View {
-        VStack(spacing: 8) {
-            Image(systemName: "tray")
-                .font(.system(size: 24))
-                .foregroundColor(.secondary)
-            Text(loc("noMonthData"))
-                .font(.system(size: 12))
-                .foregroundColor(.secondary)
-        }
-        .frame(height: 120)
     }
 }
