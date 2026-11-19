@@ -59,6 +59,10 @@ let package = Package(
                 "Core_Transcript.swift",
                 "Core_QuotaParser.swift",
                 "Core_AGYLocator.swift",
+                "Core_NotchState.swift",
+                "Core_UsageState.swift",
+                "Core_QuotaState.swift",
+                "Core_MonitorState.swift",
             ]
         ),
         .testTarget(

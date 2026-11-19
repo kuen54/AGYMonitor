@@ -185,6 +185,10 @@ else
     echo "  ✅ DMG created"
 fi
 
+# Clean up staging folder so build/dmg-staging/AGYMonitor.app doesn't linger
+# and trigger duplicate Spotlight / LaunchServices registrations.
+rm -rf "$STAGING"
+
 # ── Step 4: Summary ──
 echo ""
 echo "========================================="

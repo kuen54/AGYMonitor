@@ -50,8 +50,8 @@ struct LanguageSwitcher: NSViewRepresentable {
             }
         }
 
-        func menuWillOpen(_ menu: NSMenu) { notchVM?.preventClose = true }
-        func menuDidClose(_ menu: NSMenu) { notchVM?.preventClose = false }
+        func menuWillOpen(_ menu: NSMenu) { notchVM?.acquireModalLock(.languageMenu) }
+        func menuDidClose(_ menu: NSMenu) { notchVM?.releaseModalLock(.languageMenu) }
     }
 }
 
@@ -137,9 +137,9 @@ struct OptionsMenu: NSViewRepresentable {
         }
 
         @objc func clearArchive() {
-            notchVM?.preventClose = true
+            notchVM?.acquireModalLock(.clearArchiveAlert)
             if notchVM != nil { NSApp.activate(ignoringOtherApps: true) }
-            defer { notchVM?.preventClose = false }
+            defer { notchVM?.releaseModalLock(.clearArchiveAlert) }
 
             let alert = NSAlert()
             alert.messageText = loc("archiveClearTitle")
@@ -152,7 +152,7 @@ struct OptionsMenu: NSViewRepresentable {
             }
         }
 
-        func menuWillOpen(_ menu: NSMenu) { notchVM?.preventClose = true }
-        func menuDidClose(_ menu: NSMenu) { notchVM?.preventClose = false }
+        func menuWillOpen(_ menu: NSMenu) { notchVM?.acquireModalLock(.optionsMenu) }
+        func menuDidClose(_ menu: NSMenu) { notchVM?.releaseModalLock(.optionsMenu) }
     }
 }

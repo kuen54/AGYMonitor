@@ -181,41 +181,47 @@ struct PopoverView: View {
         } else if store.selectedTab == .subscription {
             SubscriptionView(store: store)
         } else if store.isCurrentMonth {
-            if let today = store.today, let week = store.week, let month = store.month {
-                cardsWithChart {
+            switch store.effectiveCurrentMonthPhase {
+            case .loaded(let bundle), .loading(cached: .some(let bundle)), .failed(_, cached: .some(let bundle)):
+                cardsWithChart(daily: bundle.dailyBreakdown) {
                     PeriodCard(metric: store.selectedTab, icon: "calendar",
-                               title: loc("today"), usage: today)
+                               title: loc("today"), usage: bundle.today)
                     PeriodCard(metric: store.selectedTab, icon: "calendar.badge.clock",
-                               title: loc("thisWeek"), usage: week)
+                               title: loc("thisWeek"), usage: bundle.week)
                     PeriodCard(metric: store.selectedTab, icon: "chart.bar",
-                               title: loc("thisMonth"), usage: month,
+                               title: loc("thisMonth"), usage: bundle.month,
                                showStats: true)
                 }
-            } else if store.isLoading {
+            case .loading(cached: nil), .idle:
                 loadingView
-            } else {
+            case .empty:
+                noDataView
+            case .failed(_, cached: nil):
                 errorView
             }
         } else {
-            if let month = store.month {
-                cardsWithChart {
+            switch store.effectiveHistoricalMonthPhase {
+            case .loaded(let bundle), .loading(cached: .some(let bundle)), .failed(_, cached: .some(let bundle)):
+                cardsWithChart(daily: bundle.dailyBreakdown) {
                     PeriodCard(metric: store.selectedTab, icon: "chart.bar",
-                               title: loc("monthlyTotal"), usage: month,
+                               title: loc("monthlyTotal"), usage: bundle.month,
                                showStats: true)
                 }
-            } else if store.isLoading {
+            case .loading(cached: nil), .idle:
                 loadingView
-            } else {
+            case .empty:
                 noDataView
+            case .failed(_, cached: nil):
+                errorView
             }
         }
     }
 
     @ViewBuilder
-    private func cardsWithChart<Cards: View>(@ViewBuilder cards: () -> Cards) -> some View {
+    private func cardsWithChart<Cards: View>(daily: [DailyUsage]?, @ViewBuilder cards: () -> Cards) -> some View {
         VStack(spacing: 8) {
             cards()
-            if let daily = store.dailyBreakdown, !daily.isEmpty {
+            if let daily = daily, !daily.isEmpty {
                 DailyChart(data: daily, mode: store.selectedTab,
                            year: store.viewingYear, month: store.viewingMonth)
             }
@@ -296,6 +302,12 @@ struct PopoverView: View {
             Text(loc("loadFailed"))
                 .font(.system(size: 12))
                 .foregroundColor(.secondary)
+            Button(loc("retry")) {
+                store.refresh(force: true)
+            }
+            .buttonStyle(.borderless)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundColor(.accentColor)
         }
         .frame(height: 120)
     }

@@ -95,7 +95,12 @@ final class NotchViewModel: ObservableObject {
     @Published var contentSize: CGSize = .zero
     @Published var closedNotchSize: CGSize = .zero
     @Published var isSynthetic: Bool = false
-    var preventClose: Bool = false
+
+    var onAcquireModalLock: ((NotchModalLock) -> Void)?
+    var onReleaseModalLock: ((NotchModalLock) -> Void)?
+
+    func acquireModalLock(_ lock: NotchModalLock) { onAcquireModalLock?(lock) }
+    func releaseModalLock(_ lock: NotchModalLock) { onReleaseModalLock?(lock) }
 }
 
 // MARK: - Environment plumbing for the shared footer menus

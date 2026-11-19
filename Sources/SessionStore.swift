@@ -21,17 +21,10 @@ final class SessionStore: ObservableObject {
     @Published var instructions: [String: String] = [:]
     /// Transient, non-modal hint localization key after an app-only or failed jump.
     @Published var jumpHint: String? = nil
-    /// Legacy fallback hint flag (preserved name for UI call-site compatibility).
-    @Published var showOldClaudeHint: Bool = false
     /// Aggregate finished-unseen cue for the notch/menu-bar green dot.
     @Published var anyDoneUnseen: Bool = false
     /// Exact sessionIds that finished a turn unseen (cleared per-row on click).
     @Published var doneUnseen: Set<String> = []
-
-    var showOldAGYHint: Bool {
-        get { showOldClaudeHint }
-        set { showOldClaudeHint = newValue }
-    }
 
     var liveCount: Int { sessions.count }
     var anyBusy: Bool { sessions.contains { $0.status == .busy } }
@@ -52,7 +45,6 @@ final class SessionStore: ObservableObject {
         if self.targets != scan.targets { self.targets = scan.targets }
         if self.titles != scan.titles { self.titles = scan.titles }
         if self.instructions != scan.instructions { self.instructions = scan.instructions }
-        if self.showOldClaudeHint != scan.oldClaudeHint { self.showOldClaudeHint = scan.oldClaudeHint }
         if self.anyDoneUnseen != scan.anyDoneUnseen { self.anyDoneUnseen = scan.anyDoneUnseen }
         if self.doneUnseen != scan.doneUnseenIds { self.doneUnseen = scan.doneUnseenIds }
     }

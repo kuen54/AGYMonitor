@@ -88,8 +88,18 @@ struct SessionAwareLogo: View {
         LogoShape().fill(color).frame(width: size, height: size)
     }
 
+    private var visualState: LogoVisualState {
+        LogoVisualState.resolve(
+            anyBusy: sessionStore.anyBusy,
+            anyWaiting: sessionStore.anyWaiting,
+            anyDoneUnseen: sessionStore.anyDoneUnseen,
+            reduceMotion: reduceMotion
+        )
+    }
+
     @ViewBuilder private var animatedLogo: some View {
-        if sessionStore.anyBusy && !reduceMotion {
+        switch visualState.animation {
+        case .levitate:
             TimelineView(.animation) { ctx in
                 let t = ctx.date.timeIntervalSinceReferenceDate
                 let rawProgress = (t / Self.levitatePeriod).truncatingRemainder(dividingBy: 1.0)
@@ -130,21 +140,23 @@ struct SessionAwareLogo: View {
                 }
                 .frame(width: size, height: size)
             }
-        } else if sessionStore.anyBusy && reduceMotion {
+        case .breatheOpacity:
             TimelineView(.animation) { ctx in
                 let t = ctx.date.timeIntervalSinceReferenceDate
                 let phase = (sin(2 * Double.pi * t / Self.breathePeriod) + 1) / 2
                 logoMark.opacity(0.55 + 0.45 * phase)
             }
-        } else {
+        case .idle:
             logoMark
         }
     }
 
     private var dotColor: Color? {
-        if sessionStore.anyWaiting { return .agyStatusWaiting }
-        if sessionStore.anyDoneUnseen { return .green }
-        return nil
+        switch visualState.dot {
+        case .waitingAmber:    return .agyStatusWaiting
+        case .doneUnseenGreen: return .green
+        case .none:            return nil
+        }
     }
 
     var body: some View {

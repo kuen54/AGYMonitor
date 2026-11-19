@@ -9,9 +9,14 @@ class UsageStore: ObservableObject {
     @Published var month: PeriodUsage?
     @Published var isLoading = true
     @Published var lastUpdate: Date?
+    @Published var currentMonthLoadPhase: LoadPhase<CurrentMonthBundle> = .loading(cached: nil)
+    @Published var historicalMonthLoadPhase: LoadPhase<HistoricalMonthBundle> = .idle
+    @Published var yearLoadPhase: LoadPhase<[String: Int]> = .idle
     @Published var selectedTab: DisplayTab = .cost {
         didSet {
-            guard selectedTab == .subscription, oldValue != .subscription else { return }
+            guard selectedTab != oldValue else { return }
+            syncActiveLoadingFlag()
+            guard selectedTab == .subscription else { return }
             if quotaUpdatedAt == nil || Date().timeIntervalSince(quotaUpdatedAt!) > 30 {
                 DispatchQueue.main.async { [weak self] in
                     self?.refreshQuota(force: true)
@@ -21,8 +26,20 @@ class UsageStore: ObservableObject {
     }
 
     // Month navigation
-    @Published var viewingYear: Int
-    @Published var viewingMonth: Int
+    @Published var viewingYear: Int {
+        didSet {
+            guard !isSyncingMonthNav else { return }
+            monthNav.setViewing(year: viewingYear, month: viewingMonth)
+            syncActiveLoadingFlag()
+        }
+    }
+    @Published var viewingMonth: Int {
+        didSet {
+            guard !isSyncingMonthNav else { return }
+            monthNav.setViewing(year: viewingYear, month: viewingMonth)
+            syncActiveLoadingFlag()
+        }
+    }
 
     // Always holds current month data (for menu bar, unaffected by navigation)
     @Published var currentMonthData: PeriodUsage?
@@ -35,18 +52,14 @@ class UsageStore: ObservableObject {
     @Published var timeTodaySeconds: Int = 0
     @Published var timeRange: TimeRange = .week {
         didSet {
-            guard timeRange == .year, oldValue != .year else { return }
-            DispatchQueue.main.async { [weak self] in
-                guard let self = self else { return }
-                self.loadYearTime(self.viewingTimeYear)
-            }
+            guard timeRange != oldValue else { return }
+            syncActiveLoadingFlag()
         }
     }
     @Published var viewingTimeYear: Int
     @Published var selectedWeekMonday: Date?
     @Published var yearTimeDays: [String: Int]?
     private var yearTimeCache: [Int: [String: Int]] = [:]
-    private var yearFetchGeneration = 0
 
     // Localization
     @Published var language: AppLanguage
@@ -63,6 +76,7 @@ class UsageStore: ObservableObject {
 
     // MARK: Plan / Quota & AI Credits ("Plan" tab)
 
+    @Published var quotaState: QuotaPhase<OAuthUsage> = .noAccount
     @Published var subscriptionQuota: OAuthUsage?
     @Published var hasOAuthToken: Bool = false {
         didSet {
@@ -75,21 +89,63 @@ class UsageStore: ObservableObject {
     @Published var quotaUpdatedAt: Date?
     @Published var quotaRetryAt: Date?
 
+    /// Notified whenever a refresh starts or is explicitly requested (keeps AppDelegate
+    /// FSEvents throttle aligned across ⌘R, wake, popover open, and timer ticks).
+    var onRefreshTriggered: ((Date) -> Void)?
+
     /// Antigravity's three local brain roots across CLI, Desktop, and IDE surfaces.
     static func brainDirectories(home: String = NSHomeDirectory()) -> [String] {
-        let base = (home as NSString).appendingPathComponent(".gemini")
-        return [
-            (base as NSString).appendingPathComponent("antigravity-cli/brain"),
-            (base as NSString).appendingPathComponent("antigravity/brain"),
-            (base as NSString).appendingPathComponent("antigravity-ide/brain"),
-        ]
+        AGYLocator.brainDirs(home: home)
     }
 
     var isCurrentMonth: Bool {
-        let cal = AppDate.gregorian
-        let now = Date()
-        return viewingYear == cal.component(.year, from: now)
-            && viewingMonth == cal.component(.month, from: now)
+        monthNav.isViewingCurrentMonth()
+    }
+
+    var effectiveCurrentMonthPhase: LoadPhase<CurrentMonthBundle> {
+        if (currentMonthLoadPhase == .idle || currentMonthLoadPhase == .loading(cached: nil)),
+           !isLoading,
+           let t = today, let w = week, let m = month {
+            return .loaded(CurrentMonthBundle(
+                today: t, week: w, month: m, dailyBreakdown: dailyBreakdown, time: currentTimeData
+            ))
+        }
+        return currentMonthLoadPhase
+    }
+
+    var effectiveHistoricalMonthPhase: LoadPhase<HistoricalMonthBundle> {
+        if (historicalMonthLoadPhase == .idle || historicalMonthLoadPhase == .loading(cached: nil)),
+           !isLoading,
+           let m = month {
+            return .loaded(HistoricalMonthBundle(
+                month: m, dailyBreakdown: dailyBreakdown, time: viewingTimeData
+            ))
+        }
+        return historicalMonthLoadPhase
+    }
+
+    var effectiveYearPhase: LoadPhase<[String: Int]> {
+        if (yearLoadPhase == .idle || yearLoadPhase == .loading(cached: nil)),
+           let days = yearTimeDays {
+            return .loaded(days)
+        }
+        return yearLoadPhase
+    }
+
+    var effectiveQuotaPhase: QuotaPhase<OAuthUsage> {
+        if (quotaState == .noAccount || quotaState == .loading),
+           let sub = subscriptionQuota {
+            let notice: QuotaRefreshNotice = quotaError.map {
+                $0 == .rateLimited ? .rateLimited(retryAt: quotaRetryAt) : .staleError($0)
+            } ?? .none
+            return .ready(
+                snapshot: sub,
+                source: sub.isOfflineCached ? .offlineCache : .live,
+                updatedAt: quotaUpdatedAt,
+                notice: notice
+            )
+        }
+        return quotaState
     }
 
     var viewingMonthLabel: String {
@@ -104,21 +160,32 @@ class UsageStore: ObservableObject {
         return df.string(from: date)
     }
 
+    var canDisplayMenuBarValue: Bool {
+        MenuBarAnchorState.shouldPublishMenuBarValue(
+            tabRawValue: selectedTab.rawValue,
+            hasCurrentMonthData: currentMonthData != nil,
+            hasSubscriptionQuota: subscriptionQuota != nil
+        )
+    }
+
     /// Menu-bar / compact-notch value string for the CURRENT month + selected tab.
     var menuBarValue: String {
-        guard let monthData = currentMonthData else { return "…" }
         switch selectedTab {
         case .cost:
+            guard let monthData = currentMonthData else { return "…" }
             return formatCost(monthData.cost)
         case .tokens:
+            guard let monthData = currentMonthData else { return "…" }
             return formatTokensShort(monthData.totalTokens)
         case .subscription:
             if let q = subscriptionQuota {
                 let rem = max(0, 100 - q.five_hour.displayPercent)
                 return q.five_hour.resets_at != nil ? "5h \(rem)%" : "\(rem)%"
             }
+            guard let monthData = currentMonthData else { return "…" }
             return formatCost(monthData.cost)
         case .time:
+            guard currentMonthData != nil || currentTimeData != nil else { return "…" }
             return TimeLogic.formatDurationShort(timeTodaySeconds)
         case .session:
             return sessionStore.anyBusy ? "▸\(sessionStore.liveCount)" : "\(sessionStore.liveCount)"
@@ -127,11 +194,14 @@ class UsageStore: ObservableObject {
 
     private let scriptClient = UsageScriptClient()
     private let archive = UsageArchive()
-    private var lastArchiveSweep: Date?
 
     private let scriptQueue = DispatchQueue(label: "com.kuen54.AGYMonitor.scripts", qos: .utility)
     private var fetchGeneration = 0
-    private var isRefreshInFlight = false
+    private var refreshQueue = RefreshQueueState()
+    private var monthNav: MonthNavigationState
+    private var yearLoadGate = YearLoadGate()
+    private var archiveSweepGate = ArchiveSweepGate()
+    private var isSyncingMonthNav = false
 
     private var lastScanFingerprint: String?
     private var lastScanResults: ScanResults?
@@ -146,20 +216,19 @@ class UsageStore: ObservableObject {
 
     /// Snapshot cache directory: ~/Library/Caches/AGYMonitor/snapshots/
     private var cacheDir: String {
-        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: (NSHomeDirectory() as NSString).appendingPathComponent("Library/Caches"))
-        let dir = base.appendingPathComponent("AGYMonitor/snapshots", isDirectory: true).path
+        let root = AGYLocator.cacheDir(home: NSHomeDirectory())
+        let dir = (root as NSString).appendingPathComponent("snapshots")
         try? FileManager.default.createDirectory(
             atPath: dir, withIntermediateDirectories: true, attributes: nil)
         return dir
     }
 
     init() {
-        let cal = AppDate.gregorian
-        let now = Date()
-        viewingYear = cal.component(.year, from: now)
-        viewingMonth = cal.component(.month, from: now)
-        viewingTimeYear = cal.component(.year, from: now)
+        let nav = MonthNavigationState()
+        monthNav = nav
+        viewingYear = nav.viewingYear
+        viewingMonth = nav.viewingMonth
+        viewingTimeYear = nav.viewingYear
 
         if let saved = UserDefaults.standard.string(forKey: "appLanguage"),
            let lang = AppLanguage(rawValue: saved) {
@@ -177,7 +246,29 @@ class UsageStore: ObservableObject {
             displayMode = mode
         }
 
-        hasOAuthToken = SubscriptionQuotaService.shared.hasOAuthToken
+        let initialToken = SubscriptionQuotaService.shared.hasOAuthToken
+        applyQuotaEvent(.tokenPresenceChanged(initialToken))
+    }
+
+    private func applyQuotaEvent(_ event: QuotaStateEvent<OAuthUsage>) {
+        let next = QuotaStateReducer.reduce(quotaState, event: event)
+        if quotaState != next { quotaState = next }
+        let nextHasAccount = next.hasAccountSurface
+        if hasOAuthToken != nextHasAccount { hasOAuthToken = nextHasAccount }
+        if subscriptionQuota != next.snapshot { subscriptionQuota = next.snapshot }
+        if quotaError != next.error { quotaError = next.error }
+        if quotaUpdatedAt != next.updatedAt { quotaUpdatedAt = next.updatedAt }
+        if quotaRetryAt != next.retryAt { quotaRetryAt = next.retryAt }
+    }
+
+    private func syncActiveLoadingFlag() {
+        let active: Bool
+        if selectedTab == .time && timeRange == .year {
+            active = yearLoadPhase.isLoading
+        } else {
+            active = isCurrentMonth ? currentMonthLoadPhase.isLoading : historicalMonthLoadPhase.isLoading
+        }
+        if isLoading != active { isLoading = active }
     }
 
     /// Fetch Antigravity plan quota & AI Credits and update @Published state.
@@ -186,40 +277,38 @@ class UsageStore: ObservableObject {
             ? SubscriptionQuotaService.shared.probeTokenPresenceNow()
             : SubscriptionQuotaService.shared.hasOAuthToken
         if !probedHasToken {
-            if hasOAuthToken || subscriptionQuota != nil || quotaError != nil {
-                hasOAuthToken = false
-                subscriptionQuota = nil
-                quotaError = nil
-            }
+            applyQuotaEvent(.tokenPresenceChanged(false))
             return
         }
+        applyQuotaEvent(.tokenPresenceChanged(true))
+        applyQuotaEvent(.beginFetch)
         SubscriptionQuotaService.shared.fetch(forceRefresh: force) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self = self else { return }
-                if !self.hasOAuthToken { self.hasOAuthToken = true }
+                let now = Date()
                 switch result {
                 case .success(let quota):
-                    if self.subscriptionQuota != quota { self.subscriptionQuota = quota }
-                    if self.quotaError != nil { self.quotaError = nil }
-                    let fetchedAt = SubscriptionQuotaService.shared.lastSuccessAt
-                    if self.quotaUpdatedAt != fetchedAt { self.quotaUpdatedAt = fetchedAt }
+                    let source: QuotaSource = quota.isOfflineCached ? .offlineCache : .live
+                    let at = SubscriptionQuotaService.shared.lastSuccessAt ?? now
+                    self.applyQuotaEvent(.fetched(quota, source: source, at: at, notice: .none))
+                case .fallbackWithNotice(let quota, let err, let retryAt):
+                    let at = SubscriptionQuotaService.shared.lastSuccessAt ?? now
+                    let notice: QuotaRefreshNotice = (err == .rateLimited)
+                        ? .rateLimited(retryAt: retryAt)
+                        : .staleError(err)
+                    self.applyQuotaEvent(.fetched(quota, source: .offlineCache, at: at, notice: notice))
                 case .noToken:
-                    self.hasOAuthToken = false
-                    self.subscriptionQuota = nil
-                    self.quotaError = nil
+                    self.applyQuotaEvent(.tokenPresenceChanged(false))
                 case .unauthorized:
-                    if self.quotaError != .unauthorized { self.quotaError = .unauthorized }
+                    self.applyQuotaEvent(.fetchFailed(.unauthorized, retryAt: nil, at: now))
                 case .rateLimited:
-                    if self.quotaError != .rateLimited { self.quotaError = .rateLimited }
+                    let retryAt = SubscriptionQuotaService.shared.rateLimitCooldownUntil
+                    self.applyQuotaEvent(.fetchFailed(.rateLimited, retryAt: retryAt, at: now))
                 case .networkFailure:
-                    if self.quotaError != .networkFailure { self.quotaError = .networkFailure }
+                    self.applyQuotaEvent(.fetchFailed(.networkFailure, retryAt: nil, at: now))
                 case .decodeFailure:
-                    if self.quotaError != .decodeFailure { self.quotaError = .decodeFailure }
+                    self.applyQuotaEvent(.fetchFailed(.decodeFailure, retryAt: nil, at: now))
                 }
-                let retryAt: Date? = self.quotaError == .rateLimited
-                    ? SubscriptionQuotaService.shared.rateLimitCooldownUntil
-                    : nil
-                if self.quotaRetryAt != retryAt { self.quotaRetryAt = retryAt }
             }
         }
     }
@@ -261,7 +350,7 @@ class UsageStore: ObservableObject {
     var archivedDayCount: Int { archive.dayCount }
 
     private func republishAfterArchiveChange() {
-        if !isCurrentMonth { loadHistoricalMonth() }
+        if !isCurrentMonth { loadHistoricalMonth(force: false) }
         if selectedTab == .time && timeRange == .year {
             loadYearTime(viewingTimeYear, force: true)
         }
@@ -284,10 +373,7 @@ class UsageStore: ObservableObject {
     }
 
     func archiveSweepIfNeeded(force: Bool = false) {
-        guard archiveHistoryLocally else { return }
-        if !force, let last = lastArchiveSweep,
-           Date().timeIntervalSince(last) < 6 * 3600 { return }
-        lastArchiveSweep = Date()
+        guard archiveSweepGate.shouldStart(force: force, enabled: archiveHistoryLocally) else { return }
         let cal = AppDate.gregorian
         let now = Date()
         let todayKey = AppDate.dayKey(now)
@@ -303,26 +389,27 @@ class UsageStore: ObservableObject {
         scriptQueue.async { [weak self] in
             guard let self = self else { return }
             let range = "\(startKey):\(todayKey)"
-            guard let json = self.scriptClient.runScript(
-                ["--json", "--no-sessions", "--range", range]) else { return }
-            let daily = UsageParser.parseAllDailyBreakdown(json)
-            let time = UsageParser.parseTimeSection(json)
-            self.archive.merge(daily: daily, time: time)
-            UserDefaults.standard.set(todayKey, forKey: "archiveSweptThrough")
+            let json = self.scriptClient.runScript(["--json", "--no-sessions", "--range", range])
+            if let json = json {
+                let daily = UsageParser.parseAllDailyBreakdown(json)
+                let time = UsageParser.parseTimeSection(json)
+                self.archive.merge(daily: daily, time: time)
+                UserDefaults.standard.set(todayKey, forKey: "archiveSweptThrough")
+            }
+            DispatchQueue.main.async { [weak self] in
+                self?.archiveSweepGate.finish(succeeded: json != nil)
+            }
         }
     }
 
     // MARK: - Navigation
 
     func navigateMonth(offset: Int) {
-        var comps = DateComponents()
-        comps.year = viewingYear
-        comps.month = viewingMonth + offset
-        comps.day = 1
-        guard let date = AppDate.gregorian.date(from: comps) else { return }
-        let cal = AppDate.gregorian
-        viewingYear = cal.component(.year, from: date)
-        viewingMonth = cal.component(.month, from: date)
+        guard monthNav.navigate(offset: offset) else { return }
+        isSyncingMonthNav = true
+        viewingYear = monthNav.viewingYear
+        viewingMonth = monthNav.viewingMonth
+        isSyncingMonthNav = false
 
         selectedWeekMonday = nil
         fetchGeneration += 1
@@ -330,49 +417,64 @@ class UsageStore: ObservableObject {
         if isCurrentMonth {
             refresh()
         } else {
-            loadHistoricalMonth()
+            loadHistoricalMonth(force: false)
         }
+        syncActiveLoadingFlag()
     }
 
-    func loadHistoricalMonth() {
+    func loadHistoricalMonth(force: Bool = false) {
         let y = viewingYear, m = viewingMonth
-        if let snapshot = loadCacheSnapshot(year: y, month: m),
+        let ym = String(format: "%04d-%02d", y, m)
+        if !force,
+           let snapshot = loadCacheSnapshot(year: y, month: m),
            snapshot.dailyBreakdown != nil, snapshot.time != nil {
-            let ym = String(format: "%04d-%02d", y, m)
             let (om, od, ot) = archiveOverlayHistorical(
                 month: snapshot.data, daily: snapshot.dailyBreakdown,
                 time: snapshot.time, yearMonth: ym)
+            let phase = UsageStateLogic.classifyHistoricalMonth(
+                month: om, dailyBreakdown: od, time: ot, scriptSucceeded: true, cached: nil)
+            self.historicalMonthLoadPhase = phase
             self.today = nil
             self.week = nil
-            self.month = om
-            self.dailyBreakdown = od
-            self.viewingTimeData = ot
-            self.isLoading = false
+            self.month = phase.value?.month
+            self.dailyBreakdown = phase.value?.dailyBreakdown
+            self.viewingTimeData = phase.value?.time
+            self.syncActiveLoadingFlag()
             return
         }
-        isLoading = true
+        historicalMonthLoadPhase = force
+            ? historicalMonthLoadPhase.transitioningToLoading()
+            : .loading(cached: nil)
+        syncActiveLoadingFlag()
         fetchGeneration += 1
         let generation = fetchGeneration
         scriptQueue.async { [weak self] in
             guard let self = self else { return }
             let range = AppDate.monthDateRange(year: y, month: m)
-            let ym = String(format: "%04d-%02d", y, m)
             let (data, daily, time) = self.fetchMonthData(range, yearMonth: ym)
             DispatchQueue.main.async {
                 guard generation == self.fetchGeneration,
                       self.viewingYear == y && self.viewingMonth == m else { return }
+                let phase: LoadPhase<HistoricalMonthBundle>
                 if let data = data {
                     self.saveCache(year: y, month: m, data: data, daily: daily, time: time)
+                    let (om, od, ot) = self.archiveOverlayHistorical(
+                        month: data, daily: daily, time: time, yearMonth: ym)
+                    phase = UsageStateLogic.classifyHistoricalMonth(
+                        month: om, dailyBreakdown: od, time: ot,
+                        scriptSucceeded: true, cached: self.historicalMonthLoadPhase.value)
+                } else {
+                    phase = UsageStateLogic.classifyHistoricalMonth(
+                        month: nil, dailyBreakdown: nil, time: nil,
+                        scriptSucceeded: false, cached: self.historicalMonthLoadPhase.value)
                 }
-                let ym = String(format: "%04d-%02d", y, m)
-                let (om, od, ot) = self.archiveOverlayHistorical(
-                    month: data, daily: daily, time: time, yearMonth: ym)
+                self.historicalMonthLoadPhase = phase
                 self.today = nil
                 self.week = nil
-                self.month = om
-                self.dailyBreakdown = od
-                self.viewingTimeData = ot
-                self.isLoading = false
+                self.month = phase.value?.month
+                self.dailyBreakdown = phase.value?.dailyBreakdown
+                self.viewingTimeData = phase.value?.time
+                self.syncActiveLoadingFlag()
             }
         }
     }
@@ -380,11 +482,23 @@ class UsageStore: ObservableObject {
     // MARK: - Refresh (current month)
 
     func refresh(force: Bool = false) {
+        onRefreshTriggered?(Date())
+
+        if monthNav.syncClock() {
+            isSyncingMonthNav = true
+            viewingYear = monthNav.viewingYear
+            viewingMonth = monthNav.viewingMonth
+            isSyncingMonthNav = false
+            selectedWeekMonday = nil
+            fetchGeneration += 1
+        }
+
         refreshQuota(force: force)
         archiveSweepIfNeeded(force: force)
 
         if force {
             yearTimeCache.removeAll()
+            yearLoadGate.invalidateAll()
             if selectedTab == .time && timeRange == .year {
                 loadYearTime(viewingTimeYear, force: true)
             }
@@ -394,14 +508,22 @@ class UsageStore: ObservableObject {
             if self.today == nil {
                 loadCacheForCurrentMonth()
             }
-            if self.month == nil {
-                DispatchQueue.main.async { self.isLoading = true }
+            if currentMonthLoadPhase.value == nil || force {
+                currentMonthLoadPhase = currentMonthLoadPhase.transitioningToLoading()
+                syncActiveLoadingFlag()
             }
         } else {
-            loadHistoricalMonth()
+            if force || historicalMonthLoadPhase == .idle {
+                loadHistoricalMonth(force: force)
+            }
         }
-        guard !isRefreshInFlight else { return }
-        isRefreshInFlight = true
+
+        let req = refreshQueue.request(force: force)
+        guard req.shouldStartNow else { return }
+        startCurrentMonthScriptRefresh(force: req.effectiveForce)
+    }
+
+    private func startCurrentMonthScriptRefresh(force: Bool) {
         scriptQueue.async { [weak self] in
             guard let self = self else { return }
             let cal = AppDate.gregorian
@@ -418,33 +540,44 @@ class UsageStore: ObservableObject {
                let fp = fingerprint,
                fp == self.lastScanFingerprint,
                let cached = self.lastScanResults {
+                let phase = UsageStateLogic.classifyCurrentMonth(
+                    today: cached.today, week: cached.week, month: cached.month,
+                    dailyBreakdown: cached.daily, time: cached.time,
+                    scriptSucceeded: true, cached: nil)
                 DispatchQueue.main.async {
-                    self.isRefreshInFlight = false
                     self.currentMonthData = cached.month
                     self.currentTimeData = cached.time
+                    self.currentMonthLoadPhase = phase
                     self.recomputeTimeToday()
                     self.lastUpdate = Date()
-                    guard self.isCurrentMonth else {
-                        self.isLoading = false
-                        return
+                    if self.isCurrentMonth {
+                        self.today = cached.today
+                        self.week = cached.week
+                        self.month = cached.month
+                        self.dailyBreakdown = cached.daily
+                        self.viewingTimeData = cached.time
                     }
-                    self.today = cached.today
-                    self.week = cached.week
-                    self.month = cached.month
-                    self.dailyBreakdown = cached.daily
-                    self.viewingTimeData = cached.time
-                    self.isLoading = false
+                    self.completeRefreshQueueAndCheckFollowUp()
                 }
                 return
             }
 
             let (m, daily, monthTime) = self.fetchMonthData("month", yearMonth: ym)
-            guard m != nil else {
+            guard let validMonth = m else {
                 self.lastScanFingerprint = nil
                 self.lastScanResults = nil
                 DispatchQueue.main.async {
-                    self.isRefreshInFlight = false
-                    self.isLoading = false
+                    let cachedBundle = self.currentMonthLoadPhase.value
+                    self.currentMonthLoadPhase = UsageStateLogic.classifyCurrentMonth(
+                        today: cachedBundle?.today,
+                        week: cachedBundle?.week,
+                        month: nil,
+                        dailyBreakdown: cachedBundle?.dailyBreakdown,
+                        time: cachedBundle?.time,
+                        scriptSucceeded: false,
+                        cached: cachedBundle
+                    )
+                    self.completeRefreshQueueAndCheckFollowUp()
                 }
                 return
             }
@@ -468,37 +601,43 @@ class UsageStore: ObservableObject {
             }
             let mergedTime = UsageParser.mergeTimeData(base: monthTime, override: crossWeekTime)
             self.lastScanFingerprint = fingerprint
-            if let m = m {
-                self.lastScanResults = ScanResults(today: t, week: w, month: m, daily: daily,
-                                                   time: mergedTime)
-            }
+            self.lastScanResults = ScanResults(today: t, week: w, month: validMonth, daily: daily,
+                                               time: mergedTime)
+            let phase = UsageStateLogic.classifyCurrentMonth(
+                today: t, week: w, month: validMonth,
+                dailyBreakdown: daily, time: mergedTime,
+                scriptSucceeded: true, cached: nil)
             DispatchQueue.main.async {
-                self.isRefreshInFlight = false
-                self.currentMonthData = m
+                self.currentMonthData = validMonth
                 self.currentTimeData = mergedTime
+                self.currentMonthLoadPhase = phase
                 if self.archiveHistoryLocally {
                     self.archive.merge(daily: daily, time: mergedTime)
                 }
                 self.recomputeTimeToday()
                 self.lastUpdate = Date()
-                if let m = m {
-                    self.saveCache(
-                        year: nowYear, month: nowMonth,
-                        data: m, daily: daily,
-                        week: w, weekStart: weekStartKey,
-                        time: mergedTime)
+                self.saveCache(
+                    year: nowYear, month: nowMonth,
+                    data: validMonth, daily: daily,
+                    week: w, weekStart: weekStartKey,
+                    time: mergedTime)
+                if self.isCurrentMonth {
+                    self.today = t
+                    self.week = w
+                    self.month = validMonth
+                    self.dailyBreakdown = daily
+                    self.viewingTimeData = mergedTime
                 }
-                guard self.isCurrentMonth else {
-                    self.isLoading = false
-                    return
-                }
-                self.today = t
-                self.week = w
-                self.month = m
-                self.dailyBreakdown = daily
-                self.viewingTimeData = mergedTime
-                self.isLoading = false
+                self.completeRefreshQueueAndCheckFollowUp()
             }
+        }
+    }
+
+    private func completeRefreshQueueAndCheckFollowUp() {
+        let next = refreshQueue.complete()
+        syncActiveLoadingFlag()
+        if next.shouldRunFollowUp {
+            startCurrentMonthScriptRefresh(force: next.followUpForce)
         }
     }
 
@@ -546,35 +685,48 @@ class UsageStore: ObservableObject {
             self.dailyBreakdown = nil
             self.currentTimeData = nil
             self.viewingTimeData = nil
+            self.currentMonthLoadPhase = .loading(cached: nil)
             self.recomputeTimeToday()
+            self.syncActiveLoadingFlag()
             return
         }
         let daily = snapshot.dailyBreakdown
+        let resolvedToday: PeriodUsage
+        let resolvedWeek: PeriodUsage
         if daily != nil {
-            self.today = AppDate.deriveToday(daily)
+            resolvedToday = AppDate.deriveToday(daily)
             let derivedWeek = AppDate.deriveWeek(daily)
             if let cachedWeek = snapshot.week,
                let cachedStart = snapshot.weekStart,
                let monday = AppDate.mondayOfWeek(containing: now),
                cachedStart == AppDate.dayKey(monday),
                cachedWeek.cost >= derivedWeek.cost {
-                self.week = cachedWeek
+                resolvedWeek = cachedWeek
             } else {
-                self.week = derivedWeek
+                resolvedWeek = derivedWeek
             }
         } else {
             let empty = PeriodUsage(cost: 0, models: [], totalMessages: 0, totalTokens: 0)
-            self.today = empty
-            self.week = empty
+            resolvedToday = empty
+            resolvedWeek = empty
         }
+        self.today = resolvedToday
+        self.week = resolvedWeek
         self.month = snapshot.data
         self.dailyBreakdown = daily
         self.currentMonthData = snapshot.data
         self.currentTimeData = snapshot.time
         self.viewingTimeData = snapshot.time
+        self.currentMonthLoadPhase = .loaded(CurrentMonthBundle(
+            today: resolvedToday,
+            week: resolvedWeek,
+            month: snapshot.data,
+            dailyBreakdown: daily,
+            time: snapshot.time
+        ))
         self.recomputeTimeToday()
         self.lastUpdate = snapshot.lastUpdated
-        self.isLoading = false
+        self.syncActiveLoadingFlag()
     }
 
     private func recomputeTimeToday(now: Date = Date()) {
@@ -586,19 +738,29 @@ class UsageStore: ObservableObject {
 
     func loadYearTime(_ year: Int, force: Bool = false) {
         viewingTimeYear = year
-        if !force, let cached = yearTimeCache[year] {
-            yearTimeDays = cached
+        let cached = yearTimeCache[year]
+        guard let generation = yearLoadGate.beginLoad(
+            year: year, force: force, hasCachedValue: cached != nil
+        ) else {
+            if let cached = cached {
+                yearTimeDays = cached
+                yearLoadPhase = .loaded(cached)
+                syncActiveLoadingFlag()
+            }
             return
         }
-        yearTimeDays = nil
-        yearFetchGeneration += 1
-        let generation = yearFetchGeneration
+        if !force {
+            yearTimeDays = nil
+        }
+        yearLoadPhase = .loading(cached: force ? cached : nil)
+        syncActiveLoadingFlag()
         scriptQueue.async { [weak self] in
             guard let self = self else { return }
             let json = self.scriptClient.runScript(["--time-year", "\(year)"])
             let parsed = json.flatMap { UsageParser.parseYearTime($0) }
             DispatchQueue.main.async {
-                guard generation == self.yearFetchGeneration,
+                self.yearLoadGate.completeLoad(generation: generation)
+                guard generation == self.yearLoadGate.generation,
                       self.viewingTimeYear == year else { return }
                 if let parsed = parsed, parsed.year == year {
                     let final: [String: Int]
@@ -611,17 +773,26 @@ class UsageStore: ObservableObject {
                     }
                     self.yearTimeCache[year] = final
                     self.yearTimeDays = final
+                    self.yearLoadPhase = .loaded(final)
                 } else if self.archiveHistoryLocally {
                     let archived = self.archive.yearSeconds(year: year)
                     if !archived.isEmpty {
                         self.yearTimeCache[year] = archived
                         self.yearTimeDays = archived
+                        self.yearLoadPhase = .loaded(archived)
                     } else {
-                        self.yearTimeDays = [:]
+                        self.yearLoadPhase = (json == nil || parsed == nil)
+                            ? .failed(.scriptFailed, cached: cached)
+                            : .loaded([:])
+                        self.yearTimeDays = self.yearLoadPhase.value
                     }
                 } else {
-                    self.yearTimeDays = [:]
+                    self.yearLoadPhase = (json == nil || parsed == nil)
+                        ? .failed(.scriptFailed, cached: cached)
+                        : .loaded([:])
+                    self.yearTimeDays = self.yearLoadPhase.value
                 }
+                self.syncActiveLoadingFlag()
             }
         }
     }

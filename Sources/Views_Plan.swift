@@ -234,134 +234,22 @@ struct SubscriptionView: View {
 
     var body: some View {
         VStack(spacing: 8) {
-            if let q = store.subscriptionQuota {
-                let geminiWeeklyLimits = q.scopedModelLimits.filter { $0.scope?.model?.id == "gemini_weekly" }
-                let otherScopedLimits = q.scopedModelLimits.filter { $0.scope?.model?.id != "gemini_weekly" }
-
-                // Account email, plan tier badge, and optional Desktop offline-cache badge
-                if nonEmpty(q.planTier) != nil || nonEmpty(q.accountEmail) != nil || q.isOfflineCached {
-                    PlanAccountHeader(
-                        email: q.accountEmail,
-                        tier: q.planTier,
-                        isOfflineCached: q.isOfflineCached
-                    )
-                }
-
-                // 1. Primary Gemini rolling ~5h bucket
-                if q.five_hour.resets_at != nil
-                    || q.five_hour.displayPercent > 0
-                    || nonEmpty(q.five_hour.label) != nil
-                    || q.scopedModelLimits.isEmpty {
-                    SubWindowRow(
-                        label: primaryWindowLabel(
-                            q.five_hour,
-                            defaultKey: "sub5hLabel",
-                            canonicalEnglishLabels: ["Gemini Models", "Gemini · 5h limit"]
-                        ),
-                        usedPercent: q.five_hour.displayPercent,
-                        resetAt: q.fiveHourResetDate,
-                        accentModelClasses: ModelClass.allCases.filter(\.isGeminiFamily)
-                    )
-                }
-
-                // 2. Gemini 7-day rolling bucket (grouped directly under Gemini 5h)
-                ForEach(Array(geminiWeeklyLimits.enumerated()), id: \.offset) { _, lim in
-                    SubWindowRow(
-                        label: loc("sub1pWeeklyLabel"),
-                        usedPercent: lim.displayPercent,
-                        resetAt: lim.resetDate,
-                        accentModelClasses: ModelClass.allCases.filter(\.isGeminiFamily)
-                    )
-                }
-
-                // 3. Secondary Claude & GPT rolling ~5h bucket
-                if q.seven_day.resets_at != nil
-                    || q.seven_day.displayPercent > 0
-                    || nonEmpty(q.seven_day.label) != nil {
-                    SubWindowRow(
-                        label: primaryWindowLabel(
-                            q.seven_day,
-                            defaultKey: "sub7dLabel",
-                            canonicalEnglishLabels: ["Claude & GPT · 5h", "Claude & Partner", "Claude & GPT · 5h limit"]
-                        ),
-                        usedPercent: q.seven_day.displayPercent,
-                        resetAt: q.sevenDayResetDate,
-                        accentModelClasses: [.claude, .other]
-                    )
-                }
-
-                // 4. Claude & GPT 7-day rolling bucket + any other scoped limits
-                ForEach(Array(otherScopedLimits.enumerated()), id: \.offset) { _, lim in
-                    let limitId = lim.scope?.model?.id ?? ""
-                    if limitId == "claude_partner_weekly" {
-                        SubWindowRow(
-                            label: loc("sub3pWeeklyLabel"),
-                            usedPercent: lim.displayPercent,
-                            resetAt: lim.resetDate,
-                            accentModelClasses: [.claude, .other]
-                        )
-                    } else {
-                        let rawName = lim.modelDisplayName ?? ""
-                        let classified = ModelClass.classify(rawName)
-                        SubWindowRow(
-                            label: String(format: loc("sub7dScopedFmt"), rawName),
-                            usedPercent: lim.displayPercent,
-                            resetAt: lim.resetDate,
-                            accentModelClasses: [classified]
-                        )
-                    }
-                }
-
-                // Legacy optional secondary bucket fallback
-                if let sonnet = q.seven_day_sonnet,
-                   sonnet.displayPercent > 0 || sonnet.resets_at != nil,
-                   !q.scopedModelLimits.contains(where: {
-                       $0.modelDisplayName?.caseInsensitiveCompare("Claude") == .orderedSame }) {
-                    SubWindowRow(
-                        label: nonEmpty(sonnet.label) ?? loc("sub7dSonnetLabel"),
-                        usedPercent: sonnet.displayPercent,
-                        resetAt: q.sevenDaySonnetResetDate,
-                        accentModelClasses: [.claude]
-                    )
-                }
-
-                // Google One AI Credits (Prompt / Flow / Flex)
-                if q.hasCredits {
-                    AICreditsCard(
-                        promptCredits: q.promptCredits,
-                        flowCredits: q.flowCredits,
-                        flexCredits: q.flexCredits
-                    )
-                }
-
-                if q.extra_usage?.is_enabled == true {
-                    HStack(spacing: 6) {
-                        Image(systemName: "creditcard")
-                            .font(.system(size: 10))
-                            .foregroundColor(.secondary)
-                        Text(loc("subExtraOn"))
-                            .font(.system(size: 10.5))
-                            .foregroundColor(.secondary)
-                        Spacer()
-                    }
-                    .padding(.horizontal, 2)
-                }
-
-                if store.quotaError != nil {
-                    HStack(spacing: 6) {
-                        Image(systemName: "exclamationmark.triangle")
-                            .font(.system(size: 10))
-                            .foregroundColor(.secondary)
-                        Text(errorText)
-                            .font(.system(size: 10.5))
-                            .foregroundColor(.secondary)
-                        Spacer()
-                    }
-                    .padding(.horizontal, 2)
-                }
-            } else if store.quotaError != nil {
-                stateMessage(icon: "exclamationmark.triangle", text: errorText)
-            } else {
+            switch store.effectiveQuotaPhase {
+            case .ready(let q, _, _, let notice):
+                quotaCardsView(q, notice: notice)
+            case .failed(let err, let retryAt):
+                stateMessage(
+                    icon: "exclamationmark.triangle",
+                    text: errorText(for: err, retryAt: retryAt),
+                    showRetry: true
+                )
+            case .noAccount:
+                stateMessage(
+                    icon: "person.crop.circle.badge.questionmark",
+                    text: loc("subNoToken"),
+                    showRetry: true
+                )
+            case .loading:
                 VStack(spacing: 8) {
                     ProgressView().controlSize(.small)
                     Text(loc("subWaitData"))
@@ -374,22 +262,176 @@ struct SubscriptionView: View {
         .padding(.bottom, 6)
     }
 
-    private func stateMessage(icon: String, text: String) -> some View {
+    @ViewBuilder
+    private func quotaCardsView(_ q: OAuthUsage, notice: QuotaRefreshNotice) -> some View {
+        let geminiWeeklyLimits = q.scopedModelLimits.filter { $0.scope?.model?.id == "gemini_weekly" }
+        let otherScopedLimits = q.scopedModelLimits.filter { $0.scope?.model?.id != "gemini_weekly" }
+
+        // Account email, plan tier badge, and optional Desktop offline-cache badge
+        if nonEmpty(q.planTier) != nil || nonEmpty(q.accountEmail) != nil || q.isOfflineCached {
+            PlanAccountHeader(
+                email: q.accountEmail,
+                tier: q.planTier,
+                isOfflineCached: q.isOfflineCached
+            )
+        }
+
+        // 1. Primary Gemini rolling ~5h bucket
+        if q.five_hour.resets_at != nil
+            || q.five_hour.displayPercent > 0
+            || nonEmpty(q.five_hour.label) != nil
+            || q.scopedModelLimits.isEmpty {
+            SubWindowRow(
+                label: primaryWindowLabel(
+                    q.five_hour,
+                    defaultKey: "sub5hLabel",
+                    canonicalEnglishLabels: ["Gemini Models", "Gemini · 5h limit"]
+                ),
+                usedPercent: q.five_hour.displayPercent,
+                resetAt: q.fiveHourResetDate,
+                accentModelClasses: ModelClass.allCases.filter(\.isGeminiFamily)
+            )
+        }
+
+        // 2. Gemini 7-day rolling bucket (grouped directly under Gemini 5h)
+        ForEach(Array(geminiWeeklyLimits.enumerated()), id: \.offset) { _, lim in
+            SubWindowRow(
+                label: loc("sub1pWeeklyLabel"),
+                usedPercent: lim.displayPercent,
+                resetAt: lim.resetDate,
+                accentModelClasses: ModelClass.allCases.filter(\.isGeminiFamily)
+            )
+        }
+
+        // 3. Secondary Claude & GPT rolling ~5h bucket
+        if q.seven_day.resets_at != nil
+            || q.seven_day.displayPercent > 0
+            || nonEmpty(q.seven_day.label) != nil {
+            SubWindowRow(
+                label: primaryWindowLabel(
+                    q.seven_day,
+                    defaultKey: "sub7dLabel",
+                    canonicalEnglishLabels: ["Claude & GPT · 5h", "Claude & Partner", "Claude & GPT · 5h limit"]
+                ),
+                usedPercent: q.seven_day.displayPercent,
+                resetAt: q.sevenDayResetDate,
+                accentModelClasses: [.claude, .other]
+            )
+        }
+
+        // 4. Claude & GPT 7-day rolling bucket + any other scoped limits
+        ForEach(Array(otherScopedLimits.enumerated()), id: \.offset) { _, lim in
+            let limitId = lim.scope?.model?.id ?? ""
+            if limitId == "claude_partner_weekly" {
+                SubWindowRow(
+                    label: loc("sub3pWeeklyLabel"),
+                    usedPercent: lim.displayPercent,
+                    resetAt: lim.resetDate,
+                    accentModelClasses: [.claude, .other]
+                )
+            } else {
+                let rawName = lim.modelDisplayName ?? ""
+                let classified = ModelClass.classify(rawName)
+                SubWindowRow(
+                    label: String(format: loc("sub7dScopedFmt"), rawName),
+                    usedPercent: lim.displayPercent,
+                    resetAt: lim.resetDate,
+                    accentModelClasses: [classified]
+                )
+            }
+        }
+
+        // Legacy optional secondary bucket fallback
+        if let sonnet = q.seven_day_sonnet,
+           sonnet.displayPercent > 0 || sonnet.resets_at != nil,
+           !q.scopedModelLimits.contains(where: {
+               $0.modelDisplayName?.caseInsensitiveCompare("Claude") == .orderedSame }) {
+            SubWindowRow(
+                label: nonEmpty(sonnet.label) ?? loc("sub7dSonnetLabel"),
+                usedPercent: sonnet.displayPercent,
+                resetAt: q.sevenDaySonnetResetDate,
+                accentModelClasses: [.claude]
+            )
+        }
+
+        // Google One AI Credits (Prompt / Flow / Flex)
+        if q.hasCredits {
+            AICreditsCard(
+                promptCredits: q.promptCredits,
+                flowCredits: q.flowCredits,
+                flexCredits: q.flexCredits
+            )
+        }
+
+        if q.extra_usage?.is_enabled == true {
+            HStack(spacing: 6) {
+                Image(systemName: "creditcard")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                Text(loc("subExtraOn"))
+                    .font(.system(size: 10.5))
+                    .foregroundColor(.secondary)
+                Spacer()
+            }
+            .padding(.horizontal, 2)
+        }
+
+        switch notice {
+        case .none:
+            EmptyView()
+        case .rateLimited(let retryAt):
+            noticeRow(text: errorText(for: .rateLimited, retryAt: retryAt), showRetry: false)
+        case .staleError(let err):
+            noticeRow(text: errorText(for: err, retryAt: nil), showRetry: err != .rateLimited)
+        }
+    }
+
+    private func noticeRow(text: String, showRetry: Bool) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+            Text(text)
+                .font(.system(size: 10.5))
+                .foregroundColor(.secondary)
+            Spacer()
+            if showRetry {
+                Button(loc("retry")) {
+                    store.refreshQuota(force: true)
+                }
+                .buttonStyle(.borderless)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(.accentColor)
+            }
+        }
+        .padding(.horizontal, 2)
+    }
+
+    private func stateMessage(icon: String, text: String, showRetry: Bool = false) -> some View {
         HStack(spacing: 6) {
             Image(systemName: icon).font(.system(size: 11)).foregroundColor(.secondary)
             Text(text).font(.system(size: 11)).foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             Spacer()
+            if showRetry {
+                Button(loc("retry")) {
+                    store.refreshQuota(force: true)
+                }
+                .buttonStyle(.borderless)
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundColor(.accentColor)
+            }
         }
         .padding(12)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.04)))
     }
 
-    private var errorText: String {
-        switch store.quotaError {
+    private func errorText(for error: CoreQuotaError?, retryAt: Date?) -> String {
+        switch error {
         case .unauthorized:
             return loc("quotaTokenExpired")
         case .rateLimited:
-            if let retryAt = store.quotaRetryAt, retryAt > Date() {
+            if let retryAt = retryAt, retryAt > Date() {
                 return String(format: loc("quotaRateLimitedRetry"), retryCountdown(retryAt))
             }
             return loc("quotaRateLimited")

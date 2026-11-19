@@ -9,6 +9,13 @@ import Foundation
 
 enum AITitleReader {
 
+    /// Raw transcript tail snapshot (pure summary + file mtime) so `SessionMonitor`
+    /// can evaluate recency-sensitive status via `SessionLogic.resolveLiveSessionStatus`.
+    struct TailSnapshot: Equatable {
+        let summary: TranscriptSummary
+        let fileMtime: TimeInterval
+    }
+
     /// Live step state inferred from the tail of `transcript.jsonl`.
     struct TailStepActivity: Equatable {
         let status: SessionStatus
@@ -28,7 +35,7 @@ enum AITitleReader {
 
     /// Default Antigravity root directory (`~/.gemini`).
     static var defaultGeminiRoot: URL {
-        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".gemini")
+        URL(fileURLWithPath: AGYLocator.geminiRoot(home: FileManager.default.homeDirectoryForCurrentUser.path))
     }
 
     /// Title + latest clean user instruction for an Antigravity session.
@@ -138,13 +145,9 @@ enum AITitleReader {
     static func transcriptPath(sessionId: String, home: String = NSHomeDirectory()) -> String? {
         guard !sessionId.isEmpty else { return nil }
         let fm = FileManager.default
-        let surfaces = ["antigravity-cli", "antigravity", "antigravity-ide"]
         var bestPath: String? = nil
         var bestMtime: Date = .distantPast
-        for s in surfaces {
-            let p = (home as NSString).appendingPathComponent(
-                ".gemini/\(s)/brain/\(sessionId)/.system_generated/logs/transcript.jsonl"
-            )
+        for p in AGYLocator.candidateTranscriptPaths(home: home, conversationId: sessionId) {
             if fm.fileExists(atPath: p) {
                 let mtime = (try? fm.attributesOfItem(atPath: p)[.modificationDate] as? Date) ?? .distantPast
                 if bestPath == nil || mtime > bestMtime {
@@ -189,204 +192,93 @@ enum AITitleReader {
         return result
     }
 
-    /// Inspect the last JSONL step in `transcript.jsonl` to determine whether the
-    /// session is actively running tools/generating (`.busy`), waiting on `ask_question`
-    /// (`.waiting`), or finished (`.idle`).
-    static func tailActivity(inFileAt path: String) -> TailStepActivity {
+    /// Bounded 128 KB tail snapshot (`TranscriptSummary` + `fileMtime`) from `transcript.jsonl`.
+    static func tailSnapshot(inFileAt path: String) -> TailSnapshot {
         let fm = FileManager.default
         let fileMtime = ((try? fm.attributesOfItem(atPath: path)[.modificationDate] as? Date)?
             .timeIntervalSince1970) ?? 0
         guard let handle = FileHandle(forReadingAtPath: path) else {
-            return TailStepActivity(status: .idle, waitingFor: nil, createdAtMs: nil, fileMtime: fileMtime)
+            return TailSnapshot(summary: .empty, fileMtime: fileMtime)
         }
         defer { try? handle.close() }
 
         guard let end = try? handle.seekToEnd(), end > 0 else {
-            return TailStepActivity(status: .idle, waitingFor: nil, createdAtMs: nil, fileMtime: fileMtime)
+            return TailSnapshot(summary: .empty, fileMtime: fileMtime)
         }
         let readLen = Int(min(UInt64(128 * 1024), end))
         let offset = end - UInt64(readLen)
         do { try handle.seek(toOffset: offset) } catch {
-            return TailStepActivity(status: .idle, waitingFor: nil, createdAtMs: nil, fileMtime: fileMtime)
+            return TailSnapshot(summary: .empty, fileMtime: fileMtime)
         }
         let data = handle.readData(ofLength: readLen)
-        let text = String(decoding: data, as: UTF8.self)
-        let scanned = TranscriptParse.scan(text: text)
-        let createdAt: Double? = scanned.lastStepAt.flatMap { d in
+        return TailSnapshot(summary: TranscriptParse.scan(data), fileMtime: fileMtime)
+    }
+
+    /// Inspect the last JSONL step in `transcript.jsonl` via `SessionLogic.resolveLiveSessionStatus`.
+    static func tailActivity(inFileAt path: String, now: TimeInterval = Date().timeIntervalSince1970) -> TailStepActivity {
+        let snap = tailSnapshot(inFileAt: path)
+        let createdAt: Double? = snap.summary.lastStepAt.flatMap { d in
             let sec = d.timeIntervalSince1970
             return sec > 946_684_800 ? sec * 1000.0 : nil
         }
-
-        if scanned.isWaitingForQuestion {
-            return TailStepActivity(
-                status: .waiting,
-                waitingFor: "input needed",
-                createdAtMs: createdAt,
-                fileMtime: fileMtime
-            )
-        }
-
-        if scanned.lastStepStatus == .running {
-            return TailStepActivity(
-                status: .busy,
-                waitingFor: nil,
-                createdAtMs: createdAt,
-                fileMtime: fileMtime
-            )
-        }
-
-        let nonIdlePendingTools = scanned.pendingToolNames.filter { $0 != "swarm_wait" }
-        if !nonIdlePendingTools.isEmpty {
-            return TailStepActivity(
-                status: .busy,
-                waitingFor: nil,
-                createdAtMs: createdAt,
-                fileMtime: fileMtime
-            )
-        }
-        if !scanned.pendingToolNames.isEmpty {
-            // Only `swarm_wait` remains pending — worker is parked idle waiting on board.
-            return TailStepActivity(
-                status: .idle,
-                waitingFor: nil,
-                createdAtMs: createdAt,
-                fileMtime: fileMtime
-            )
-        }
-
-        if (scanned.lastStepType == .userInput || scanned.lastStepType == .generic),
-           scanned.lastStepStatus != .error {
-            return TailStepActivity(
-                status: .busy,
-                waitingFor: nil,
-                createdAtMs: createdAt,
-                fileMtime: fileMtime
-            )
-        }
-
+        let resolved = SessionLogic.resolveLiveSessionStatus(
+            swarmWorkerBusy: false,
+            rawStatus: nil,
+            notFullyIdle: false,
+            transcriptSummary: snap.summary,
+            transcriptFileMtime: snap.fileMtime,
+            now: now
+        )
         return TailStepActivity(
-            status: .idle,
-            waitingFor: nil,
+            status: resolved.status,
+            waitingFor: resolved.waitingFor,
             createdAtMs: createdAt,
-            fileMtime: fileMtime
+            fileMtime: snap.fileMtime
         )
     }
 
     // MARK: - Annotations (`annotations/<id>.pbtxt`) & Swarm (`swarm/members.json`)
 
-    /// Read `title:"..."` from `~/.gemini/<surface>/annotations/<sessionId>.pbtxt`.
+    /// Read `title:"..."` from `~/.gemini/<surface>/annotations/<sessionId>.pbtxt` via `TranscriptParse`.
     static func annotationTitle(sessionId: String, home: String = NSHomeDirectory()) -> String? {
         guard !sessionId.isEmpty else { return nil }
-        let surfaces = ["antigravity-cli", "antigravity", "antigravity-ide"]
-        for s in surfaces {
-            let path = (home as NSString)
-                .appendingPathComponent(".gemini/\(s)/annotations/\(sessionId).pbtxt")
+        for surface in AGYSurface.allCases {
+            let root = AGYLocator.surfaceRoot(home: home, surface: surface)
+            let path = ((root as NSString).appendingPathComponent("annotations") as NSString)
+                .appendingPathComponent("\(sessionId).pbtxt")
             guard let raw = try? String(contentsOfFile: path, encoding: .utf8) else { continue }
-            if let parsed = parsePbtxtTitle(raw), !parsed.isEmpty {
+            if let parsed = TranscriptParse.parseAnnotationTitle(raw), !parsed.isEmpty {
                 return parsed
             }
         }
         return nil
     }
 
-    /// Read swarm coordinator info from `brain/<sessionId>/.system_generated/swarm/members.json` if present.
+    /// Read swarm coordinator info from `brain/<sessionId>/.system_generated/swarm/members.json`
+    /// via `SessionLogic.parseSwarmMembersJSON`.
     static func swarmInfo(sessionId: String, home: String = NSHomeDirectory()) -> SwarmCoordinatorInfo? {
         guard !sessionId.isEmpty else { return nil }
         let fm = FileManager.default
-        let surfaces = ["antigravity-cli", "antigravity", "antigravity-ide"]
-        for s in surfaces {
-            let path = (home as NSString).appendingPathComponent(
-                ".gemini/\(s)/brain/\(sessionId)/.system_generated/swarm/members.json"
-            )
+        for brainDir in AGYLocator.brainDirs(home: home) {
+            let path = AGYLocator.swarmMembersPath(brainDir: brainDir, conversationId: sessionId)
             guard fm.fileExists(atPath: path),
                   let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
-                  let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                  let parsed = SessionLogic.parseSwarmMembersJSON(data) else {
                 continue
             }
-            let rawTitle = (root["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let title = (rawTitle?.isEmpty == false) ? rawTitle : nil
-            var anyBusy = false
-            var workerIds = Set<String>()
-            if let members = root["members"] as? [String: [String: Any]] {
-                for (memberName, info) in members {
-                    let role = (info["role"] as? String) ?? ""
-                    let convId = (info["conversation_id"] as? String) ?? ""
-                    let killed = (info["killed"] as? Bool) ?? false
-                    let phase = (info["phase"] as? String) ?? ""
-                    let wakeMode = (info["wake_mode"] as? String) ?? ""
-                    if role == "worker", !convId.isEmpty {
-                        workerIds.insert(convId)
-                        if !killed && phase != "KILLED" && memberName != "monitor" && wakeMode == "working" {
-                            anyBusy = true
-                        }
-                    }
-                }
-            }
-            return SwarmCoordinatorInfo(title: title, anyWorkerBusy: anyBusy, workerConversationIds: workerIds)
+            let workers = parsed.members.filter { $0.role == "worker" && !$0.conversationId.isEmpty }
+            let workerIds = Set(workers.map(\.conversationId))
+            let nonMonitorWorkers = workers.filter { $0.name != "monitor" }
+            let anyBusy = SessionLogic.anySwarmWorkerBusy(nonMonitorWorkers)
+            return SwarmCoordinatorInfo(title: parsed.title, anyWorkerBusy: anyBusy, workerConversationIds: workerIds)
         }
         return nil
     }
 
     // MARK: - Helpers
 
-    /// Parse `title:"..."` or `title: "..."` from protobuf TextFormat, decoding octal UTF-8 escapes.
-    static func parsePbtxtTitle(_ text: String) -> String? {
-        for rawLine in text.split(separator: "\n") {
-            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard line.hasPrefix("title:") else { continue }
-            var rest = line.dropFirst("title:".count).trimmingCharacters(in: .whitespaces)
-            guard rest.first == "\"", rest.count >= 2 else { continue }
-            rest.removeFirst()
-            if rest.last == "\"" { rest.removeLast() }
-            let decoded = unescapePbtxtString(rest).trimmingCharacters(in: .whitespacesAndNewlines)
-            if !decoded.isEmpty { return decoded }
-        }
-        return nil
-    }
-
-    private static func unescapePbtxtString(_ s: String) -> String {
-        var bytes: [UInt8] = []
-        let utf8 = Array(s.utf8)
-        var i = 0
-        while i < utf8.count {
-            let b = utf8[i]
-            if b == 0x5C, i + 1 < utf8.count { // '\'
-                let next = utf8[i + 1]
-                // Octal escape \000 .. \377
-                if next >= 0x30 && next <= 0x37 {
-                    var val: UInt32 = 0
-                    var consumed = 0
-                    while consumed < 3 && (i + 1 + consumed) < utf8.count {
-                        let d = utf8[i + 1 + consumed]
-                        guard d >= 0x30 && d <= 0x37 else { break }
-                        val = val * 8 + UInt32(d - 0x30)
-                        consumed += 1
-                    }
-                    bytes.append(UInt8(truncatingIfNeeded: val))
-                    i += 1 + consumed
-                    continue
-                }
-                switch next {
-                case 0x6E: bytes.append(0x0A); i += 2 // \n
-                case 0x74: bytes.append(0x09); i += 2 // \t
-                case 0x72: bytes.append(0x0D); i += 2 // \r
-                case 0x22: bytes.append(0x22); i += 2 // \"
-                case 0x27: bytes.append(0x27); i += 2 // \'
-                case 0x5C: bytes.append(0x5C); i += 2 // \\
-                default:
-                    bytes.append(next)
-                    i += 2
-                }
-            } else {
-                bytes.append(b)
-                i += 1
-            }
-        }
-        return String(decoding: bytes, as: UTF8.self)
-    }
-
     static func parseValidEpochMs(_ iso: String?) -> Double? {
-        guard let d = OAuthUsage.parseISO(iso) else { return nil }
+        guard let d = AppDate.parseISO8601(iso) else { return nil }
         let sec = d.timeIntervalSince1970
         // Reject sentinel dates such as 0001-01-01T00:00:00Z
         guard sec > 946_684_800 else { return nil }

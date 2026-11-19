@@ -17,7 +17,6 @@ struct SessionTabView: View {
             if groups.isEmpty {
                 emptyState
             } else {
-                if sessionStore.showOldClaudeHint { hintBanner }
                 if let jumpHint = sessionStore.jumpHint { jumpHintBanner(jumpHint) }
                 ForEach(groups) { group in
                     SessionGroupSection(group: group, sessionStore: sessionStore)
@@ -39,18 +38,6 @@ struct SessionTabView: View {
         }
         .frame(maxWidth: .infinity)
         .frame(height: 120)
-    }
-
-    private var hintBanner: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "arrow.up.circle")
-                .font(.system(size: 11)).foregroundColor(.secondary)
-            Text(loc("sessionOldCCHint"))
-                .font(.system(size: 10.5)).foregroundColor(.secondary)
-            Spacer(minLength: 0)
-        }
-        .padding(8)
-        .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.04)))
     }
 
     private func jumpHintBanner(_ key: String) -> some View {
@@ -118,11 +105,22 @@ struct SessionRow: View {
                 .frame(width: 7, height: 7)
                 .accessibilityLabel(statusLabel)
             VStack(alignment: .leading, spacing: 1) {
-                Text(titleText)
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundColor(.primary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+                HStack(spacing: 5) {
+                    Text(titleText)
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundColor(.primary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    if let badge = surfaceBadge {
+                        Text(badge.rawValue)
+                            .font(.system(size: 8.5, weight: .medium))
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 4.5)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(Color.primary.opacity(0.06)))
+                            .fixedSize()
+                    }
+                }
                 Text(subtitleText)
                     .font(.system(size: 10))
                     .foregroundColor(.secondary)
@@ -157,6 +155,10 @@ struct SessionRow: View {
             if hovering { NSCursor.pop(); hovering = false }
         }
         .onTapGesture { sessionStore.jump(session) }
+    }
+
+    private var surfaceBadge: SessionSurfaceBadge? {
+        SessionSurfaceBadge.from(entrypoint: session.entrypoint, surface: session.surface)
     }
 
     private var titleText: String {

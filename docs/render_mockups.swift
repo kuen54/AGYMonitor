@@ -19,14 +19,15 @@ func m(_ id: String, _ name: String, _ cost: Double, _ msgs: Int,
                inputTokens: i, outputTokens: o, cacheRead: cr, cacheWrite: cw)
 }
 
-// Scaled copies of one Antigravity model mix for Today / Week / Month
+// Scaled copies of one Antigravity model mix (high-to-low tier order)
 func period(_ scale: Double) -> PeriodUsage {
     let models = [
-        m("carbon",   "Carbon",   112.4 * scale, max(1, Int(420 * scale)), Int(9_800_000 * scale), Int(540_000 * scale), Int(68_400_000 * scale)),
-        m("hydrogen", "Hydrogen",  64.8 * scale, max(1, Int(135 * scale)), Int(3_200_000 * scale), Int(310_000 * scale), Int(24_600_000 * scale)),
-        m("claude",   "Claude",    38.2 * scale, max(1, Int(118 * scale)), Int(2_100_000 * scale), Int(190_000 * scale), Int(18_500_000 * scale)),
-        m("argon",    "Argon",     14.6 * scale, max(1, Int(96 * scale)),  Int(1_950_000 * scale), Int(125_000 * scale), Int(11_200_000 * scale)),
+        m("carbon",   "Carbon",   108.6 * scale, max(1, Int(390 * scale)), Int(9_200_000 * scale), Int(510_000 * scale), Int(64_200_000 * scale)),
+        m("argon",    "Argon",     24.2 * scale, max(1, Int(112 * scale)), Int(2_250_000 * scale), Int(145_000 * scale), Int(12_800_000 * scale)),
+        m("neon",     "Neon",      31.4 * scale, max(1, Int(148 * scale)), Int(2_850_000 * scale), Int(210_000 * scale), Int(16_400_000 * scale)),
+        m("hydrogen", "Hydrogen",  56.8 * scale, max(1, Int(135 * scale)), Int(3_200_000 * scale), Int(310_000 * scale), Int(24_600_000 * scale)),
         m("flash",    "Flash",      4.2 * scale, max(1, Int(164 * scale)), Int(2_400_000 * scale), Int(140_000 * scale), Int(9_800_000 * scale)),
+        m("claude",   "Claude",    34.8 * scale, max(1, Int(118 * scale)), Int(2_100_000 * scale), Int(190_000 * scale), Int(18_500_000 * scale)),
     ]
     let cost = models.reduce(0) { $0 + $1.cost }
     let msgs = models.reduce(0) { $0 + $1.messages }
@@ -45,13 +46,14 @@ func dailyMock(year: Int, month: Int) -> [DailyUsage] {
         func tk(_ s: Double) -> (Int, Int, Int) {
             (Int(v * s * 6_500), Int(v * s * 1_200), Int(v * s * 520_000))
         }
-        let c = tk(0.48), h = tk(0.26), cl = tk(0.16), a = tk(0.07), fl = tk(0.03)
+        let c = tk(0.42), a = tk(0.09), n = tk(0.13), h = tk(0.21), fl = tk(0.03), cl = tk(0.12)
         let mm = [
-            m("carbon",   "Carbon",   v * 0.48, 0, c.0,  c.1,  c.2),
-            m("hydrogen", "Hydrogen", v * 0.26, 0, h.0,  h.1,  h.2),
-            m("claude",   "Claude",   v * 0.16, 0, cl.0, cl.1, cl.2),
-            m("argon",    "Argon",    v * 0.07, 0, a.0,  a.1,  a.2),
+            m("carbon",   "Carbon",   v * 0.42, 0, c.0,  c.1,  c.2),
+            m("argon",    "Argon",    v * 0.09, 0, a.0,  a.1,  a.2),
+            m("neon",     "Neon",     v * 0.13, 0, n.0,  n.1,  n.2),
+            m("hydrogen", "Hydrogen", v * 0.21, 0, h.0,  h.1,  h.2),
             m("flash",    "Flash",    v * 0.03, 0, fl.0, fl.1, fl.2),
+            m("claude",   "Claude",   v * 0.12, 0, cl.0, cl.1, cl.2),
         ]
         let tot = mm.reduce(0) { $0 + $1.totalTokens }
         return DailyUsage(dateString: String(format: "%04d-%02d-%02d", year, month, i + 1),
@@ -78,13 +80,13 @@ func timeMock() -> (TimeData, [String: Int]) {
     let wd = cal.component(.weekday, from: today) // 1=Sun..7=Sat
     let backToMon = (wd + 5) % 7
     let monday = cal.date(byAdding: .day, value: -backToMon, to: today)!
-    let C = "carbon", H = "hydrogen", CL = "claude", A = "argon", F = "flash"
+    let C = "carbon", A = "argon", N = "neon", H = "hydrogen", F = "flash", CL = "claude"
     let patterns: [[ActiveInterval]] = [
-        [iv(9.2, 10.4, C), iv(10.8, 12.2, H), iv(14.1, 16.4, C), iv(21.0, 22.3, CL)],
-        [iv(8.9, 9.4, F), iv(9.7, 12.5, C), iv(13.6, 14.3, A), iv(15.0, 18.0, H), iv(20.4, 21.2, C)],
+        [iv(9.2, 10.4, C), iv(10.8, 12.2, N), iv(14.1, 16.4, C), iv(21.0, 22.3, CL)],
+        [iv(8.9, 9.4, F), iv(9.7, 12.5, C), iv(13.6, 14.3, A), iv(15.0, 18.0, H), iv(20.4, 21.2, N)],
         [iv(10.0, 10.6, A), iv(11.1, 13.0, C), iv(14.2, 17.6, H), iv(21.8, 23.0, CL)],
-        [iv(9.1, 9.5, F), iv(9.8, 12.1, C), iv(13.1, 13.7, A), iv(14.3, 18.8, C)],
-        [iv(8.6, 9.2, CL), iv(9.5, 11.7, H), iv(13.2, 16.9, C), iv(17.3, 17.9, F), iv(21.4, 23.2, C)],
+        [iv(9.1, 9.5, F), iv(9.8, 12.1, C), iv(13.1, 13.7, N), iv(14.3, 18.8, C)],
+        [iv(8.6, 9.2, CL), iv(9.5, 11.7, H), iv(13.2, 16.9, C), iv(17.3, 17.9, F), iv(21.4, 23.2, N)],
         [iv(10.8, 12.4, C), iv(15.2, 16.3, H)],
         [iv(19.8, 20.5, A), iv(21.0, 22.7, C)],
     ]
@@ -129,12 +131,12 @@ func timeMock() -> (TimeData, [String: Int]) {
 
 // ── synthetic live Antigravity session data ──
 func sess(_ pid: Int, _ id: String, _ cwd: String, _ status: SessionStatus,
-          waitingFor: String? = nil, agoSec: Double) -> SessionInfo {
+          waitingFor: String? = nil, agoSec: Double, entrypoint: String = "cli") -> SessionInfo {
     let now = Date().timeIntervalSince1970 * 1000
     return SessionInfo(pid: pid, sessionId: id, cwd: cwd, status: status,
                        waitingFor: waitingFor, startedAt: now - agoSec * 1000 - 7_200_000,
                        updatedAt: now - agoSec * 1000, statusUpdatedAt: now - agoSec * 1000,
-                       version: "1.5.9", kind: nil, entrypoint: "cli")
+                       version: "1.5.9", kind: nil, entrypoint: entrypoint)
 }
 
 @MainActor
@@ -143,13 +145,13 @@ func populateSessions(_ s: UsageStore) {
     let mia  = "/Users/lijiakun/Developer/mia"
     let hf   = "/Users/lijiakun/Developer/hyperframes"
     s.sessionStore.sessions = [
-        sess(6101, "a1aa0001-0000-0000-0000-000000000001", agym, .busy, agoSec: 38),
-        sess(6102, "a1aa0002-0000-0000-0000-000000000002", agym, .idle, agoSec: 5 * 60),
+        sess(6101, "a1aa0001-0000-0000-0000-000000000001", agym, .busy, agoSec: 38, entrypoint: "cli"),
+        sess(6102, "a1aa0002-0000-0000-0000-000000000002", agym, .idle, agoSec: 5 * 60, entrypoint: "antigravity-ide"),
         sess(6201, "b2bb0001-0000-0000-0000-000000000001", hf,   .waiting,
-             waitingFor: "input needed", agoSec: 2 * 60),
-        sess(6202, "b2bb0002-0000-0000-0000-000000000002", hf,   .idle, agoSec: 44 * 60),
-        sess(6301, "c3cc0001-0000-0000-0000-000000000001", mia,  .idle, agoSec: 9 * 60),
-        sess(6302, "c3cc0002-0000-0000-0000-000000000002", mia,  .idle, agoSec: 2 * 3600),
+             waitingFor: "input needed", agoSec: 2 * 60, entrypoint: "cli"),
+        sess(6202, "b2bb0002-0000-0000-0000-000000000002", hf,   .idle, agoSec: 44 * 60, entrypoint: "antigravity"),
+        sess(6301, "c3cc0001-0000-0000-0000-000000000001", mia,  .idle, agoSec: 9 * 60, entrypoint: "cli"),
+        sess(6302, "c3cc0002-0000-0000-0000-000000000002", mia,  .idle, agoSec: 2 * 3600, entrypoint: "antigravity-ide"),
     ]
     s.sessionStore.labels = [agym: "AGYMonitor", mia: "mia", hf: "hyperframes"]
     s.sessionStore.titles = [

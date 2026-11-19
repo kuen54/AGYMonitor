@@ -151,15 +151,18 @@ final class NotchInstance {
     let vm = NotchViewModel()
     let panel: NotchPanel
     let screen: NotchScreen
-    var isFullscreen = false
-    var revealArmed = false
+    var state: NotchState
     var openWork: DispatchWorkItem?
     var closeWork: DispatchWorkItem?
     var sizeObserver: AnyCancellable?
 
-    init(panel: NotchPanel, screen: NotchScreen) {
+    init(panel: NotchPanel, screen: NotchScreen, isFullscreen: Bool = false) {
         self.panel = panel
         self.screen = screen
+        self.state = NotchState(
+            phase: isFullscreen ? .hidden : .closedPill,
+            isFullscreen: isFullscreen
+        )
     }
 }
 
@@ -220,8 +223,13 @@ final class NotchController: NSObject {
     }
 
     @objc private func activeSpaceChanged() {
-        refreshFullscreenStates()
-        applyPanelState()
+        let mouse = NSEvent.mouseLocation
+        for inst in instances.values {
+            let isFS = inst.screen.screen.displayUUID
+                .map { FullscreenDetector.shared.isFullscreen(displayUUID: $0) } ?? false
+            let sample = pointerSample(for: inst, mouse: mouse)
+            dispatch(inst, event: .fullscreenChanged(isFS), pointer: sample)
+        }
     }
 
     private func rebuild() {
@@ -233,12 +241,21 @@ final class NotchController: NSObject {
             guard let id = ns.screen.displayID else { continue }
             let frame = panelFrame(for: ns)
             let panel = NotchPanel(contentRect: frame)
-            let inst = NotchInstance(panel: panel, screen: ns)
+            let isFS = ns.screen.displayUUID
+                .map { FullscreenDetector.shared.isFullscreen(displayUUID: $0) } ?? false
+            let inst = NotchInstance(panel: panel, screen: ns, isFullscreen: isFS)
             inst.vm.closedNotchSize = ns.closedNotchSize
             inst.vm.isSynthetic = ns.isSynthetic
-            inst.vm.isOpen = false
-            inst.isFullscreen = ns.screen.displayUUID
-                .map { FullscreenDetector.shared.isFullscreen(displayUUID: $0) } ?? false
+            inst.vm.isOpen = inst.state.isOpen
+            inst.vm.onAcquireModalLock = { [weak self, weak inst] lock in
+                guard let self = self, let inst = inst else { return }
+                self.dispatch(inst, event: .modalLockAcquired(lock))
+            }
+            inst.vm.onReleaseModalLock = { [weak self, weak inst] lock in
+                guard let self = self, let inst = inst else { return }
+                let sample = self.pointerSample(for: inst)
+                self.dispatch(inst, event: .modalLockReleased(lock, pointer: sample), pointer: sample)
+            }
 
             let host = FirstMouseHostingView(rootView: NotchRootView(store: store, sessionStore: store.sessionStore, vm: inst.vm, onQuit: onQuit))
             host.translatesAutoresizingMaskIntoConstraints = true
@@ -281,16 +298,7 @@ final class NotchController: NSObject {
         return NSRect(x: f.midX - w / 2, y: f.maxY - h, width: w, height: h)
     }
 
-    // MARK: Fullscreen state
-
-    private func refreshFullscreenStates() {
-        for inst in instances.values {
-            let wasFullscreen = inst.isFullscreen
-            inst.isFullscreen = inst.screen.screen.displayUUID
-                .map { FullscreenDetector.shared.isFullscreen(displayUUID: $0) } ?? false
-            if inst.isFullscreen != wasFullscreen { inst.revealArmed = false }
-        }
-    }
+    // MARK: State-machine dispatch (backed by Core_NotchState.NotchMachine)
 
     private func revealRect(_ ns: NotchScreen) -> NSRect {
         let f = ns.screen.frame
@@ -306,48 +314,62 @@ final class NotchController: NSObject {
     /// Mouse hit-test counting a rect's TOP edge as inside (`minY < y <= maxY`).
     private func hit(_ p: NSPoint, _ r: NSRect) -> Bool { NSMouseInRect(p, r, false) }
 
-    private func updateRevealArm(_ inst: NotchInstance, mouse: NSPoint, onThisScreen: Bool) {
-        guard inst.isFullscreen else { inst.revealArmed = false; return }
-        if hit(mouse, edgeRect(inst.screen)) {
-            inst.revealArmed = true
-        } else if onThisScreen, !inst.vm.isOpen, !hit(mouse, revealRect(inst.screen)) {
-            inst.revealArmed = false
+    private func pointerSample(for inst: NotchInstance,
+                               mouse: NSPoint = NSEvent.mouseLocation) -> NotchPointerSample {
+        let onScreen = hit(mouse, inst.screen.screen.frame)
+        return NotchPointerSample(
+            onScreen: onScreen,
+            inHoverBand: onScreen && hit(mouse, hoverRect(inst.screen)),
+            inContentRect: onScreen && hit(mouse, contentRect(inst)),
+            inRevealEdge: onScreen && hit(mouse, edgeRect(inst.screen)),
+            inRevealBand: onScreen && hit(mouse, revealRect(inst.screen))
+        )
+    }
+
+    private func dispatch(_ inst: NotchInstance, event: NotchEvent,
+                          pointer: NotchPointerSample? = nil) {
+        let effects = NotchMachine.reduce(&inst.state, event: event)
+        if inst.vm.isOpen != inst.state.isOpen {
+            inst.vm.isOpen = inst.state.isOpen
+        }
+        let sample = pointer ?? pointerSample(for: inst)
+        for effect in effects {
+            switch effect {
+            case .scheduleOpenDwell:
+                scheduleOpen(inst)
+            case .cancelOpenDwell:
+                cancelOpen(inst)
+            case .scheduleCloseGrace:
+                scheduleClose(inst)
+            case .cancelCloseGrace:
+                cancelClose(inst)
+            case .setInteractive(let interactive):
+                inst.panel.isInteractive = interactive
+            case .resignKeyIfNeeded:
+                if inst.panel.isKeyWindow { inst.panel.resignKey() }
+            case .syncSessionMonitor:
+                syncSessionMonitorActive()
+            case .refreshUsage:
+                store.refresh()
+            case .applyPanelPresentation:
+                applyPresentation(inst, pointer: sample)
+            }
         }
     }
 
-    private func hoverCanOpen(_ inst: NotchInstance) -> Bool {
-        !inst.isFullscreen || inst.revealArmed
-    }
-
-    // MARK: Open / close (controller is the single authority)
-
-    private func open(_ inst: NotchInstance) {
-        guard !inst.vm.isOpen else { return }
-        inst.vm.isOpen = true
-        inst.panel.isInteractive = true
-        applyPanelState()
-        syncSessionMonitorActive()
-        store.refresh()
-    }
-
-    private func close(_ inst: NotchInstance) {
-        guard inst.vm.isOpen, !inst.vm.preventClose else { return }
-        inst.vm.isOpen = false
-        inst.panel.isInteractive = false
-        if inst.panel.isKeyWindow { inst.panel.resignKey() }
-        applyPanelState()
-        syncSessionMonitorActive()
-    }
-
     private func syncSessionMonitorActive() {
-        store.setSessionMonitorActive(instances.values.contains { $0.vm.isOpen })
+        store.setSessionMonitorActive(instances.values.contains { $0.state.isOpen })
     }
 
-    func reveal() { if let inst = primaryInstance() { open(inst) } }
+    func reveal() {
+        if let inst = primaryInstance() {
+            dispatch(inst, event: .explicitReveal)
+        }
+    }
 
     func toggle() {
         guard let inst = primaryInstance() else { return }
-        inst.vm.isOpen ? close(inst) : open(inst)
+        dispatch(inst, event: .explicitToggle)
     }
 
     private func primaryInstance() -> NotchInstance? {
@@ -377,23 +399,9 @@ final class NotchController: NSObject {
     private func handleMouseMoved() {
         let mouse = NSEvent.mouseLocation
         for inst in instances.values {
-            let onThisScreen = hit(mouse, inst.screen.screen.frame)
-            updateRevealArm(inst, mouse: mouse, onThisScreen: onThisScreen)
-            if inst.vm.isOpen {
-                if !onThisScreen || !hit(mouse, contentRect(inst)) {
-                    scheduleClose(inst)
-                } else {
-                    cancelClose(inst)
-                }
-            } else {
-                if onThisScreen && hit(mouse, hoverRect(inst.screen)) && hoverCanOpen(inst) {
-                    scheduleOpen(inst)
-                } else {
-                    cancelOpen(inst)
-                }
-            }
+            let sample = pointerSample(for: inst, mouse: mouse)
+            dispatch(inst, event: .pointerMoved(sample), pointer: sample)
         }
-        applyPanelState()
     }
 
     private func scheduleOpen(_ inst: NotchInstance) {
@@ -401,12 +409,8 @@ final class NotchController: NSObject {
         let work = DispatchWorkItem { [weak self, weak inst] in
             guard let self = self, let inst = inst else { return }
             inst.openWork = nil
-            let mouse = NSEvent.mouseLocation
-            if self.hit(mouse, inst.screen.screen.frame),
-               self.hit(mouse, self.hoverRect(inst.screen)),
-               self.hoverCanOpen(inst) {
-                self.open(inst)
-            }
+            let sample = self.pointerSample(for: inst)
+            self.dispatch(inst, event: .openDwellFired(sample), pointer: sample)
         }
         inst.openWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + NotchTiming.openDwell, execute: work)
@@ -419,9 +423,8 @@ final class NotchController: NSObject {
         let work = DispatchWorkItem { [weak self, weak inst] in
             guard let self = self, let inst = inst else { return }
             inst.closeWork = nil
-            if !self.hit(NSEvent.mouseLocation, self.contentRect(inst)) {
-                self.close(inst)
-            }
+            let sample = self.pointerSample(for: inst)
+            self.dispatch(inst, event: .closeGraceFired(sample), pointer: sample)
         }
         inst.closeWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + NotchTiming.closeGrace, execute: work)
@@ -449,18 +452,14 @@ final class NotchController: NSObject {
     private func applyPanelState() {
         let mouse = NSEvent.mouseLocation
         for inst in instances.values {
-            let visible = !inst.isFullscreen
-                || inst.vm.isOpen
-                || (inst.revealArmed && hit(mouse, revealRect(inst.screen)))
-            setVisible(inst, visible)
-            if !visible {
-                inst.panel.ignoresMouseEvents = true
-            } else if inst.vm.isOpen {
-                inst.panel.ignoresMouseEvents = !hit(mouse, contentRect(inst))
-            } else {
-                inst.panel.ignoresMouseEvents = !hit(mouse, hoverRect(inst.screen))
-            }
+            applyPresentation(inst, pointer: pointerSample(for: inst, mouse: mouse))
         }
+    }
+
+    private func applyPresentation(_ inst: NotchInstance, pointer: NotchPointerSample) {
+        let pres = NotchMachine.panelPresentation(for: inst.state, pointer: pointer)
+        setVisible(inst, pres.visible)
+        inst.panel.ignoresMouseEvents = pres.ignoresMouseEvents
     }
 
     private func setVisible(_ inst: NotchInstance, _ visible: Bool) {

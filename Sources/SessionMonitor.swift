@@ -56,14 +56,13 @@ struct SessionTarget: Equatable {
 struct SessionScan: Equatable {
     var sessions: [SessionInfo]
     var labels: [String: String]
-    var oldClaudeHint: Bool
     var anyDoneUnseen: Bool = false
     var doneUnseenIds: Set<String> = []
     var targets: [String: SessionTarget] = [:]
     var titles: [String: String] = [:]
     var instructions: [String: String] = [:]
 
-    static let empty = SessionScan(sessions: [], labels: [:], oldClaudeHint: false)
+    static let empty = SessionScan(sessions: [], labels: [:])
 }
 
 final class SessionMonitor {
@@ -72,6 +71,7 @@ final class SessionMonitor {
     private let geminiDir: String
     private let cliRootDir: String
     private let presenceDir: String
+    private let usesCustomProjectsDir: Bool
 
     private let queue = DispatchQueue(label: "com.kuen54.AGYMonitor.sessions", qos: .utility)
 
@@ -81,6 +81,7 @@ final class SessionMonitor {
     private var started = false
 
     private var fsHealthy = false
+    private var lastFSAttemptAt: Date?
     private var pollInterval: TimeInterval?
     private var lastLiveCount = 0
 
@@ -94,7 +95,7 @@ final class SessionMonitor {
         let mtime: TimeInterval
         let title: String?
         let instruction: String?
-        let activity: AITitleReader.TailStepActivity
+        let tailSummary: TranscriptSummary
     }
     private var transcriptCache: [String: TranscriptCacheEntry] = [:]
 
@@ -149,10 +150,15 @@ final class SessionMonitor {
         self.onChange = onChange
         let home = NSHomeDirectory()
         self.homeDir = home
-        self.geminiDir = projectsDir?.path ?? (home as NSString).appendingPathComponent(".gemini")
-        self.cliRootDir = (self.geminiDir as NSString).appendingPathComponent("antigravity-cli")
+        self.usesCustomProjectsDir = (projectsDir != nil)
+        self.geminiDir = projectsDir?.path ?? AGYLocator.geminiRoot(home: home)
+        self.cliRootDir = projectsDir != nil
+            ? (self.geminiDir as NSString).appendingPathComponent(AGYSurface.cli.rawValue)
+            : AGYLocator.surfaceRoot(home: home, surface: .cli)
         self.presenceDir = sessionsDir
-            ?? (self.cliRootDir as NSString).appendingPathComponent("presence")
+            ?? (projectsDir != nil
+                ? (self.cliRootDir as NSString).appendingPathComponent("presence")
+                : AGYLocator.presenceDir(home: home))
     }
 
     // MARK: - Lifecycle
@@ -206,14 +212,26 @@ final class SessionMonitor {
     // MARK: - FSEvents (sub-second reactivity)
 
     private func startFSWatcher() {
+        lastFSAttemptAt = Date()
         fsHealthy = false
+        if let existing = fsStream {
+            FSEventStreamStop(existing)
+            FSEventStreamInvalidate(existing)
+            FSEventStreamRelease(existing)
+            fsStream = nil
+        }
         let fm = FileManager.default
-        let candidateDirs = [
-            cliRootDir,
-            (geminiDir as NSString).appendingPathComponent("antigravity/brain"),
-            (geminiDir as NSString).appendingPathComponent("antigravity-ide/brain"),
-        ]
-        let existingDirs = candidateDirs.filter { path in
+        var candidateDirs = usesCustomProjectsDir
+            ? [
+                cliRootDir,
+                (geminiDir as NSString).appendingPathComponent("antigravity/brain"),
+                (geminiDir as NSString).appendingPathComponent("antigravity-ide/brain"),
+            ]
+            : [cliRootDir] + AGYLocator.brainDirs(home: homeDir)
+        if !candidateDirs.contains(cliRootDir) {
+            candidateDirs.insert(cliRootDir, at: 0)
+        }
+        let existingDirs = Array(Set(candidateDirs)).sorted().filter { path in
             var isDir: ObjCBool = false
             return fm.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
         }
@@ -278,21 +296,14 @@ final class SessionMonitor {
     }
 
     private func reconcilePoll() {
-        guard started else { cancelPoll(); return }
-        // Keep the lightweight backstop poll running while sessions exist (catches
-        // silent process exit / lock release) or when FSEvents couldn't attach;
-        // when 0 sessions are active and FSEvents is healthy, poll slowly (15s) or
-        // activeInterval when popover is open so newly opened Desktop/CLI sessions
-        // are always noticed promptly.
-        let desired: TimeInterval
-        if lastLiveCount > 0 {
-            desired = isActive ? activeInterval : idleInterval
-        } else if isActive {
-            desired = idleInterval
-        } else if fsHealthy {
-            desired = 15.0
-        } else {
-            desired = idleInterval
+        guard let desired = SessionPollCadence.interval(
+            started: started,
+            fsHealthy: fsHealthy,
+            isActive: isActive,
+            liveCount: lastLiveCount
+        ) else {
+            cancelPoll()
+            return
         }
         if pollInterval != desired { startPollTimer(interval: desired) }
     }
@@ -300,6 +311,12 @@ final class SessionMonitor {
     // MARK: - Main Scan Pipeline (queue only)
 
     private func rescan(now: Double = Date().timeIntervalSince1970) {
+        let nowDate = Date(timeIntervalSince1970: now)
+        if SessionPollCadence.shouldRetryFSWatcher(
+            started: started, fsHealthy: fsHealthy, now: nowDate, lastAttemptAt: lastFSAttemptAt
+        ) {
+            startFSWatcher()
+        }
         var scan = computeScan(now: now)
         let stepped = SessionLogic.stepDoneUnseen(
             prev: prevStatuses, current: scan.sessions,
@@ -482,24 +499,15 @@ final class SessionMonitor {
                 ? nil
                 : readCachedTranscript(sessionId: c.sessionId)
 
-            // Status resolution
-            let status: SessionStatus
-            var waitingFor: String? = nil
-
-            if swarmBusyCoordinators.contains(c.sessionId) {
-                status = .busy
-            } else if let tx = txEntry, tx.activity.status == .waiting,
-                      (c.meta?.notFullyIdle == true || (now - tx.activity.fileMtime) < 3600) {
-                status = .waiting
-                waitingFor = tx.activity.waitingFor ?? "input needed"
-            } else if c.meta?.notFullyIdle == true || c.meta?.rawStatus == "CASCADE_RUN_STATUS_RUNNING" {
-                status = .busy
-            } else if let tx = txEntry, tx.activity.status == .busy,
-                      (now - tx.activity.fileMtime) < 180 {
-                status = .busy
-            } else {
-                status = .idle
-            }
+            // Canonical status resolution shared with AITitleReader
+            let (status, waitingFor) = SessionLogic.resolveLiveSessionStatus(
+                swarmWorkerBusy: swarmBusyCoordinators.contains(c.sessionId),
+                rawStatus: c.meta?.rawStatus,
+                notFullyIdle: c.meta?.notFullyIdle ?? false,
+                transcriptSummary: txEntry?.tailSummary,
+                transcriptFileMtime: txEntry?.mtime,
+                now: now
+            )
 
             // Title priority: annotation .pbtxt > summary Title (unless generic w/ swarm title) > swarm title > transcript title
             let annTitle = c.sessionId.hasPrefix("proc-") ? nil : cachedAnnotationTitle(sessionId: c.sessionId)
@@ -531,8 +539,11 @@ final class SessionMonitor {
             }
 
             // Timestamp (ms): reject 0001-01-01 sentinels
-            let txMs = txEntry?.activity.createdAtMs
-                ?? txEntry.map { $0.activity.fileMtime > 946_684_800 ? $0.activity.fileMtime * 1000.0 : 0 }
+            let txMs = txEntry?.tailSummary.lastStepAt.flatMap { d -> Double? in
+                let sec = d.timeIntervalSince1970
+                return sec > 946_684_800 ? sec * 1000.0 : nil
+            }
+                ?? txEntry.map { $0.mtime > 946_684_800 ? $0.mtime * 1000.0 : 0 }
                 ?? 0
             let bestUpdatedMs = max(c.meta?.updatedAtMs ?? 0, txMs)
             let validUpdatedMs: Double? = bestUpdatedMs > 946_684_800_000 ? bestUpdatedMs : nil
@@ -548,7 +559,8 @@ final class SessionMonitor {
                 statusUpdatedAt: validUpdatedMs,
                 version: nil,
                 kind: "interactive",
-                entrypoint: c.surface == "antigravity-cli" ? "cli" : c.surface
+                entrypoint: c.surface == AGYSurface.cli.rawValue ? "cli" : c.surface,
+                surface: c.surface
             ))
         }
 
@@ -573,7 +585,6 @@ final class SessionMonitor {
         return SessionScan(
             sessions: ordered,
             labels: labels,
-            oldClaudeHint: false,
             targets: targets,
             titles: titles,
             instructions: instructions
@@ -613,44 +624,32 @@ final class SessionMonitor {
         return r == 0 || (r == -1 && errno == EPERM)
     }
 
-    /// Single `lsof -n -P -F pfn -p <pids>` call returning each `agy` PID's `cwd`
-    /// and open `presence/<conv-id>.lock` UUIDs.
+    /// Batched `lsof -n -P -F pcfn -p <pids>` parsed via `SessionLogic.parseLsofPresence`,
+    /// supplemented by `SessionLogic.parseLsofCwds` for brand-new lockless processes.
     private func inspectCLIProcesses(pids: [Int]) -> [Int: CLILockFact] {
         guard !pids.isEmpty else { return [:] }
         let arg = pids.map(String.init).joined(separator: ",")
-        guard let out = runProcess("/usr/sbin/lsof", ["-n", "-P", "-F", "pfn", "-p", arg]) else {
+        guard let out = runProcess("/usr/sbin/lsof", ["-n", "-P", "-F", "pcfn", "-p", arg]) else {
             return [:]
         }
 
-        var currentPid: Int? = nil
-        var currentFd: String = ""
+        let parsedLocks = SessionLogic.parseLsofPresence(out)
         var cwds: [Int: String] = [:]
         var locks: [Int: [String]] = [:]
+        for item in parsedLocks {
+            if let cwd = item.cwd, !cwd.isEmpty {
+                cwds[item.pid] = cwd
+            }
+            locks[item.pid, default: []].append(item.conversationId)
+        }
 
-        for rawLine in out.split(separator: "\n") {
-            guard let prefix = rawLine.first else { continue }
-            let val = String(rawLine.dropFirst())
-            switch prefix {
-            case "p":
-                currentPid = Int(val)
-                currentFd = ""
-            case "f":
-                currentFd = val
-            case "n":
-                guard let pid = currentPid else { continue }
-                if currentFd == "cwd" {
-                    cwds[pid] = val
-                } else if val.hasSuffix(".lock"), val.contains("/presence/") {
-                    let file = (val as NSString).lastPathComponent
-                    let convId = String(file.dropLast(".lock".count))
-                    if !convId.isEmpty {
-                        if !(locks[pid]?.contains(convId) ?? false) {
-                            locks[pid, default: []].append(convId)
-                        }
-                    }
+        let locklessPids = pids.filter { locks[$0] == nil }
+        if !locklessPids.isEmpty {
+            let locklessArg = locklessPids.map(String.init).joined(separator: ",")
+            if let cwdOut = runProcess("/usr/sbin/lsof", ["-a", "-p", locklessArg, "-d", "cwd", "-Fpn"]) {
+                for (pid, cwd) in SessionLogic.parseLsofCwds(cwdOut) {
+                    cwds[pid] = cwd
                 }
-            default:
-                break
             }
         }
 
@@ -691,7 +690,9 @@ final class SessionMonitor {
 
     private func loadJSONMetadataCached() -> [String: ConvMeta] {
         let fm = FileManager.default
-        let path = (cliRootDir as NSString).appendingPathComponent("cache/conversation_metadata.json")
+        let path = usesCustomProjectsDir
+            ? (cliRootDir as NSString).appendingPathComponent("cache/conversation_metadata.json")
+            : AGYLocator.conversationMetadataJSONPath(home: homeDir)
         guard fm.fileExists(atPath: path),
               let attrs = try? fm.attributesOfItem(atPath: path),
               let mtime = attrs[.modificationDate] as? Date,
@@ -702,38 +703,26 @@ final class SessionMonitor {
         if stamp == cachedJSONStamp { return cachedJSONRows }
 
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let convs = root["conversations"] as? [String: [String: Any]] else {
+              (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) != nil else {
             return cachedJSONRows
         }
+        let parsed = SessionLogic.parseConversationMetadataJSON(data)
 
         var out: [String: ConvMeta] = [:]
-        for (convId, entry) in convs {
-            let outerInternal = (entry["is_internal"] as? Bool) ?? false
-            let outerModMs = AITitleReader.parseValidEpochMs(entry["last_modified_time"] as? String)
-            let summary = entry["summary"] as? [String: Any]
-            let innerInternal = (summary?["Internal"] as? Bool) ?? false
-            let title = (summary?["Title"] as? String) ?? ""
-            let preview = (summary?["Preview"] as? String) ?? ""
-            let numSteps = (summary?["NumSteps"] as? Int) ?? 0
-            let updatedAtMs = AITitleReader.parseValidEpochMs(summary?["UpdatedAt"] as? String) ?? outerModMs
-            let uris = (summary?["WorkspaceURIs"] as? [String]) ?? []
-            let cwd = Self.firstWorkspacePath(from: uris)
-            let appDataDir = (summary?["AppDataDir"] as? String) ?? "antigravity-cli"
-
+        for (convId, agy) in parsed {
             out[convId] = ConvMeta(
-                id: convId,
-                title: title,
-                preview: preview,
-                stepCount: numSteps,
-                updatedAtMs: updatedAtMs,
-                cwd: cwd,
-                rawStatus: "",
-                notFullyIdle: false,
-                killed: false,
-                isInternal: outerInternal || innerInternal,
-                parentConversationId: "",
-                appDataDir: appDataDir.isEmpty ? "antigravity-cli" : appDataDir
+                id: agy.conversationId,
+                title: agy.title ?? "",
+                preview: agy.preview ?? "",
+                stepCount: agy.stepCount,
+                updatedAtMs: agy.effectiveUpdatedAtMs,
+                cwd: agy.primaryWorkspace ?? "",
+                rawStatus: agy.status ?? "",
+                notFullyIdle: agy.notFullyIdle,
+                killed: agy.isKilled,
+                isInternal: SessionLogic.isSubagentOrInternal(agy),
+                parentConversationId: agy.parentConversationId ?? "",
+                appDataDir: agy.appDataDir ?? AGYSurface.cli.rawValue
             )
         }
         cachedJSONStamp = stamp
@@ -743,7 +732,9 @@ final class SessionMonitor {
 
     private func loadSQLiteSummariesCached() -> [String: ConvMeta] {
         let fm = FileManager.default
-        let dbPath = (cliRootDir as NSString).appendingPathComponent("conversation_summaries.db")
+        let dbPath = usesCustomProjectsDir
+            ? (cliRootDir as NSString).appendingPathComponent("conversation_summaries.db")
+            : AGYLocator.conversationSummariesDBPath(home: homeDir)
         guard fm.fileExists(atPath: dbPath) else { return [:] }
 
         let dbAttrs = try? fm.attributesOfItem(atPath: dbPath)
@@ -835,41 +826,33 @@ final class SessionMonitor {
     /// AND after the writer exited cleanly and removed `-shm`/`-wal` (`immutable=1` fallback).
     static func openReadOnlySQLite(at path: String) -> OpaquePointer? {
         guard FileManager.default.fileExists(atPath: path) else { return nil }
-        var db: OpaquePointer? = nil
-        if sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nil) == SQLITE_OK,
-           let opened = db {
-            sqlite3_busy_timeout(opened, 200)
-            var probe: OpaquePointer? = nil
-            if sqlite3_prepare_v2(opened, "SELECT 1 FROM sqlite_master LIMIT 1", -1, &probe, nil) == SQLITE_OK {
-                sqlite3_finalize(probe)
-                return opened
-            }
-            sqlite3_finalize(probe)
-            sqlite3_close_v2(opened)
-            db = nil
-        } else if let opened = db {
-            sqlite3_close_v2(opened)
-            db = nil
-        }
-
-        let uri = URL(fileURLWithPath: path).absoluteString + "?mode=ro&immutable=1"
+        let uris = AGYLocator.sqliteReadOnlyURIs(forPath: path)
         let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_URI | SQLITE_OPEN_NOMUTEX
-        if sqlite3_open_v2(uri, &db, flags, nil) == SQLITE_OK, let opened = db {
-            return opened
+
+        for (index, uri) in uris.enumerated() {
+            var db: OpaquePointer? = nil
+            if sqlite3_open_v2(uri, &db, flags, nil) == SQLITE_OK, let opened = db {
+                if index == 0 {
+                    sqlite3_busy_timeout(opened, 200)
+                }
+                var probe: OpaquePointer? = nil
+                if sqlite3_prepare_v2(opened, "SELECT 1 FROM sqlite_master LIMIT 1", -1, &probe, nil) == SQLITE_OK {
+                    sqlite3_finalize(probe)
+                    return opened
+                }
+                sqlite3_finalize(probe)
+                sqlite3_close_v2(opened)
+            } else if let opened = db {
+                sqlite3_close_v2(opened)
+            }
         }
-        if let opened = db { sqlite3_close_v2(opened) }
         return nil
     }
 
     private static func firstWorkspacePath(from uris: [String]) -> String {
         for raw in uris {
-            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { continue }
-            if trimmed.hasPrefix("file://"), let url = URL(string: trimmed) {
-                return url.path
-            }
-            if trimmed.hasPrefix("/") {
-                return trimmed
+            if let path = SessionLogic.workspacePath(fromURI: raw) {
+                return path
             }
         }
         return ""
@@ -893,14 +876,14 @@ final class SessionMonitor {
         }
 
         let sum = AITitleReader.summary(inFileAt: p, needInstruction: true)
-        let act = AITitleReader.tailActivity(inFileAt: p)
+        let snap = AITitleReader.tailSnapshot(inFileAt: p)
         let entry = TranscriptCacheEntry(
             path: p,
             size: size,
-            mtime: mtime,
+            mtime: snap.fileMtime,
             title: sum.title,
             instruction: sum.instruction,
-            activity: act
+            tailSummary: snap.summary
         )
         transcriptCache[sessionId] = entry
         return entry
@@ -908,7 +891,7 @@ final class SessionMonitor {
 
     private func cachedAnnotationTitle(sessionId: String) -> String? {
         let fm = FileManager.default
-        let path = (cliRootDir as NSString).appendingPathComponent("annotations/\(sessionId).pbtxt")
+        let path = AGYLocator.annotationPath(home: homeDir, conversationId: sessionId)
         if fm.fileExists(atPath: path),
            let mtime = (try? fm.attributesOfItem(atPath: path)[.modificationDate] as? Date)?
                .timeIntervalSinceReferenceDate {
@@ -924,9 +907,10 @@ final class SessionMonitor {
 
     private func cachedSwarmInfo(sessionId: String) -> AITitleReader.SwarmCoordinatorInfo? {
         let fm = FileManager.default
-        let path = (cliRootDir as NSString)
-            .appendingPathComponent("brain/\(sessionId)/.system_generated/swarm/members.json")
-        guard fm.fileExists(atPath: path),
+        let candidatePaths = AGYLocator.brainDirs(home: homeDir).map {
+            AGYLocator.swarmMembersPath(brainDir: $0, conversationId: sessionId)
+        }
+        guard let path = candidatePaths.first(where: { fm.fileExists(atPath: $0) }),
               let attrs = try? fm.attributesOfItem(atPath: path),
               let size = attrs[.size] as? Int,
               let mtime = (attrs[.modificationDate] as? Date)?.timeIntervalSinceReferenceDate else {

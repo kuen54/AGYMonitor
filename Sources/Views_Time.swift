@@ -18,13 +18,13 @@ struct TimeTabView: View {
 
             switch store.timeRange {
             case .week:
-                if let data = store.viewingTimeData {
+                if let data = activeTimeData {
                     WeekTimeChart(store: store, timeData: data)
                 } else {
                     timeStateView
                 }
             case .month:
-                if let data = store.viewingTimeData {
+                if let data = activeTimeData {
                     MonthTimeChart(timeData: data,
                                    year: store.viewingYear, month: store.viewingMonth)
                 } else {
@@ -38,13 +38,37 @@ struct TimeTabView: View {
         .padding(.bottom, 6)
     }
 
+    private var activeTimeData: TimeData? {
+        if store.isCurrentMonth {
+            return store.effectiveCurrentMonthPhase.value?.time ?? store.viewingTimeData
+        }
+        return store.effectiveHistoricalMonthPhase.value?.time ?? store.viewingTimeData
+    }
+
     @ViewBuilder
     private var timeStateView: some View {
+        let isFailed = store.isCurrentMonth
+            ? store.effectiveCurrentMonthPhase.hasFailedWithoutValue
+            : store.effectiveHistoricalMonthPhase.hasFailedWithoutValue
+        let isLoadingScope = store.isCurrentMonth
+            ? store.effectiveCurrentMonthPhase.isLoading
+            : store.effectiveHistoricalMonthPhase.isLoading
         VStack(spacing: 8) {
-            if store.isLoading {
+            if isLoadingScope || store.isLoading {
                 ProgressView().controlSize(.small)
                 Text(loc("loading"))
                     .font(.system(size: 11)).foregroundColor(.secondary)
+            } else if isFailed {
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.system(size: 20)).foregroundColor(.orange)
+                Text(loc("loadFailed"))
+                    .font(.system(size: 11)).foregroundColor(.secondary)
+                Button(loc("retry")) {
+                    store.refresh(force: true)
+                }
+                .buttonStyle(.borderless)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(.accentColor)
             } else {
                 Image(systemName: "tray")
                     .font(.system(size: 20)).foregroundColor(.secondary)
@@ -511,11 +535,31 @@ struct YearHeatmap: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             yearNav
-            if let days = store.yearTimeDays {
+            switch store.effectiveYearPhase {
+            case .loaded(let days), .loading(cached: .some(let days)), .failed(_, cached: .some(let days)):
                 hoverStrip(days)
                 grid(days)
                 legend
-            } else {
+            case .empty:
+                hoverStrip([:])
+                grid([:])
+                legend
+            case .failed(_, cached: nil):
+                VStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.system(size: 18)).foregroundColor(.orange)
+                    Text(loc("loadFailed"))
+                        .font(.system(size: 11)).foregroundColor(.secondary)
+                    Button(loc("retry")) {
+                        store.loadYearTime(store.viewingTimeYear, force: true)
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.accentColor)
+                }
+                .frame(maxWidth: .infinity)
+                .frame(height: 90)
+            case .idle, .loading(cached: nil):
                 VStack(spacing: 8) {
                     ProgressView().controlSize(.small)
                     Text(loc("timeLoadingYear"))

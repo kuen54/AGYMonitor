@@ -2,19 +2,16 @@ import Foundation
 import SQLite3
 
 /// App version, single-sourced from Info.plist (CFBundleShortVersionString).
-fileprivate let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.4"
+fileprivate let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.1.0"
 
-/// UI-facing subset of QuotaFetchResult.
-enum QuotaError: Equatable {
-    case unauthorized
-    case rateLimited
-    case networkFailure
-    case decodeFailure
-}
+/// UI-facing subset of QuotaFetchResult (shared with AGYCore `CoreQuotaError`).
+typealias QuotaError = CoreQuotaError
 
-/// Result type distinguishing "no Antigravity account/install" from fetch errors.
+/// Result type distinguishing "no Antigravity account/install", offline cached
+/// fallbacks carrying a degraded notice, and terminal fetch errors.
 enum QuotaFetchResult {
     case success(OAuthUsage)
+    case fallbackWithNotice(OAuthUsage, error: CoreQuotaError, retryAt: Date?)
     case noToken
     case unauthorized
     case rateLimited
@@ -28,12 +25,8 @@ private enum AGYStateStore {
 
     static func candidateStateDBPaths(home: String = NSHomeDirectory()) -> [String] {
         let fm = FileManager.default
-        let paths = [
-            (home as NSString).appendingPathComponent("Library/Application Support/Antigravity/User/globalStorage/state.vscdb"),
-            (home as NSString).appendingPathComponent("Library/Application Support/Antigravity IDE/User/globalStorage/state.vscdb"),
-        ]
         // Prefer most recently modified existing database first
-        return paths
+        return AGYLocator.candidateStateVSCDBPaths(home: home)
             .filter { fm.fileExists(atPath: $0) }
             .sorted { a, b in
                 let ma = (try? fm.attributesOfItem(atPath: a)[.modificationDate] as? Date) ?? .distantPast
@@ -43,13 +36,10 @@ private enum AGYStateStore {
     }
 
     static func candidateAGYBinaryPaths(home: String = NSHomeDirectory()) -> [String] {
-        return [
-            (home as NSString).appendingPathComponent(".local/bin/agy"),
-            "/opt/homebrew/bin/agy",
-            "/usr/local/bin/agy",
-            "/Applications/Antigravity IDE.app/Contents/Resources/app/extensions/agy/bin/agy",
-            "/Applications/Antigravity.app/Contents/Resources/app/bin/agy",
-        ]
+        AGYLocator.candidateAGYBinaryPaths(
+            home: home,
+            envPath: ProcessInfo.processInfo.environment["PATH"]
+        )
     }
 
     static func resolveAGYBinary(home: String = NSHomeDirectory()) -> String? {
@@ -67,12 +57,12 @@ private enum AGYStateStore {
             return true
         }
         let fm = FileManager.default
-        let cliLogDir = (home as NSString).appendingPathComponent(".gemini/antigravity-cli/log")
+        let cliLogDir = AGYLocator.cliLogDir(home: home)
         if let files = try? fm.contentsOfDirectory(atPath: cliLogDir),
            files.contains(where: { $0.hasPrefix("cli-") && $0.hasSuffix(".log") }) {
             return true
         }
-        let summariesDB = (home as NSString).appendingPathComponent(".gemini/antigravity-cli/conversation_summaries.db")
+        let summariesDB = AGYLocator.conversationSummariesDBPath(home: home)
         if fm.fileExists(atPath: summariesDB) {
             return true
         }
@@ -98,8 +88,8 @@ private enum AGYStateStore {
             let sql = """
                 SELECT key, value FROM ItemTable
                 WHERE key IN (
-                    'antigravityUnifiedStateSync.userStatus',
-                    'antigravityUnifiedStateSync.modelCredits',
+                    '\(AGYLocator.userStatusStateKey)',
+                    '\(AGYLocator.modelCreditsStateKey)',
                     'antigravityAuthStatus'
                 )
                 """
@@ -130,14 +120,14 @@ private enum AGYStateStore {
                 guard !trimmed.isEmpty else { continue }
 
                 switch key {
-                case "antigravityUnifiedStateSync.userStatus":
+                case AGYLocator.userStatusStateKey:
                     if let decoded = AGYQuotaParser.parseUserStatusValue(trimmed) {
                         if bestStatus == nil
                             || (bestStatus?.buckets.isEmpty == true && !decoded.buckets.isEmpty) {
                             bestStatus = decoded
                         }
                     }
-                case "antigravityUnifiedStateSync.modelCredits":
+                case AGYLocator.modelCreditsStateKey:
                     if bestCredits == nil, let credits = AGYQuotaParser.parseModelCreditsValue(trimmed) {
                         bestCredits = credits
                     }
@@ -161,7 +151,7 @@ private enum AGYStateStore {
     /// Extract account email & tier from recent `~/.gemini/antigravity-cli/log/cli-*.log` files.
     static func readCLILogAccountInfo(home: String = NSHomeDirectory()) -> (email: String?, tier: String?) {
         let fm = FileManager.default
-        let logDir = (home as NSString).appendingPathComponent(".gemini/antigravity-cli/log")
+        let logDir = AGYLocator.cliLogDir(home: home)
         guard let names = try? fm.contentsOfDirectory(atPath: logDir) else { return (nil, nil) }
 
         let logFiles = names
@@ -346,7 +336,7 @@ final class SubscriptionQuotaService {
 
     private let ttl: TimeInterval = 60
     private var cached: (quota: OAuthUsage, at: Date)?
-    private var rateLimitedUntil: Date?
+    private var cooldown = QuotaCooldownState()
     private let lock = NSLock()
 
     private let workQueue = DispatchQueue(label: "com.kuen54.AGYMonitor.quota.work", qos: .utility)
@@ -401,23 +391,29 @@ final class SubscriptionQuotaService {
 
     var rateLimitCooldownUntil: Date? {
         lock.lock(); defer { lock.unlock() }
-        guard let until = rateLimitedUntil, until > Date() else { return nil }
-        return until
+        return cooldown.activeDeadline()
     }
 
     func fetch(forceRefresh: Bool = false, completion: @escaping (QuotaFetchResult) -> Void) {
         workQueue.async { [weak self] in
             guard let self = self else { return }
             self.lock.lock()
-            if !forceRefresh, let c = self.cached, Date().timeIntervalSince(c.at) < self.ttl {
-                let q = c.quota
+            let now = Date()
+            let cachedTuple = self.cached
+            if !forceRefresh, let c = cachedTuple, now.timeIntervalSince(c.at) < self.ttl {
                 self.lock.unlock()
-                DispatchQueue.main.async { completion(.success(q)) }
+                DispatchQueue.main.async { completion(.success(c.quota)) }
                 return
             }
-            if let until = self.rateLimitedUntil, Date() < until {
+            if let until = self.cooldown.activeDeadline(at: now) {
                 self.lock.unlock()
-                DispatchQueue.main.async { completion(.rateLimited) }
+                if let c = cachedTuple {
+                    DispatchQueue.main.async {
+                        completion(.fallbackWithNotice(c.quota, error: .rateLimited, retryAt: until))
+                    }
+                } else {
+                    DispatchQueue.main.async { completion(.rateLimited) }
+                }
                 return
             }
             self.lock.unlock()
@@ -474,32 +470,12 @@ final class SubscriptionQuotaService {
                             isOfflineCached: false,
                             now: now
                         )
-                        self.storeSuccess(snapshot)
+                        self.storeLiveSuccess(snapshot)
                         completion(.success(snapshot))
-                        return
                     case .rateLimited(let deadline):
                         self.lock.lock()
-                        self.rateLimitedUntil = deadline
+                        self.cooldown.recordRateLimit(until: deadline)
                         self.lock.unlock()
-                        // If we have valid local state, still populate initial snapshot if nil
-                        if let fallback = Self.buildOfflineSnapshotIfAvailable(
-                            desktop: desktop,
-                            email: mergedEmail,
-                            rawTier: mergedRawTier,
-                            promptCredits: promptCredits,
-                            flowCredits: flowCredits,
-                            flexCredits: flexCredits,
-                            allowCLIProbe: forceRefresh,
-                            now: now
-                        ) {
-                            self.storeSuccess(fallback)
-                            completion(.success(fallback))
-                        } else {
-                            completion(.rateLimited)
-                        }
-                        return
-                    case .unavailable:
-                        // Fall through seamlessly to offline Desktop `state.vscdb` + CLI state!
                         self.completeWithLocalFallback(
                             desktop: desktop,
                             email: mergedEmail,
@@ -508,6 +484,50 @@ final class SubscriptionQuotaService {
                             flowCredits: flowCredits,
                             flexCredits: flexCredits,
                             allowCLIProbe: forceRefresh,
+                            liveError: .rateLimited,
+                            retryAt: deadline,
+                            now: now,
+                            completion: completion
+                        )
+                    case .unauthorized:
+                        self.completeWithLocalFallback(
+                            desktop: desktop,
+                            email: mergedEmail,
+                            rawTier: mergedRawTier,
+                            promptCredits: promptCredits,
+                            flowCredits: flowCredits,
+                            flexCredits: flexCredits,
+                            allowCLIProbe: false,
+                            liveError: .unauthorized,
+                            retryAt: nil,
+                            now: now,
+                            completion: completion
+                        )
+                    case .decodeFailure:
+                        self.completeWithLocalFallback(
+                            desktop: desktop,
+                            email: mergedEmail,
+                            rawTier: mergedRawTier,
+                            promptCredits: promptCredits,
+                            flowCredits: flowCredits,
+                            flexCredits: flexCredits,
+                            allowCLIProbe: forceRefresh,
+                            liveError: .decodeFailure,
+                            retryAt: nil,
+                            now: now,
+                            completion: completion
+                        )
+                    case .networkFailure:
+                        self.completeWithLocalFallback(
+                            desktop: desktop,
+                            email: mergedEmail,
+                            rawTier: mergedRawTier,
+                            promptCredits: promptCredits,
+                            flowCredits: flowCredits,
+                            flexCredits: flexCredits,
+                            allowCLIProbe: forceRefresh,
+                            liveError: .networkFailure,
+                            retryAt: nil,
                             now: now,
                             completion: completion
                         )
@@ -526,6 +546,8 @@ final class SubscriptionQuotaService {
             flowCredits: flowCredits,
             flexCredits: flexCredits,
             allowCLIProbe: forceRefresh || desktop.userStatus == nil,
+            liveError: nil,
+            retryAt: nil,
             now: now,
             completion: completion
         )
@@ -539,6 +561,8 @@ final class SubscriptionQuotaService {
         flowCredits: Int?,
         flexCredits: Int?,
         allowCLIProbe: Bool,
+        liveError: CoreQuotaError?,
+        retryAt: Date?,
         now: Date,
         completion: @escaping (QuotaFetchResult) -> Void
     ) {
@@ -552,24 +576,49 @@ final class SubscriptionQuotaService {
             allowCLIProbe: allowCLIProbe,
             now: now
         ) {
-            storeSuccess(snapshot)
-            completion(.success(snapshot))
-        } else {
+            storeOfflineFallback(snapshot)
+            if let liveError = liveError {
+                completion(.fallbackWithNotice(snapshot, error: liveError, retryAt: retryAt))
+            } else {
+                completion(.success(snapshot))
+            }
+            return
+        }
+
+        switch liveError {
+        case .unauthorized:
+            completion(.unauthorized)
+        case .rateLimited:
+            completion(.rateLimited)
+        case .decodeFailure:
+            completion(.decodeFailure)
+        case .networkFailure:
+            completion(.networkFailure)
+        case nil:
             completion(.noToken)
         }
     }
 
-    private func storeSuccess(_ quota: OAuthUsage) {
+    private func storeLiveSuccess(_ quota: OAuthUsage) {
         lock.lock()
         cached = (quota, Date())
-        rateLimitedUntil = nil
+        cooldown.recordLiveSuccess()
+        lock.unlock()
+    }
+
+    private func storeOfflineFallback(_ quota: OAuthUsage) {
+        lock.lock()
+        cached = (quota, Date())
+        cooldown.recordOfflineFallback()
         lock.unlock()
     }
 
     private enum LivePAOutcome {
         case live(buckets: [AGYModelQuotaBucket], tier: String?)
         case rateLimited(Date)
-        case unavailable
+        case unauthorized
+        case networkFailure
+        case decodeFailure
     }
 
     private func fetchLiveCloudCodeQuota(
@@ -583,10 +632,14 @@ final class SubscriptionQuotaService {
             ]
         ]
         postJSON(url: loadCodeAssistURL, bearerToken: bearerToken, bodyObject: lcaBody) { [weak self] lcaData, lcaHTTP in
-            guard let self = self else { completion(.unavailable); return }
+            guard let self = self else { completion(.networkFailure); return }
             let lcaStatus = lcaHTTP?.statusCode ?? -1
             if lcaStatus == 429 {
                 completion(.rateLimited(Self.retryDeadline(from: lcaHTTP, default: 60)))
+                return
+            }
+            if lcaStatus == 401 || lcaStatus == 403 {
+                completion(.unauthorized)
                 return
             }
 
@@ -654,12 +707,22 @@ final class SubscriptionQuotaService {
                     quotaSummaryData: summaryData,
                     aicodeQuotaData: aicodeData
                 )
-                if !merged.isEmpty {
+                let outcome = LiveQuotaHTTPOutcome.classifyLiveHTTP(
+                    hasMergedBuckets: !merged.isEmpty,
+                    statuses: [aicodeStatus, modelsStatus, summaryStatus],
+                    rateLimitDeadline: rateLimitDeadline
+                )
+                switch outcome {
+                case .live:
                     completion(.live(buckets: merged, tier: lcaInfo.tier))
-                } else if aicodeStatus == 429 || modelsStatus == 429 || summaryStatus == 429 {
-                    completion(.rateLimited(rateLimitDeadline ?? Date().addingTimeInterval(60)))
-                } else {
-                    completion(.unavailable)
+                case .rateLimited(let deadline):
+                    completion(.rateLimited(deadline))
+                case .unauthorized:
+                    completion(.unauthorized)
+                case .decodeFailure:
+                    completion(.decodeFailure)
+                case .networkFailure:
+                    completion(.networkFailure)
                 }
             }
         }

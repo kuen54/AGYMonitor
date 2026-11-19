@@ -57,7 +57,7 @@ Antigravity runs across multiple surfaces — the `agy` CLI in your terminal, An
   - **Week** — an Apple-Health-style timeline (`Mon–Sun × 0–24h`), each active block colored by dominant model family
   - **Month** — one timeline row per week of the month
   - **Year** — a 53×7 Monday-first GitHub-style activity heatmap
-- **Sessions** — live list of running Antigravity sessions grouped by workspace folder. Each row shows a priority status dot (**working** / **waiting for input** / **just finished, unseen** / **idle**), conversation title, and latest prompt. **Click any row to jump straight to its terminal pane/tab** (Otty, Apple Terminal, iTerm2, WezTerm, plus Ghostty/Kitty/Alacritty/Antigravity IDE app-activate). The **Antigravity icon spins smoothly while any session is working** — in the menu bar, the notch, and the popover header — and displays an amber/green attention dot until viewed
+- **Sessions** — live list of running Antigravity sessions grouped by workspace folder with surface badges (`CLI` / `Desktop` / `IDE`). Each row shows a priority status dot (**working** / **waiting for input** / **just finished, unseen** / **idle**), conversation title, and latest prompt. **Click any row to jump straight to its terminal pane/tab** (Otty, Apple Terminal, iTerm2, WezTerm, plus Ghostty/Kitty/Alacritty/Antigravity IDE app-activate). The **Antigravity icon spins smoothly while any session is working** — in the menu bar, the notch, and the popover header — and displays an amber/green attention dot until viewed
 - **Plan & AI Credits** — dedicated tab showing how much quota is **left** across Antigravity's rolling ~5-hour model buckets (**Gemini Models** and **Claude & Partner**) with live reset countdowns, alongside your **Plan Tier** and **Google One AI Credits** (`Prompt`, `Flow`, `Flex`)
 - **Today / This Week / This Month** — summary cards with token distribution by type (uncached input, output + thinking, cache read, cache write)
 - **Daily stacked bar chart** — hover any day for exact per-day cost or token details
@@ -154,10 +154,14 @@ Sources/
   NotchView.swift             ← NotchShape + compact pill ↔ expanded popover transition
   Views*.swift                ← SwiftUI popover, cards, charts, Time, Sessions, Plan & menus
   Core_*.swift                ← pure Foundation-only core (models, ModelClass, usage/date/time
-                                 math, monotonic archive, session & transcript parsers, AGYQuotaParser)
+                                 math, monotonic archive, session/transcript/quota parsers,
+                                 AGYLocator, & explicit Notch/Usage/Quota/Monitor state machines)
 Tests/
   AGYCoreTests/               ← Swift Testing unit test suites covering Core_*.swift
   test_analyze_usage.py       ← Python unit tests for the local usage scanner
+  test_model_parity.py        ← Swift <-> Python model/version parity & split-brain guard
+scripts/
+  check.sh                    ← one-shot local/CI verification (lint, tests, optional --build)
 Resources/analyze_usage.py    ← bundled Python 3.9+ Antigravity usage & active-time scanner
 docs/render_mockups.swift     ← SwiftUI ImageRenderer generator for docs/*.png screenshots
 generate_icon.swift           ← ASCII-art macOS squircle icon generator
@@ -165,7 +169,8 @@ build.sh                      ← universal swiftc build + icon + codesign + DMG
 setup_signing.sh              ← optional one-time self-signed certificate setup
 fix_swift.sh                  ← Command Line Tools SwiftBridging modulemap workaround
 .github/workflows/build.yml   ← CI: plist lint → py_compile & unittest → swift test → DMG build
-Info.plist                    ← LSUIElement=true; single source of app version (1.0.4)
+AGENTS.md                     ← developer & coding-agent architecture contract
+Info.plist                    ← LSUIElement=true; single source of app version (1.1.0)
 ```
 
 ### On pricing accuracy
