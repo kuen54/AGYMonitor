@@ -1,16 +1,593 @@
 import SwiftUI
 import AppKit
 
-// Cost / Tokens cards + the daily stacked bar chart.
+// Cost / Tokens Swiss Precision Instrument:
+// Single-plane drafting grid, precision Hero numerals, flush 3-period cursor bar,
+// interactive Canvas strata ledger, and Dot-Graticule Oscilloscope DailyChart.
 
-// ── Daily bar chart ──
+// MARK: - Usage Overview Section
+
+struct UsageOverviewSection: View {
+    @ObservedObject var store: UsageStore
+    @Environment(\.localizer) private var loc
+    @Environment(\.agyTheme) private var theme
+    @State private var focusedModelId: String? = nil
+
+    var body: some View {
+        if store.isCurrentMonth {
+            switch store.effectiveCurrentMonthPhase {
+            case .loaded(let bundle), .loading(cached: .some(let bundle)), .failed(_, cached: .some(let bundle)):
+                let scope = store.selectedPeriodScope
+                let activeUsage: PeriodUsage = {
+                    switch scope {
+                    case .today: return bundle.today
+                    case .week:  return bundle.week
+                    case .month: return bundle.month
+                    }
+                }()
+                let scopeTitle: String = {
+                    switch scope {
+                    case .today: return loc("periodTodayShort")
+                    case .week:  return loc("periodWeekShort")
+                    case .month: return loc("periodMonthShort")
+                    }
+                }()
+
+                VStack(spacing: 0) {
+                    HeroTelemetrySection(
+                        metric: store.selectedTab,
+                        scopeTitle: scopeTitle,
+                        usage: activeUsage,
+                        dailyBreakdown: bundle.dailyBreakdown,
+                        isTodayScope: scope == .today,
+                        focusedModelId: focusedModelId,
+                        showTokenTypeBar: !(store.visualMode == .instrument && store.selectedTab == .tokens)
+                    )
+
+                    HairlineRule(showCrosshairs: true)
+
+                    PeriodScopeStrip(
+                        selection: $store.selectedPeriodScope,
+                        bundle: bundle,
+                        metric: store.selectedTab
+                    )
+
+                    HairlineRule(showCrosshairs: true)
+
+                    if store.visualMode == .instrument {
+                        if store.selectedTab == .cost {
+                            BoreholeModelSection(
+                                usage: activeUsage,
+                                focusedModelId: $focusedModelId
+                            )
+
+                            if let daily = bundle.dailyBreakdown, !daily.isEmpty {
+                                HairlineRule(showCrosshairs: true)
+                                TopographicRidgeChart(
+                                    data: daily,
+                                    year: store.viewingYear,
+                                    month: store.viewingMonth,
+                                    focusedModelId: focusedModelId
+                                )
+                            }
+                        } else {
+                            FoldedTokenFlowChart(
+                                usage: activeUsage,
+                                focusedModelId: $focusedModelId
+                            )
+
+                            if let daily = bundle.dailyBreakdown, !daily.isEmpty {
+                                HairlineRule(showCrosshairs: true)
+                                TokenDensityMatrix(
+                                    data: daily,
+                                    year: store.viewingYear,
+                                    month: store.viewingMonth,
+                                    focusedModelId: focusedModelId
+                                )
+                            }
+                        }
+                    } else {
+                        ModelLedgerSection(
+                            metric: store.selectedTab,
+                            usage: activeUsage,
+                            focusedModelId: $focusedModelId
+                        )
+
+                        if let daily = bundle.dailyBreakdown, !daily.isEmpty {
+                            HairlineRule(showCrosshairs: true)
+                            DailyChart(
+                                data: daily,
+                                mode: store.selectedTab,
+                                year: store.viewingYear,
+                                month: store.viewingMonth,
+                                focusedModelId: focusedModelId
+                            )
+                        }
+                    }
+
+                    if store.selectedTab == .cost {
+                        HairlineRule(showCrosshairs: false)
+                        apiEquivFootnote
+                    }
+                }
+
+            case .loading(cached: nil), .idle:
+                TelemetrySkeleton()
+            case .empty:
+                stateBox(icon: "tray", tint: theme.inkSecondary, text: loc("noMonthData"), showRetry: false)
+            case .failed(_, cached: nil):
+                stateBox(icon: "exclamationmark.triangle", tint: theme.signalAmber, text: loc("loadFailed"), showRetry: true)
+            }
+        } else {
+            switch store.effectiveHistoricalMonthPhase {
+            case .loaded(let bundle), .loading(cached: .some(let bundle)), .failed(_, cached: .some(let bundle)):
+                VStack(spacing: 0) {
+                    HeroTelemetrySection(
+                        metric: store.selectedTab,
+                        scopeTitle: loc("periodMonthShort"),
+                        usage: bundle.month,
+                        dailyBreakdown: bundle.dailyBreakdown,
+                        isTodayScope: false,
+                        focusedModelId: focusedModelId,
+                        showTokenTypeBar: !(store.visualMode == .instrument && store.selectedTab == .tokens)
+                    )
+
+                    HairlineRule(showCrosshairs: true)
+
+                    if store.visualMode == .instrument {
+                        if store.selectedTab == .cost {
+                            BoreholeModelSection(
+                                usage: bundle.month,
+                                focusedModelId: $focusedModelId
+                            )
+
+                            if let daily = bundle.dailyBreakdown, !daily.isEmpty {
+                                HairlineRule(showCrosshairs: true)
+                                TopographicRidgeChart(
+                                    data: daily,
+                                    year: store.viewingYear,
+                                    month: store.viewingMonth,
+                                    focusedModelId: focusedModelId
+                                )
+                            }
+                        } else {
+                            FoldedTokenFlowChart(
+                                usage: bundle.month,
+                                focusedModelId: $focusedModelId
+                            )
+
+                            if let daily = bundle.dailyBreakdown, !daily.isEmpty {
+                                HairlineRule(showCrosshairs: true)
+                                TokenDensityMatrix(
+                                    data: daily,
+                                    year: store.viewingYear,
+                                    month: store.viewingMonth,
+                                    focusedModelId: focusedModelId
+                                )
+                            }
+                        }
+                    } else {
+                        ModelLedgerSection(
+                            metric: store.selectedTab,
+                            usage: bundle.month,
+                            focusedModelId: $focusedModelId
+                        )
+
+                        if let daily = bundle.dailyBreakdown, !daily.isEmpty {
+                            HairlineRule(showCrosshairs: true)
+                            DailyChart(
+                                data: daily,
+                                mode: store.selectedTab,
+                                year: store.viewingYear,
+                                month: store.viewingMonth,
+                                focusedModelId: focusedModelId
+                            )
+                        }
+                    }
+
+                    if store.selectedTab == .cost {
+                        HairlineRule(showCrosshairs: false)
+                        apiEquivFootnote
+                    }
+                }
+
+            case .loading(cached: nil), .idle:
+                TelemetrySkeleton()
+            case .empty:
+                stateBox(icon: "tray", tint: theme.inkSecondary, text: loc("noMonthData"), showRetry: false)
+            case .failed(_, cached: nil):
+                stateBox(icon: "exclamationmark.triangle", tint: theme.signalAmber, text: loc("loadFailed"), showRetry: true)
+            }
+        }
+    }
+
+    private var apiEquivFootnote: some View {
+        HStack(spacing: 5) {
+            Text("*")
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .foregroundColor(theme.accent)
+            Text(loc("costApiEquivNote"))
+                .font(.system(size: 9))
+                .foregroundColor(theme.inkMuted)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+    }
+
+    private func stateBox(icon: String, tint: Color, text: String, showRetry: Bool) -> some View {
+        VStack(spacing: 8) {
+            Image(systemName: icon)
+                .font(.system(size: 18))
+                .foregroundColor(tint)
+            Text(text)
+                .font(.system(size: 10.5, design: .monospaced))
+                .foregroundColor(theme.inkSecondary)
+            if showRetry {
+                Text(loc("retry").uppercased())
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundColor(theme.invertedInk)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(theme.invertedBg)
+                    .contentShape(Rectangle())
+                    .onTapGesture { store.refresh(force: true) }
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 130)
+    }
+}
+
+// MARK: - Hero Telemetry Section
+
+struct HeroTelemetrySection: View {
+    let metric: DisplayTab
+    let scopeTitle: String
+    let usage: PeriodUsage
+    let dailyBreakdown: [DailyUsage]?
+    let isTodayScope: Bool
+    var focusedModelId: String? = nil
+    var showTokenTypeBar: Bool = true
+
+    @Environment(\.localizer) private var loc
+    @Environment(\.agyTheme) private var theme
+
+    private var todayDelta: Double? {
+        guard metric == .cost, isTodayScope, let daily = dailyBreakdown else { return nil }
+        let todayDay = AppDate.gregorian.component(.day, from: Date())
+        return UsageTelemetryLogic.costDeltaPercent(todayCost: usage.cost, daily: daily, todayDay: todayDay)
+    }
+
+    private var cacheHitPct: Double? {
+        guard metric == .tokens else { return nil }
+        return UsageTelemetryLogic.cacheHitPercent(input: usage.totalInput, cacheRead: usage.totalCacheRead)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Text("\(metric == .cost ? loc("apiEquivTag") : loc("tokensTag")) // \(scopeTitle.uppercased())")
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .tracking(0.8)
+                    .foregroundColor(theme.inkSecondary)
+
+                Spacer(minLength: 4)
+
+                if let delta = todayDelta {
+                    let signed = formatSignedPercent(delta)
+                    Text(String(format: loc("vs7dAvgFmt"), signed).uppercased())
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundColor(delta > 0 ? theme.accent : theme.signalGreen)
+                } else if let hit = cacheHitPct {
+                    Text(String(format: loc("cacheHitFmt"), Int(hit.rounded())))
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundColor(theme.accent)
+                }
+            }
+
+            HStack(alignment: .firstTextBaseline) {
+                if metric == .cost {
+                    let parts = splitCurrencyParts(usage.cost)
+                    PrecisionHeroNumber(prefix: parts.prefix, whole: parts.whole, fraction: parts.frac, size: 34)
+                } else {
+                    let parts = splitTokenParts(usage.totalTokens)
+                    PrecisionHeroNumber(whole: parts.number, suffix: parts.unit, size: 34)
+                }
+
+                Spacer(minLength: 8)
+
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text("\(formatNumber(usage.totalMessages)) MSG")
+                        .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                        .foregroundColor(theme.inkSecondary)
+                    Text(metric == .cost
+                         ? formatTokensShort(usage.totalTokens).uppercased() + " TOK"
+                         : formatCostTabular(usage.cost))
+                        .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                        .foregroundColor(theme.inkPrimary)
+                }
+            }
+
+            if metric == .cost {
+                if !usage.models.isEmpty {
+                    let segs = usage.models.map { m in
+                        StrataSegment(
+                            id: m.id,
+                            color: theme.modelColor(m.modelClass),
+                            pattern: theme.modelPattern(m.modelClass),
+                            fraction: usage.cost > 0 ? m.cost / usage.cost : 0
+                        )
+                    }
+                    StrataBarView(segments: segs, focusedId: focusedModelId, height: 5)
+                }
+            } else if showTokenTypeBar, usage.totalTokens > 0 {
+                TokenTypeBar(usage: usage, focusedModelId: focusedModelId)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 11)
+    }
+}
+
+// MARK: - Flush 3-Column Period Switcher
+
+struct PeriodScopeStrip: View {
+    @Binding var selection: UsagePeriodScope
+    let bundle: CurrentMonthBundle
+    let metric: DisplayTab
+
+    @Environment(\.localizer) private var loc
+    @Environment(\.agyTheme) private var theme
+    @State private var hovered: UsagePeriodScope? = nil
+
+    private var cells: [(scope: UsagePeriodScope, title: String, value: String)] {
+        [
+            (.today, loc("periodTodayShort"), metric == .cost ? formatCost(bundle.today.cost) : formatTokensShort(bundle.today.totalTokens).uppercased()),
+            (.week,  loc("periodWeekShort"),  metric == .cost ? formatCost(bundle.week.cost)  : formatTokensShort(bundle.week.totalTokens).uppercased()),
+            (.month, loc("periodMonthShort"), metric == .cost ? formatCost(bundle.month.cost) : formatTokensShort(bundle.month.totalTokens).uppercased()),
+        ]
+    }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(Array(cells.enumerated()), id: \.element.scope) { idx, item in
+                let selected = (item.scope == selection)
+                let isHovered = (item.scope == hovered)
+                VStack(alignment: .leading, spacing: 1.5) {
+                    Text(selected ? "▸ \(item.title.uppercased())" : item.title.uppercased())
+                        .font(.system(size: 8.5, weight: selected ? .bold : .medium, design: .monospaced))
+                        .foregroundColor(selected ? theme.invertedInk.opacity(0.75) : theme.inkMuted)
+                    Text(item.value)
+                        .font(.system(size: 12.5, weight: selected ? .bold : .semibold, design: .monospaced))
+                        .monospacedDigit()
+                        .foregroundColor(selected ? theme.invertedInk : theme.inkPrimary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(selected ? theme.invertedBg : (isHovered ? theme.surfaceRaised.opacity(0.65) : Color.clear))
+                .contentShape(Rectangle())
+                .onHover { inside in hovered = inside ? item.scope : (hovered == item.scope ? nil : hovered) }
+                .onTapGesture {
+                    withAnimation(.easeInOut(duration: 0.14)) {
+                        selection = item.scope
+                    }
+                }
+
+                if idx < cells.count - 1 {
+                    Rectangle().fill(theme.hairline).frame(width: 1)
+                }
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+// MARK: - Monospace Interactive Model Breakdown Ledger
+
+struct ModelLedgerSection: View {
+    let metric: DisplayTab
+    let usage: PeriodUsage
+    @Binding var focusedModelId: String?
+
+    @Environment(\.localizer) private var loc
+    @Environment(\.agyTheme) private var theme
+
+    private var visibleModels: [ModelUsage] {
+        if metric == .cost {
+            return usage.models.filter { $0.cost >= 0.005 }
+        }
+        return usage.models.filter { $0.totalTokens > 0 }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            if visibleModels.isEmpty {
+                Text(loc("noData").uppercased())
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(theme.inkMuted)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 12)
+            } else if metric == .cost {
+                costHeader
+                Rectangle().fill(theme.hairline).frame(height: 1)
+                    .padding(.bottom, 2)
+                ForEach(visibleModels) { m in
+                    costRow(m)
+                }
+            } else {
+                tokensHeader
+                Rectangle().fill(theme.hairline).frame(height: 1)
+                    .padding(.bottom, 2)
+                ForEach(visibleModels) { m in
+                    tokensRow(m)
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+    }
+
+    private var costHeader: some View {
+        HStack(spacing: 6) {
+            Text(loc("colModel"))
+                .frame(width: 112, alignment: .leading)
+            Text(loc("colDist"))
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text(loc("colShare"))
+                .frame(width: 44, alignment: .trailing)
+            Text(loc("colAmount"))
+                .frame(width: 68, alignment: .trailing)
+        }
+        .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
+        .foregroundColor(theme.inkMuted)
+        .padding(.horizontal, 2)
+    }
+
+    private func costRow(_ m: ModelUsage) -> some View {
+        let fraction = usage.cost > 0 ? max(0, min(1, m.cost / usage.cost)) : 0
+        let pctStr = String(format: "%.1f%%", fraction * 100.0)
+        let isFocused = (focusedModelId == m.id)
+        let anyFocused = (focusedModelId != nil)
+        let swatchColor = theme.modelColor(m.modelClass, focused: isFocused, anyFocused: anyFocused)
+        let pattern = theme.modelPattern(m.modelClass)
+
+        return HStack(spacing: 6) {
+            HStack(spacing: 5) {
+                StrataSwatch(color: swatchColor, pattern: pattern, size: 7)
+                Text(m.shortCode)
+                    .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                    .foregroundColor(isFocused ? theme.accent : theme.inkPrimary)
+                Text(m.name)
+                    .font(.system(size: 10.5))
+                    .foregroundColor(theme.inkSecondary)
+                    .lineLimit(1)
+            }
+            .frame(width: 112, alignment: .leading)
+
+            Canvas { context, size in
+                context.fill(Path(CGRect(x: 0, y: size.height * 0.5 - 1.5, width: size.width, height: 3)),
+                             with: .color(theme.hairline))
+                let fillW = max(2, size.width * CGFloat(fraction))
+                var ctx = context
+                drawStrataRect(
+                    in: &ctx,
+                    rect: CGRect(x: 0, y: size.height * 0.5 - 1.5, width: fillW, height: 3),
+                    color: swatchColor,
+                    pattern: pattern
+                )
+            }
+            .frame(height: 14)
+
+            Text(pctStr)
+                .font(.system(size: 9.5, design: .monospaced))
+                .monospacedDigit()
+                .foregroundColor(theme.inkSecondary)
+                .frame(width: 44, alignment: .trailing)
+
+            Text(formatCostTabular(m.cost))
+                .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                .monospacedDigit()
+                .foregroundColor(isFocused ? theme.accent : theme.inkPrimary)
+                .frame(width: 68, alignment: .trailing)
+        }
+        .padding(.horizontal, 2)
+        .padding(.vertical, 2.5)
+        .background(isFocused ? theme.surfaceRaised.opacity(0.9) : Color.clear)
+        .contentShape(Rectangle())
+        .onHover { inside in
+            focusedModelId = inside ? m.id : (focusedModelId == m.id ? nil : focusedModelId)
+        }
+    }
+
+    private var tokensHeader: some View {
+        HStack(spacing: 4) {
+            Text(loc("colModel"))
+                .frame(width: 66, alignment: .leading)
+            Spacer(minLength: 2)
+            Text(loc("colTotal"))
+                .frame(width: 52, alignment: .trailing)
+            Text(loc("tkIn").uppercased())
+                .frame(width: 46, alignment: .trailing)
+            Text(loc("tkOut").uppercased())
+                .frame(width: 46, alignment: .trailing)
+            Text(loc("tkCR").uppercased())
+                .frame(width: 52, alignment: .trailing)
+            Text(loc("colHit"))
+                .frame(width: 36, alignment: .trailing)
+        }
+        .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
+        .foregroundColor(theme.inkMuted)
+        .padding(.horizontal, 2)
+    }
+
+    private func tokensRow(_ m: ModelUsage) -> some View {
+        let isFocused = (focusedModelId == m.id)
+        let anyFocused = (focusedModelId != nil)
+        let swatchColor = theme.modelColor(m.modelClass, focused: isFocused, anyFocused: anyFocused)
+        let pattern = theme.modelPattern(m.modelClass)
+        let hitPct = UsageTelemetryLogic.cacheHitPercent(input: m.inputTokens, cacheRead: m.cacheRead)
+            .map { String(format: "%d%%", Int($0.rounded())) } ?? "—"
+
+        return HStack(spacing: 4) {
+            HStack(spacing: 5) {
+                StrataSwatch(color: swatchColor, pattern: pattern, size: 7)
+                Text(m.shortCode)
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundColor(isFocused ? theme.accent : theme.inkPrimary)
+            }
+            .frame(width: 66, alignment: .leading)
+
+            Spacer(minLength: 2)
+
+            Text(formatTokensShort(m.totalTokens).uppercased())
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .foregroundColor(isFocused ? theme.accent : theme.inkPrimary)
+                .frame(width: 52, alignment: .trailing)
+
+            Text(formatTokensShort(m.inputTokens).uppercased())
+                .font(.system(size: 9.5, design: .monospaced))
+                .foregroundColor(theme.inkSecondary)
+                .frame(width: 46, alignment: .trailing)
+
+            Text(formatTokensShort(m.outputTokens).uppercased())
+                .font(.system(size: 9.5, design: .monospaced))
+                .foregroundColor(theme.inkSecondary)
+                .frame(width: 46, alignment: .trailing)
+
+            Text(formatTokensShort(m.cacheRead).uppercased())
+                .font(.system(size: 9.5, design: .monospaced))
+                .foregroundColor(theme.inkSecondary)
+                .frame(width: 52, alignment: .trailing)
+
+            Text(hitPct)
+                .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                .foregroundColor(theme.accent)
+                .frame(width: 36, alignment: .trailing)
+        }
+        .monospacedDigit()
+        .padding(.horizontal, 2)
+        .padding(.vertical, 2.5)
+        .background(isFocused ? theme.surfaceRaised.opacity(0.9) : Color.clear)
+        .contentShape(Rectangle())
+        .onHover { inside in
+            focusedModelId = inside ? m.id : (focusedModelId == m.id ? nil : focusedModelId)
+        }
+    }
+}
+
+// MARK: - Oscilloscope Canvas Daily Chart with Dot Graticule & Crosshair Lock
+
 struct DailyChart: View {
     let data: [DailyUsage]
     let mode: DisplayTab
     let year: Int
     let month: Int
-    @Environment(\.localizer) private var loc
+    var focusedModelId: String? = nil
 
+    @Environment(\.localizer) private var loc
+    @Environment(\.agyTheme) private var theme
     @State private var hoveredDay: Int? = nil
 
     private var daysInMonth: Int { AppDate.daysInMonth(year: year, month: month) ?? 30 }
@@ -23,7 +600,16 @@ struct DailyChart: View {
         data.map { mode == .cost ? $0.cost : Double($0.totalTokens) }.max() ?? 1
     }
 
-    // Which day numbers to show as x-axis labels
+    private var avgValue: Double {
+        UsageTelemetryLogic.dailyAverage(daily: data, modeIsCost: mode == .cost)
+    }
+
+    private var todayNumberIfViewingCurrentMonth: Int? {
+        let nowComps = AppDate.gregorian.dateComponents([.year, .month, .day], from: Date())
+        guard nowComps.year == year, nowComps.month == month else { return nil }
+        return nowComps.day
+    }
+
     private var labelDays: Set<Int> {
         let total = daysInMonth
         var labels: Set<Int> = [1]
@@ -32,293 +618,240 @@ struct DailyChart: View {
         return labels
     }
 
-    private let chartHeight: CGFloat = 72
+    private let chartHeight: CGFloat = 86
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            // Title + hover tooltip
-            HStack(spacing: 4) {
-                Text(loc("daily"))
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundColor(.secondary)
-                if let day = hoveredDay, let usage = dayLookup[day] {
-                    Text("·")
-                        .foregroundColor(.secondary.opacity(0.5))
-                    Text(String(format: "%d/%d", month, day))
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(.primary.opacity(0.8))
-                    if mode == .cost {
-                        Text(formatCost(usage.cost))
-                            .font(.system(size: 10, weight: .bold, design: .monospaced))
-                            .foregroundColor(.primary)
-                    } else {
-                        Text(formatTokensShort(usage.totalTokens))
-                            .font(.system(size: 10, weight: .bold, design: .monospaced))
-                            .foregroundColor(.primary)
-                    }
-                    // Model breakdown chips
-                    ForEach(usage.models.filter {
-                        mode == .cost ? $0.cost > 0 : $0.totalTokens > 0
-                    }) { m in
-                        HStack(spacing: 2) {
-                            Circle().fill(m.color).frame(width: 4, height: 4)
-                            Text(mode == .cost
-                                 ? formatCost(m.cost)
-                                 : formatTokensShort(m.totalTokens))
-                                .font(.system(size: 9, design: .monospaced))
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                } else if let day = hoveredDay, dayLookup[day] == nil {
-                    Text("·")
-                        .foregroundColor(.secondary.opacity(0.5))
-                    Text(String(format: "%d/%d", month, day))
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(.primary.opacity(0.8))
-                    Text(loc("noData"))
-                        .font(.system(size: 10))
-                        .foregroundColor(.secondary)
+        VStack(alignment: .leading, spacing: 6) {
+            chartHeader
+
+            ZStack(alignment: .top) {
+                ZStack {
+                    DotGraticuleBackground(spacing: 11)
+                    plotCanvas
+                    hoverTargetOverlay
                 }
-                Spacer()
-            }
-            .frame(height: 14)
+                .frame(height: chartHeight)
 
-            // Bar chart
-            GeometryReader { geo in
-                let totalDays = CGFloat(daysInMonth)
-                let spacing: CGFloat = 1
-                let barWidth = max(2, (geo.size.width - spacing * (totalDays - 1)) / totalDays)
-                let ch = geo.size.height
-
-                HStack(alignment: .bottom, spacing: spacing) {
-                    ForEach(1...daysInMonth, id: \.self) { day in
-                        barView(day: day, barWidth: barWidth, chartHeight: ch)
-                    }
+                if let day = hoveredDay {
+                    DailyTelemetryTooltip(
+                        day: day,
+                        month: month,
+                        daysInMonth: daysInMonth,
+                        usage: dayLookup[day],
+                        modeIsCost: mode == .cost
+                    )
                 }
             }
-            .frame(height: chartHeight)
 
-            // X-axis labels
-            GeometryReader { geo in
-                let totalDays = CGFloat(daysInMonth)
-                let spacing: CGFloat = 1
-                let barWidth = (geo.size.width - spacing * (totalDays - 1)) / totalDays
-                let step = barWidth + spacing
-
-                ZStack(alignment: .leading) {
-                    ForEach(Array(labelDays.sorted()), id: \.self) { day in
-                        Text("\(day)")
-                            .font(.system(size: 8))
-                            .foregroundColor(.secondary.opacity(0.7))
-                            .position(
-                                x: step * CGFloat(day - 1) + barWidth / 2,
-                                y: 5
-                            )
-                    }
-                }
-            }
-            .frame(height: 12)
+            xAxisLabels
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(
-            RoundedRectangle(cornerRadius: 8)
-                .fill(Color.primary.opacity(0.03))
-        )
+        .padding(.vertical, 9)
     }
 
-    // MARK: - Bar Chart Helpers
+    private var plotCanvas: some View {
+        Canvas { context, size in
+            let count = max(1, daysInMonth)
+            let slotW = size.width / CGFloat(count)
+            let barW = max(3.0, min(6.5, slotW * 0.62))
 
-    @ViewBuilder
-    private func barView(day: Int, barWidth: CGFloat, chartHeight: CGFloat) -> some View {
-        if let usage = dayLookup[day] {
-            let value = mode == .cost ? usage.cost : Double(usage.totalTokens)
-            let height = maxValue > 0 ? CGFloat(value / maxValue) * chartHeight : 0
-            VStack(spacing: 0) {
-                Spacer(minLength: 0)
-                stackedBar(usage: usage, totalHeight: max(2, height), barWidth: barWidth,
-                           highlighted: hoveredDay == day)
+            // 1. Dashed monthly average horizontal reference rule
+            if maxValue > 0 && avgValue > 0 {
+                let ratio = min(1.0, avgValue / maxValue)
+                let y = max(1, size.height - CGFloat(ratio) * size.height)
+                var dash = Path()
+                dash.move(to: CGPoint(x: 0, y: y))
+                dash.addLine(to: CGPoint(x: size.width, y: y))
+                context.stroke(dash, with: .color(theme.hairlineStrong),
+                               style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
             }
-            .frame(width: barWidth)
-            .contentShape(Rectangle())
-            .onHover { h in hoveredDay = h ? day : nil }
-        } else {
-            VStack {
-                Spacer(minLength: 0)
-                RoundedRectangle(cornerRadius: 1)
-                    .fill(Color.primary.opacity(0.04))
-                    .frame(width: barWidth, height: 1)
-            }
-            .frame(width: barWidth)
-            .contentShape(Rectangle())
-            .onHover { h in hoveredDay = h ? day : nil }
-        }
-    }
 
-    @ViewBuilder
-    private func stackedBar(usage: DailyUsage, totalHeight: CGFloat, barWidth: CGFloat,
-                            highlighted: Bool) -> some View {
-        let total = mode == .cost ? usage.cost : Double(usage.totalTokens)
-        if total > 0 {
-            VStack(spacing: 0) {
-                ForEach(usage.models) { model in
-                    let modelVal = mode == .cost ? model.cost : Double(model.totalTokens)
-                    let fraction = modelVal / total
-                    let segHeight = max(0, CGFloat(fraction) * totalHeight)
-                    if segHeight > 0 {
-                        RoundedRectangle(cornerRadius: 1)
-                            .fill(model.color)
-                            .frame(width: barWidth, height: segHeight)
+            // 2. Stacked sharp telemetry bars per day
+            for day in 1...daysInMonth {
+                let cx = (CGFloat(day) - 0.5) * slotW
+                let x = cx - barW * 0.5
+                let isDayHovered = (hoveredDay == day)
+                let dayDimmed = (hoveredDay != nil && !isDayHovered)
+
+                if let usage = dayLookup[day] {
+                    let total = mode == .cost ? usage.cost : Double(usage.totalTokens)
+                    if total > 0 && maxValue > 0 {
+                        let totalH = max(2.5, CGFloat(total / maxValue) * (size.height - 4))
+                        var cursorY = size.height
+                        let models = usage.models
+
+                        for idx in models.indices.reversed() {
+                            let m = models[idx]
+                            let mv = mode == .cost ? m.cost : Double(m.totalTokens)
+                            guard mv > 0 else { continue }
+                            let segH = max(0.8, CGFloat(mv / total) * totalH)
+                            let segY = cursorY - segH
+                            let segRect = CGRect(x: x, y: segY, width: barW, height: segH)
+
+                            let isModelFocused = (focusedModelId == m.id)
+                            let anyModelFocused = (focusedModelId != nil)
+                            var barColor = theme.modelColor(m.modelClass, focused: isModelFocused, anyFocused: anyModelFocused)
+                            if dayDimmed { barColor = barColor.opacity(0.28) }
+                            var ctx = context
+                            drawStrataRect(
+                                in: &ctx,
+                                rect: segRect,
+                                color: barColor,
+                                pattern: theme.modelPattern(m.modelClass)
+                            )
+                            cursorY = segY - 0.5
+                        }
+
+                        // Peak bright 1px cap
+                        let capColor = isDayHovered ? theme.inkPrimary : theme.accent.opacity(dayDimmed ? 0.25 : 0.9)
+                        context.fill(Path(CGRect(x: x, y: max(0, cursorY), width: barW, height: 1.2)),
+                                     with: .color(capColor))
+
+                        // Full-height crosshair + lock reticle on hover
+                        if isDayHovered {
+                            let peakY = max(2, cursorY)
+                            var vline = Path()
+                            vline.move(to: CGPoint(x: cx, y: 0))
+                            vline.addLine(to: CGPoint(x: cx, y: size.height))
+                            context.stroke(vline, with: .color(theme.reticle), lineWidth: 1)
+
+                            var hline = Path()
+                            hline.move(to: CGPoint(x: 0, y: peakY))
+                            hline.addLine(to: CGPoint(x: size.width, y: peakY))
+                            context.stroke(hline, with: .color(theme.reticle.opacity(0.55)),
+                                           style: StrokeStyle(lineWidth: 1, dash: [2, 2]))
+
+                            context.fill(Path(CGRect(x: cx - 2, y: peakY - 2, width: 4, height: 4)),
+                                         with: .color(theme.accent))
+                        }
+                    }
+                } else {
+                    context.fill(Path(CGRect(x: x, y: size.height - 1, width: barW, height: 1)),
+                                 with: .color(isDayHovered ? theme.hairlineStrong : theme.hairline))
+                    if isDayHovered {
+                        var vline = Path()
+                        vline.move(to: CGPoint(x: cx, y: 0))
+                        vline.addLine(to: CGPoint(x: cx, y: size.height))
+                        context.stroke(vline, with: .color(theme.reticle.opacity(0.65)), lineWidth: 1)
                     }
                 }
             }
-            .clipShape(RoundedRectangle(cornerRadius: 2))
-            .overlay(
-                highlighted ?
-                    RoundedRectangle(cornerRadius: 2)
-                        .stroke(Color.primary.opacity(0.3), lineWidth: 1)
-                    : nil
-            )
+
+            // 3. Baseline rule
+            context.fill(Path(CGRect(x: 0, y: size.height - 0.8, width: size.width, height: 0.8)),
+                         with: .color(theme.hairlineStrong))
         }
     }
-}
 
-// ── Single model row (cost) ──
-struct ModelRow: View {
-    let model: ModelUsage
+    private var hoverTargetOverlay: some View {
+        HStack(spacing: 0) {
+            ForEach(1...daysInMonth, id: \.self) { day in
+                Color.clear
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                    .onHover { h in hoveredDay = h ? day : (hoveredDay == day ? nil : hoveredDay) }
+            }
+        }
+    }
 
-    var body: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(model.color)
-                .frame(width: 8, height: 8)
-            Text(model.name)
-                .font(.system(size: 11.5))
-                .foregroundColor(.secondary)
+    private var xAxisLabels: some View {
+        GeometryReader { geo in
+            let slotW = geo.size.width / CGFloat(max(1, daysInMonth))
+            ZStack(alignment: .leading) {
+                ForEach(Array(labelDays.sorted()), id: \.self) { day in
+                    Text(String(format: "%02d", day))
+                        .font(.system(size: 8, design: .monospaced))
+                        .foregroundColor(day == todayNumberIfViewingCurrentMonth ? theme.accent : theme.inkMuted)
+                        .position(x: (CGFloat(day) - 0.5) * slotW, y: 5)
+                }
+                if let todayDay = todayNumberIfViewingCurrentMonth {
+                    Rectangle()
+                        .fill(theme.accent)
+                        .frame(width: 3, height: 3)
+                        .position(x: (CGFloat(todayDay) - 0.5) * slotW, y: 11)
+                }
+            }
+        }
+        .frame(height: 13)
+    }
+
+    private var chartHeader: some View {
+        let monthStr = String(format: "%04d.%02d", year, month)
+        let avgText = mode == .cost ? formatCost(avgValue) : formatTokensShort(Int(avgValue)).uppercased()
+        let maxText = mode == .cost ? formatCost(maxValue) : formatTokensShort(Int(maxValue)).uppercased()
+
+        return HStack(spacing: 4) {
+            Text("\(loc("dailyTelemetry")) // \(monthStr)")
+                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .tracking(0.5)
+                .foregroundColor(theme.inkSecondary)
             Spacer()
-            Text(formatCost(model.cost))
-                .font(.system(size: 11.5, design: .monospaced))
-                .foregroundColor(.primary)
+            Text("\(String(format: loc("avgFmt"), avgText))/D · \(String(format: loc("maxFmt"), maxText))")
+                .font(.system(size: 8.5, weight: .medium, design: .monospaced))
+                .foregroundColor(theme.inkMuted)
         }
     }
 }
 
-// ── Single model row (tokens) ──
-struct TokenModelRow: View {
-    let model: ModelUsage
+/// Shared floating HUD callout box used by DailyChart, TopographicRidgeChart, and TokenDensityMatrix.
+struct DailyTelemetryTooltip: View {
+    let day: Int
+    let month: Int
+    let daysInMonth: Int
+    let usage: DailyUsage?
+    let modeIsCost: Bool
+
     @Environment(\.localizer) private var loc
+    @Environment(\.agyTheme) private var theme
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(model.color)
-                    .frame(width: 8, height: 8)
-                Text(model.name)
-                    .font(.system(size: 11.5))
-                    .foregroundColor(.secondary)
-                Spacer()
-                Text(formatTokensShort(model.totalTokens))
-                    .font(.system(size: 11.5, design: .monospaced))
-                    .foregroundColor(.primary)
-            }
-            // Token breakdown sub-row
-            HStack(spacing: 8) {
-                TokenChip(label: loc("tkIn"), value: model.inputTokens, color: TokenTypeBar.typeEntries[0].1)
-                TokenChip(label: loc("tkOut"), value: model.outputTokens, color: TokenTypeBar.typeEntries[1].1)
-                TokenChip(label: loc("tkCR"), value: model.cacheRead, color: TokenTypeBar.typeEntries[2].1)
-                TokenChip(label: loc("tkCW"), value: model.cacheWrite, color: TokenTypeBar.typeEntries[3].1)
-            }
-            .padding(.leading, 14)
-        }
-    }
-}
+        let alignTrailing = (day <= daysInMonth / 2)
+        let nonZeroModels = (usage?.models ?? []).filter { modeIsCost ? $0.cost >= 0.005 : $0.totalTokens > 0 }
 
-// ── Compact token chip ──
-struct TokenChip: View {
-    let label: String
-    let value: Int
-    let color: Color
-
-    var body: some View {
-        HStack(spacing: 2) {
-            Text(label)
-                .font(.system(size: 9))
-                .foregroundColor(color.opacity(0.8))
-            Text(formatTokensShort(value))
-                .font(.system(size: 9, design: .monospaced))
-                .foregroundColor(.secondary)
-        }
-    }
-}
-
-// ── Period card (shared chrome for cost and tokens) ──
-struct PeriodCard: View {
-    let metric: DisplayTab
-    let icon: String
-    let title: String
-    let usage: PeriodUsage
-    var showStats: Bool = false
-    @Environment(\.localizer) private var loc
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline) {
-                Image(systemName: icon)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(.secondary)
-                Text(title)
-                    .font(.system(size: 13, weight: .semibold))
-                Spacer()
-                Text(metric == .cost ? formatCost(usage.cost)
-                                     : formatTokensShort(usage.totalTokens))
-                    .font(.system(size: 18, weight: .bold, design: .rounded))
-                    .foregroundColor(.primary)
-            }
-
-            if metric == .cost {
-                if !usage.models.isEmpty {
-                    CostBar(models: usage.models, total: usage.cost)
-                        .padding(.vertical, 2)
-                }
-
-                ForEach(usage.models.filter { $0.cost >= 0.005 }) { m in
-                    ModelRow(model: m)
-                }
-            } else {
-                if usage.totalTokens > 0 {
-                    TokenTypeBar(usage: usage)
-                        .padding(.vertical, 2)
-                }
-
-                if !usage.models.isEmpty {
-                    TokenBar(models: usage.models, total: usage.totalTokens)
-                        .padding(.bottom, 2)
-                }
-
-                ForEach(usage.models.filter { $0.totalTokens > 0 }) { m in
-                    TokenModelRow(model: m)
-                }
-            }
-
-            if showStats {
-                HStack(spacing: 12) {
-                    Label("\(formatNumber(usage.totalMessages))", systemImage: "message")
-                    if metric == .cost {
-                        Label(formatTokens(usage.totalTokens, loc), systemImage: "number")
+        HStack {
+            if alignTrailing { Spacer(minLength: 0) }
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 8) {
+                    Text(String(format: "%02d/%02d", month, day))
+                        .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                        .foregroundColor(theme.invertedInk.opacity(0.72))
+                    Spacer(minLength: 4)
+                    if let usage = usage {
+                        Text(modeIsCost ? formatCostTabular(usage.cost) : formatTokensShort(usage.totalTokens).uppercased())
+                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            .foregroundColor(theme.invertedInk)
                     } else {
-                        Label(formatCost(usage.cost), systemImage: "dollarsign.circle")
+                        Text(loc("noData").uppercased())
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundColor(theme.invertedInk.opacity(0.6))
                     }
                 }
-                .font(.system(size: 10.5))
-                .foregroundColor(.secondary)
-                .padding(.top, 2)
+                if !nonZeroModels.isEmpty {
+                    Rectangle().fill(theme.invertedInk.opacity(0.22)).frame(height: 1)
+                    ForEach(nonZeroModels.prefix(4)) { m in
+                        HStack(spacing: 5) {
+                            Rectangle()
+                                .fill(theme.modelColor(m.modelClass))
+                                .frame(width: 5, height: 5)
+                            Text(m.shortCode)
+                                .font(.system(size: 8.5, weight: .bold, design: .monospaced))
+                                .foregroundColor(theme.invertedInk.opacity(0.85))
+                            Spacer(minLength: 6)
+                            Text(modeIsCost ? formatCostTabular(m.cost) : formatTokensShort(m.totalTokens).uppercased())
+                                .font(.system(size: 8.5, design: .monospaced))
+                                .foregroundColor(theme.invertedInk)
+                        }
+                    }
+                }
             }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .frame(minWidth: 114, maxWidth: 142)
+            .background(theme.invertedBg.opacity(0.96))
+            .overlay(CornerReticleOverlay(color: theme.invertedInk.opacity(0.45), length: 4, lineWidth: 1))
+            if !alignTrailing { Spacer(minLength: 0) }
         }
-        .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(Color.primary.opacity(0.04))
-        )
+        .padding(.top, 2)
+        .allowsHitTesting(false)
     }
 }

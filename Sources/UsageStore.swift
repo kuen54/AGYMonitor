@@ -70,6 +70,21 @@ class UsageStore: ObservableObject {
     /// Idle icon+value placement: menu bar (default) or MacBook notch.
     @Published var displayMode: DisplayMode = .menubar
 
+    /// Selected Hero period scope inside Cost / Tokens tabs (Today / Week / Month).
+    @Published var selectedPeriodScope: UsagePeriodScope = .today
+
+    /// Menu-bar / compact-notch readout preference.
+    @Published var menuBarMetric: MenuBarMetricPreference = .followTab
+
+    /// Whether global hotkey (⌥⇧A) is active.
+    @Published var globalHotkeyEnabled: Bool = true
+
+    /// Switchable Swiss Telemetry theme preset (`⌘T` cycles presets).
+    @Published var themePreset: TelemetryThemePreset = .monolith
+
+    /// Switchable chart visualization style: scientific Instruments (default) vs Classic.
+    @Published var visualMode: TelemetryVisualMode = .instrument
+
     // MARK: Live sessions ("Sessions" tab)
 
     let sessionStore = SessionStore()
@@ -160,16 +175,49 @@ class UsageStore: ObservableObject {
         return df.string(from: date)
     }
 
+    var viewingMonthCompactLabel: String {
+        String(format: "%04d.%02d", viewingYear, viewingMonth)
+    }
+
     var canDisplayMenuBarValue: Bool {
         MenuBarAnchorState.shouldPublishMenuBarValue(
+            metric: menuBarMetric,
             tabRawValue: selectedTab.rawValue,
+            hasTodayData: today != nil,
             hasCurrentMonthData: currentMonthData != nil,
             hasSubscriptionQuota: subscriptionQuota != nil
         )
     }
 
-    /// Menu-bar / compact-notch value string for the CURRENT month + selected tab.
+    /// Menu-bar / compact-notch value string respecting `menuBarMetric`.
     var menuBarValue: String {
+        switch menuBarMetric {
+        case .followTab:
+            return followTabMenuBarValue
+        case .todayCost:
+            if let t = today { return formatCost(t.cost) }
+            if let m = currentMonthData { return formatCost(m.cost) }
+            return "…"
+        case .quota5h:
+            if let q = subscriptionQuota {
+                let rem = max(0, 100 - q.five_hour.displayPercent)
+                return q.five_hour.resets_at != nil ? "5h \(rem)%" : "\(rem)%"
+            }
+            return "—"
+        case .liveSessions:
+            let count = sessionStore.liveCount
+            if sessionStore.anyWaiting { return "▲\(count)" }
+            if sessionStore.anyBusy { return "▸\(count)" }
+            return "\(count)"
+        case .costAndQuota:
+            let costStr = (today.map { formatCost($0.cost) } ?? currentMonthData.map { formatCost($0.cost) })
+            let quotaStr = subscriptionQuota.map { "\(max(0, 100 - $0.five_hour.displayPercent))%" }
+            if let c = costStr, let q = quotaStr { return "\(c) · \(q)" }
+            return costStr ?? quotaStr ?? "…"
+        }
+    }
+
+    private var followTabMenuBarValue: String {
         switch selectedTab {
         case .cost:
             guard let monthData = currentMonthData else { return "…" }
@@ -188,6 +236,7 @@ class UsageStore: ObservableObject {
             guard currentMonthData != nil || currentTimeData != nil else { return "…" }
             return TimeLogic.formatDurationShort(timeTodaySeconds)
         case .session:
+            if sessionStore.anyWaiting { return "▲\(sessionStore.liveCount)" }
             return sessionStore.anyBusy ? "▸\(sessionStore.liveCount)" : "\(sessionStore.liveCount)"
         }
     }
@@ -244,6 +293,25 @@ class UsageStore: ObservableObject {
         if let savedMode = UserDefaults.standard.string(forKey: "displayMode"),
            let mode = DisplayMode(rawValue: savedMode) {
             displayMode = mode
+        }
+
+        if let savedMetric = UserDefaults.standard.string(forKey: "menuBarMetric"),
+           let metric = MenuBarMetricPreference(rawValue: savedMetric) {
+            menuBarMetric = metric
+        }
+
+        if UserDefaults.standard.object(forKey: "globalHotkeyEnabled") != nil {
+            globalHotkeyEnabled = UserDefaults.standard.bool(forKey: "globalHotkeyEnabled")
+        }
+
+        if let savedTheme = UserDefaults.standard.string(forKey: "themePreset"),
+           let preset = TelemetryThemePreset(rawValue: savedTheme) {
+            themePreset = preset
+        }
+
+        if let savedVisual = UserDefaults.standard.string(forKey: "visualMode"),
+           let visual = TelemetryVisualMode(rawValue: savedVisual) {
+            visualMode = visual
         }
 
         let initialToken = SubscriptionQuotaService.shared.hasOAuthToken
@@ -322,6 +390,43 @@ class UsageStore: ObservableObject {
         guard displayMode != mode else { return }
         displayMode = mode
         UserDefaults.standard.set(mode.rawValue, forKey: "displayMode")
+    }
+
+    func setMenuBarMetric(_ metric: MenuBarMetricPreference) {
+        guard menuBarMetric != metric else { return }
+        menuBarMetric = metric
+        UserDefaults.standard.set(metric.rawValue, forKey: "menuBarMetric")
+    }
+
+    func setGlobalHotkeyEnabled(_ enabled: Bool) {
+        guard globalHotkeyEnabled != enabled else { return }
+        globalHotkeyEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "globalHotkeyEnabled")
+    }
+
+    func setPeriodScope(_ scope: UsagePeriodScope) {
+        guard selectedPeriodScope != scope else { return }
+        selectedPeriodScope = scope
+    }
+
+    func setThemePreset(_ preset: TelemetryThemePreset) {
+        guard themePreset != preset else { return }
+        themePreset = preset
+        UserDefaults.standard.set(preset.rawValue, forKey: "themePreset")
+    }
+
+    func cycleThemePreset() {
+        setThemePreset(themePreset.next)
+    }
+
+    func setVisualMode(_ mode: TelemetryVisualMode) {
+        guard visualMode != mode else { return }
+        visualMode = mode
+        UserDefaults.standard.set(mode.rawValue, forKey: "visualMode")
+    }
+
+    func toggleVisualMode() {
+        setVisualMode(visualMode.toggled)
     }
 
     // MARK: - Live session monitoring (forwarded to sessionStore)

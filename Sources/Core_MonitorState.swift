@@ -142,6 +142,39 @@ public struct MenuBarAnchorState: Equatable, Sendable {
             return hasCurrentMonthData
         }
     }
+
+    public static func shouldPublishMenuBarValue(
+        metric: MenuBarMetricPreference,
+        tabRawValue: Int,
+        hasTodayData: Bool,
+        hasCurrentMonthData: Bool,
+        hasSubscriptionQuota: Bool
+    ) -> Bool {
+        switch metric {
+        case .followTab:
+            return shouldPublishMenuBarValue(
+                tabRawValue: tabRawValue,
+                hasCurrentMonthData: hasCurrentMonthData,
+                hasSubscriptionQuota: hasSubscriptionQuota
+            )
+        case .todayCost:
+            return hasTodayData || hasCurrentMonthData
+        case .quota5h:
+            return hasSubscriptionQuota
+        case .liveSessions:
+            return true
+        case .costAndQuota:
+            return hasTodayData || hasCurrentMonthData || hasSubscriptionQuota
+        }
+    }
+}
+
+public enum MenuBarMetricPreference: String, CaseIterable, Codable, Sendable {
+    case followTab
+    case todayCost
+    case quota5h
+    case liveSessions
+    case costAndQuota
 }
 
 public enum LogoAnimationMode: Equatable, Sendable {

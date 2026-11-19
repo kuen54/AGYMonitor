@@ -120,9 +120,13 @@ class TestCrossLanguageParity(unittest.TestCase):
             "SessionLogic.resolveLiveSessionStatus",
             "TranscriptParse.parseAnnotationTitle",
             "NotchMachine.reduce",
+            "NotchLiveWingMachine",
             "QuotaStateReducer.reduce",
+            "QuotaPaceLogic",
             "RefreshQueueState",
             "MenuBarAnchorState",
+            "InstrumentMath",
+            "TelemetryVisualMode",
         ]
         for sym in required_core_calls:
             self.assertIn(sym, app_sources, msg=f"Split-brain check failed: {sym} not wired into app layer")

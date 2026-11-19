@@ -34,6 +34,7 @@ mkdir -p "$BUILD_DIR"
 swiftc "$SCRIPT_DIR/Sources/"*.swift \
     -o "$BUILD_DIR/${APP_NAME}_arm64" \
     -framework Cocoa \
+    -framework Carbon \
     -framework Security \
     -lsqlite3 \
     -O \
@@ -41,6 +42,7 @@ swiftc "$SCRIPT_DIR/Sources/"*.swift \
 swiftc "$SCRIPT_DIR/Sources/"*.swift \
     -o "$BUILD_DIR/${APP_NAME}_x86_64" \
     -framework Cocoa \
+    -framework Carbon \
     -framework Security \
     -lsqlite3 \
     -O \

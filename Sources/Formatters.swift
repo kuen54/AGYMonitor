@@ -8,6 +8,29 @@ func formatCost(_ value: Double) -> String {
     return String(format: "$%.2f", value)
 }
 
+/// Tabular two-decimal currency formatting for Hero readouts and aligned model ledgers.
+func formatCostTabular(_ value: Double) -> String {
+    if abs(value) >= 1000 {
+        let f = NumberFormatter()
+        f.numberStyle = .currency
+        f.currencySymbol = "$"
+        f.minimumFractionDigits = 2
+        f.maximumFractionDigits = 2
+        f.locale = Locale(identifier: "en_US_POSIX")
+        if let formatted = f.string(from: NSNumber(value: value)) {
+            return formatted
+        }
+    }
+    return String(format: "$%.2f", value)
+}
+
+/// Explicit-sign rounded integer percentage (e.g. "+18%", "-12%", "0%").
+func formatSignedPercent(_ value: Double) -> String {
+    let rounded = Int(value.rounded())
+    if rounded > 0 { return "+\(rounded)%" }
+    return "\(rounded)%"
+}
+
 func formatTokens(_ count: Int, _ loc: Localizer) -> String {
     if count >= 1_000_000 { return String(format: loc("mTokens"), Double(count) / 1_000_000) }
     if count >= 1_000     { return String(format: loc("kTokens"), Double(count) / 1_000) }

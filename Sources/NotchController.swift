@@ -182,6 +182,9 @@ final class NotchController: NSObject {
     private var globalMonitor: Any?
     private var localMonitor: Any?
     private var rebuildWork: DispatchWorkItem?
+    private var wingState = NotchLiveWingState()
+    private var wingTimer: DispatchWorkItem?
+    private var sessionWingObserver: AnyCancellable?
 
     init(store: UsageStore, onQuit: @escaping () -> Void) {
         self.store = store
@@ -204,6 +207,7 @@ final class NotchController: NSObject {
             self, selector: #selector(activeSpaceChanged),
             name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
         installMouseMonitor()
+        installSessionWingObserver()
         rebuild()
     }
 
@@ -211,6 +215,8 @@ final class NotchController: NSObject {
         NotificationCenter.default.removeObserver(self)
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         rebuildWork?.cancel(); rebuildWork = nil
+        wingTimer?.cancel(); wingTimer = nil
+        sessionWingObserver?.cancel(); sessionWingObserver = nil
         removeMouseMonitor()
         teardownAll()
     }
@@ -247,6 +253,9 @@ final class NotchController: NSObject {
             inst.vm.closedNotchSize = ns.closedNotchSize
             inst.vm.isSynthetic = ns.isSynthetic
             inst.vm.isOpen = inst.state.isOpen
+            inst.vm.activeWing = wingState.activeWing
+            inst.vm.anyBusy = store.sessionStore.anyBusy
+            inst.vm.anyWaiting = store.sessionStore.anyWaiting
             inst.vm.onAcquireModalLock = { [weak self, weak inst] lock in
                 guard let self = self, let inst = inst else { return }
                 self.dispatch(inst, event: .modalLockAcquired(lock))
@@ -255,6 +264,13 @@ final class NotchController: NSObject {
                 guard let self = self, let inst = inst else { return }
                 let sample = self.pointerSample(for: inst)
                 self.dispatch(inst, event: .modalLockReleased(lock, pointer: sample), pointer: sample)
+            }
+            inst.vm.onTapWing = { [weak self] sessionId in
+                self?.handleTapWing(sessionId: sessionId)
+            }
+            inst.vm.onRequestClose = { [weak self, weak inst] in
+                guard let self = self, let inst = inst else { return }
+                self.dispatch(inst, event: .explicitClose)
             }
 
             let host = FirstMouseHostingView(rootView: NotchRootView(store: store, sessionStore: store.sessionStore, vm: inst.vm, onQuit: onQuit))
@@ -319,7 +335,7 @@ final class NotchController: NSObject {
         let onScreen = hit(mouse, inst.screen.screen.frame)
         return NotchPointerSample(
             onScreen: onScreen,
-            inHoverBand: onScreen && hit(mouse, hoverRect(inst.screen)),
+            inHoverBand: onScreen && hit(mouse, hoverRect(inst)),
             inContentRect: onScreen && hit(mouse, contentRect(inst)),
             inRevealEdge: onScreen && hit(mouse, edgeRect(inst.screen)),
             inRevealBand: onScreen && hit(mouse, revealRect(inst.screen))
@@ -327,12 +343,13 @@ final class NotchController: NSObject {
     }
 
     private func dispatch(_ inst: NotchInstance, event: NotchEvent,
-                          pointer: NotchPointerSample? = nil) {
+                          pointer: NotchPointerSample? = nil,
+                          mouse: NSPoint = NSEvent.mouseLocation) {
         let effects = NotchMachine.reduce(&inst.state, event: event)
         if inst.vm.isOpen != inst.state.isOpen {
             inst.vm.isOpen = inst.state.isOpen
         }
-        let sample = pointer ?? pointerSample(for: inst)
+        let sample = pointer ?? pointerSample(for: inst, mouse: mouse)
         for effect in effects {
             switch effect {
             case .scheduleOpenDwell:
@@ -352,7 +369,7 @@ final class NotchController: NSObject {
             case .refreshUsage:
                 store.refresh()
             case .applyPanelPresentation:
-                applyPresentation(inst, pointer: sample)
+                applyPresentation(inst, pointer: sample, mouse: mouse)
             }
         }
     }
@@ -400,7 +417,7 @@ final class NotchController: NSObject {
         let mouse = NSEvent.mouseLocation
         for inst in instances.values {
             let sample = pointerSample(for: inst, mouse: mouse)
-            dispatch(inst, event: .pointerMoved(sample), pointer: sample)
+            dispatch(inst, event: .pointerMoved(sample), pointer: sample, mouse: mouse)
         }
     }
 
@@ -439,6 +456,27 @@ final class NotchController: NSObject {
         return NSRect(x: f.midX - w / 2, y: f.maxY - h, width: w, height: h)
     }
 
+    /// When Live Wing is active on the right shoulder, restrict hover-to-open to
+    /// the left wing + physical notch so clicking the right action pill never
+    /// races with openDwell expanding the whole panel.
+    private func hoverRect(_ inst: NotchInstance) -> NSRect {
+        let base = hoverRect(inst.screen)
+        guard inst.vm.activeWing != nil, !inst.state.isOpen else { return base }
+        let wingMinX = min(base.minX, closedWingRect(inst).minX)
+        let rightLimit = inst.screen.screen.frame.midX + inst.screen.closedNotchSize.width / 2 + 8
+        let trimmedWidth = max(40, rightLimit - wingMinX)
+        return NSRect(x: wingMinX, y: base.minY, width: trimmedWidth, height: base.height)
+    }
+
+    private func closedWingRect(_ inst: NotchInstance) -> NSRect {
+        let f = inst.screen.screen.frame
+        let size = inst.vm.contentSize
+        guard size.width > 1, size.height > 1 else { return hoverRect(inst.screen) }
+        let centerX = f.midX + inst.vm.compactGapOffset
+        return NSRect(x: centerX - size.width / 2, y: f.maxY - size.height,
+                      width: size.width, height: size.height)
+    }
+
     private func contentRect(_ inst: NotchInstance) -> NSRect {
         let f = inst.screen.screen.frame
         let size = inst.vm.contentSize
@@ -447,19 +485,101 @@ final class NotchController: NSObject {
                       width: size.width, height: size.height)
     }
 
+    // MARK: Live Wing State Machine Sync
+
+    private func installSessionWingObserver() {
+        sessionWingObserver?.cancel()
+        sessionWingObserver = Publishers.CombineLatest3(
+            store.sessionStore.$sessions,
+            store.sessionStore.$doneUnseen,
+            store.sessionStore.$labels
+        )
+        .receive(on: RunLoop.main)
+        .sink { [weak self] sessions, doneUnseen, labels in
+            self?.syncLiveWing(sessions: sessions, doneUnseen: doneUnseen, labels: labels)
+        }
+    }
+
+    private func syncLiveWing(sessions: [SessionInfo], doneUnseen: Set<String>, labels: [String: String]) {
+        let snapshots = sessions.map { s in
+            let ws = labels[s.cwd] ?? SessionLogic.basename(s.cwd)
+            let badge = SessionSurfaceBadge.from(entrypoint: s.entrypoint, surface: s.surface)?.rawValue
+            return NotchWingSessionSnapshot(
+                sessionId: s.sessionId,
+                workspace: ws.isEmpty ? "session" : ws,
+                surface: badge,
+                isWaiting: s.status == .waiting,
+                needsConfirm: s.waitReason == .needsConfirmation,
+                isDoneUnseen: doneUnseen.contains(s.sessionId)
+            )
+        }
+        let effects = NotchLiveWingMachine.reduce(&wingState, event: .sessionsUpdated(snapshots, now: Date()))
+        applyWingEffects(effects)
+        pushWingStateToViewModels()
+    }
+
+    private func handleTapWing(sessionId: String) {
+        if let match = store.sessionStore.sessions.first(where: { $0.sessionId == sessionId }) {
+            store.sessionStore.jump(match)
+        }
+        let effects = NotchLiveWingMachine.reduce(&wingState, event: .dismissed(sessionId: sessionId))
+        applyWingEffects(effects)
+        pushWingStateToViewModels()
+    }
+
+    private func applyWingEffects(_ effects: [NotchLiveWingEffect]) {
+        for effect in effects {
+            switch effect {
+            case .scheduleDoneRetract(let delay):
+                wingTimer?.cancel()
+                let work = DispatchWorkItem { [weak self] in
+                    guard let self = self else { return }
+                    self.wingTimer = nil
+                    let follow = NotchLiveWingMachine.reduce(&self.wingState, event: .doneTimerFired(now: Date()))
+                    self.applyWingEffects(follow)
+                    self.pushWingStateToViewModels()
+                }
+                wingTimer = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+            case .cancelDoneRetract:
+                wingTimer?.cancel()
+                wingTimer = nil
+            }
+        }
+    }
+
+    private func pushWingStateToViewModels() {
+        let busy = store.sessionStore.anyBusy
+        let waiting = store.sessionStore.anyWaiting
+        var changed = false
+        for inst in instances.values {
+            if inst.vm.activeWing != wingState.activeWing {
+                inst.vm.activeWing = wingState.activeWing
+                changed = true
+            }
+            if inst.vm.anyBusy != busy { inst.vm.anyBusy = busy }
+            if inst.vm.anyWaiting != waiting { inst.vm.anyWaiting = waiting }
+        }
+        if changed { applyPanelState() }
+    }
+
     // MARK: Visibility + passthrough
 
     private func applyPanelState() {
         let mouse = NSEvent.mouseLocation
         for inst in instances.values {
-            applyPresentation(inst, pointer: pointerSample(for: inst, mouse: mouse))
+            applyPresentation(inst, pointer: pointerSample(for: inst, mouse: mouse), mouse: mouse)
         }
     }
 
-    private func applyPresentation(_ inst: NotchInstance, pointer: NotchPointerSample) {
+    private func applyPresentation(_ inst: NotchInstance, pointer: NotchPointerSample, mouse: NSPoint) {
         let pres = NotchMachine.panelPresentation(for: inst.state, pointer: pointer)
+        let onClickableWing = !inst.state.isOpen
+            && inst.vm.activeWing != nil
+            && pointer.onScreen
+            && hit(mouse, closedWingRect(inst))
         setVisible(inst, pres.visible)
-        inst.panel.ignoresMouseEvents = pres.ignoresMouseEvents
+        inst.panel.ignoresMouseEvents = pres.ignoresMouseEvents && !onClickableWing
     }
 
     private func setVisible(_ inst: NotchInstance, _ visible: Bool) {

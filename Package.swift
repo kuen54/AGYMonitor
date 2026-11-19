@@ -25,6 +25,7 @@ let package = Package(
                 "AITitleReader.swift",
                 "AppDelegate.swift",
                 "Formatters.swift",
+                "GlobalHotKey.swift",
                 "Localization.swift",
                 "Models.swift",
                 "NotchController.swift",
@@ -42,6 +43,11 @@ let package = Package(
                 "Views.swift",
                 "Views_Cards.swift",
                 "Views_Common.swift",
+                "Views_InstrumentCost.swift",
+                "Views_InstrumentPlan.swift",
+                "Views_InstrumentSession.swift",
+                "Views_InstrumentTime.swift",
+                "Views_InstrumentTokens.swift",
                 "Views_Menus.swift",
                 "Views_Plan.swift",
                 "Views_Session.swift",
@@ -63,6 +69,8 @@ let package = Package(
                 "Core_UsageState.swift",
                 "Core_QuotaState.swift",
                 "Core_MonitorState.swift",
+                "Core_Telemetry.swift",
+                "Core_Instruments.swift",
             ]
         ),
         .testTarget(

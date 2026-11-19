@@ -38,6 +38,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     // statusItem.isVisible and the only place the controller is built/torn down.
     private var notchController: NotchController?
     private var displayModeCancellable: AnyCancellable?
+    private let hotKeyManager = GlobalHotKeyManager()
+    private var hotkeyCancellable: AnyCancellable?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Status bar item. Length is managed manually (updateMenuBarWidth) to track the
@@ -52,7 +54,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             self?.fsThrottle.noteRefreshTriggered(at: date)
         }
         if let button = statusItem.button {
-            button.action = #selector(togglePopover)
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+            button.action = #selector(handleStatusItemClick)
             button.target = self
             // Host [Antigravity mark + value] in SwiftUI so the mark can animate while a
             // session is busy and carry the attention dot (same view as notch/popover).
@@ -80,25 +83,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popover.animates = true
         popover.delegate = self
         let hostingController = NSHostingController(
-            rootView: PopoverView(store: store, onQuit: {
-                NSApplication.shared.terminate(nil)
-            })
+            rootView: PopoverView(
+                store: store,
+                onQuit: { NSApplication.shared.terminate(nil) },
+                onClose: { [weak self] in self?.popover.performClose(nil) }
+            )
         )
         hostingController.sizingOptions = .preferredContentSize
         popover.contentViewController = hostingController
 
         // Observe current month data + tab changes to update menu bar title.
         // Always shows current month regardless of which month is being viewed.
-        // CombineLatest4 is Combine's max arity — the time-tab input is chained
-        // on with an extra combineLatest.
+        // CombineLatest4 is Combine's max arity — extra signals are chained below.
         let sessionMenuSignal = store.sessionStore.$sessions
             .map { sessions -> String in
-                "\(sessions.count)|\(sessions.contains { $0.status == .busy })"
+                "\(sessions.count)|\(sessions.contains { $0.status == .busy })|\(sessions.contains { $0.status == .waiting })"
             }
             .removeDuplicates()
         cancellable = Publishers.CombineLatest4(
             store.$currentMonthData, store.$selectedTab, store.$language, store.$subscriptionQuota)
-            .combineLatest(store.$timeTodaySeconds)
+            .combineLatest(store.$today, store.$menuBarMetric, store.$timeTodaySeconds)
             .combineLatest(sessionMenuSignal)
             .receive(on: RunLoop.main)
             .sink { [weak self] _, _ in
@@ -159,6 +163,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             .removeDuplicates()
             .receive(on: RunLoop.main)
             .sink { [weak self] mode in self?.applyDisplayMode(mode) }
+
+        hotkeyCancellable = store.$globalHotkeyEnabled
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] enabled in
+                guard let self = self else { return }
+                if enabled {
+                    self.hotKeyManager.register { [weak self] in
+                        self?.toggleFromGlobalHotKey()
+                    }
+                } else {
+                    self.hotKeyManager.unregister()
+                }
+            }
     }
 
     /// Build or tear down the notch UI and toggle the menu-bar item to match the mode.
@@ -350,6 +368,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        hotKeyManager.unregister()
         store.stopSessionMonitoring()
         notchController?.stop()
         notchController = nil
@@ -370,6 +389,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
     }
 
+    @objc private func handleStatusItemClick() {
+        let event = NSApp.currentEvent
+        let isRightClick = event?.type == .rightMouseUp
+            || (event?.type == .leftMouseUp && event?.modifierFlags.contains(.control) == true)
+        if isRightClick, let button = statusItem.button {
+            showStatusContextMenu(anchorButton: button)
+        } else {
+            togglePopover()
+        }
+    }
+
     @objc private func togglePopover() {
         guard let button = statusItem.button else { return }
         if popover.isShown {
@@ -377,6 +407,146 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         } else {
             openPopover(anchorButton: button)
         }
+    }
+
+    private func toggleFromGlobalHotKey() {
+        if store.displayMode == .notch {
+            notchController?.toggle()
+        } else {
+            togglePopover()
+        }
+    }
+
+    private func showStatusContextMenu(anchorButton button: NSStatusBarButton) {
+        if popover.isShown { popover.performClose(nil) }
+        let loc = Localizer(language: store.language)
+        let menu = NSMenu()
+
+        // 1. Direct jump items for waiting sessions
+        let waitingSessions = store.sessionStore.sessions.filter { $0.status == .waiting }
+        if !waitingSessions.isEmpty {
+            for s in waitingSessions {
+                let ws = store.sessionStore.labels[s.cwd] ?? SessionLogic.basename(s.cwd)
+                let title = store.sessionStore.titles[s.sessionId] ?? ws
+                let label = String(format: loc("jumpWaitingPrefix"), title)
+                let item = NSMenuItem(title: "▲ \(label)", action: #selector(contextJumpWaiting(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = s.sessionId
+                menu.addItem(item)
+            }
+            menu.addItem(.separator())
+        }
+
+        // 2. Display location
+        let modeHeader = NSMenuItem(title: loc("displayModeHeader"), action: nil, keyEquivalent: "")
+        modeHeader.isEnabled = false
+        menu.addItem(modeHeader)
+        for mode in DisplayMode.allCases {
+            let item = NSMenuItem(title: mode.label(loc), action: #selector(contextPickDisplayMode(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = mode.rawValue
+            item.state = store.displayMode == mode ? .on : .off
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+
+        // 3. Theme preset submenu
+        let themeSubItem = NSMenuItem(title: loc("themeHeader"), action: nil, keyEquivalent: "")
+        let themeMenu = NSMenu()
+        for preset in TelemetryThemePreset.allCases {
+            let item = NSMenuItem(title: preset.label(loc), action: #selector(contextPickThemePreset(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = preset.rawValue
+            item.state = store.themePreset == preset ? .on : .off
+            themeMenu.addItem(item)
+        }
+        themeSubItem.submenu = themeMenu
+        menu.addItem(themeSubItem)
+
+        // 3.5. Visual style submenu (Instrument vs Classic)
+        let visualSubItem = NSMenuItem(title: loc("visualModeHeader"), action: nil, keyEquivalent: "")
+        let visualMenu = NSMenu()
+        for vMode in TelemetryVisualMode.allCases {
+            let item = NSMenuItem(title: vMode.label(loc), action: #selector(contextPickVisualMode(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = vMode.rawValue
+            item.state = store.visualMode == vMode ? .on : .off
+            visualMenu.addItem(item)
+        }
+        visualSubItem.submenu = visualMenu
+        menu.addItem(visualSubItem)
+
+        // 4. Status bar readout submenu
+        let metricSubItem = NSMenuItem(title: loc("metricHeader"), action: nil, keyEquivalent: "")
+        let metricMenu = NSMenu()
+        for metric in MenuBarMetricPreference.allCases {
+            let item = NSMenuItem(title: metric.label(loc), action: #selector(contextPickMetric(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = metric.rawValue
+            item.state = store.menuBarMetric == metric ? .on : .off
+            metricMenu.addItem(item)
+        }
+        metricSubItem.submenu = metricMenu
+        menu.addItem(metricSubItem)
+        menu.addItem(.separator())
+
+        // 5. Hotkey, Refresh & Quit
+        let hkItem = NSMenuItem(title: loc("hotkeyToggle"), action: #selector(contextToggleHotkey), keyEquivalent: "")
+        hkItem.target = self
+        hkItem.state = store.globalHotkeyEnabled ? .on : .off
+        menu.addItem(hkItem)
+
+        let refreshItem = NSMenuItem(title: loc("refresh"), action: #selector(contextRefresh), keyEquivalent: "")
+        refreshItem.target = self
+        menu.addItem(refreshItem)
+
+        let quitItem = NSMenuItem(title: loc("quit"), action: #selector(contextQuit), keyEquivalent: "")
+        quitItem.target = self
+        menu.addItem(quitItem)
+
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
+    }
+
+    @objc private func contextJumpWaiting(_ sender: NSMenuItem) {
+        guard let sid = sender.representedObject as? String,
+              let s = store.sessionStore.sessions.first(where: { $0.sessionId == sid }) else { return }
+        store.sessionStore.jump(s)
+    }
+
+    @objc private func contextPickDisplayMode(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let mode = DisplayMode(rawValue: raw) else { return }
+        store.setDisplayMode(mode)
+    }
+
+    @objc private func contextPickThemePreset(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let preset = TelemetryThemePreset(rawValue: raw) else { return }
+        store.setThemePreset(preset)
+    }
+
+    @objc private func contextPickVisualMode(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let vMode = TelemetryVisualMode(rawValue: raw) else { return }
+        store.setVisualMode(vMode)
+    }
+
+    @objc private func contextPickMetric(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let metric = MenuBarMetricPreference(rawValue: raw) else { return }
+        store.setMenuBarMetric(metric)
+    }
+
+    @objc private func contextToggleHotkey() {
+        store.setGlobalHotkeyEnabled(!store.globalHotkeyEnabled)
+    }
+
+    @objc private func contextRefresh() {
+        store.refresh(force: true)
+    }
+
+    @objc private func contextQuit() {
+        NSApplication.shared.terminate(nil)
     }
 }
 
@@ -408,13 +578,13 @@ struct MenuBarContentView: View {
     var onWidth: (CGFloat) -> Void
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 5) {
             SessionAwareLogo(sessionStore: sessionStore,
-                             size: 16, color: .agyBrand, dotSize: 5)
+                             size: 15, color: .agyBrand, dotSize: 5)
             Text(model.text)
-                .font(.system(size: 13))
+                .font(.system(size: 12, weight: .medium, design: .monospaced))
                 .monospacedDigit()
-                .foregroundColor(.primary)
+                .foregroundColor(sessionStore.anyWaiting ? .agyStatusWaiting : .primary)
                 .fixedSize()
         }
         .padding(.horizontal, 6)

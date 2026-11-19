@@ -3,15 +3,11 @@ import AppKit
 
 // MARK: - Notch UI (SwiftUI layer)
 //
-// ONE fixed-size transparent window; inside it ONE shared black+clip layer wrapping
-// BOTH states. The black's size is intrinsic (it hugs its content), so opening —
-// swapping from the compact pill to PopoverView — animates the black growing out of
-// the notch. macOS 13 safe.
+// Pure OLED black obsidian void with 1px precision outline and sharp inverted
+// Live Activity Wing action pills. macOS 13 safe.
 
 // MARK: - NotchShape
 
-/// The notch silhouette. Top corners curve inward and the side walls are inset by
-/// `topCornerRadius` from the bounding box. `animatableData` rides the radii.
 struct NotchShape: Shape {
     var topCornerRadius: CGFloat
     var bottomCornerRadius: CGFloat
@@ -58,18 +54,17 @@ struct NotchShape: Shape {
 // MARK: - Animation constants
 
 enum NotchAnimations {
-    static let open  = Animation.spring(response: 0.42, dampingFraction: 0.8, blendDuration: 0)
-    static let close = Animation.spring(response: 0.45, dampingFraction: 1.0, blendDuration: 0)
+    static let open  = Animation.spring(response: 0.40, dampingFraction: 0.82, blendDuration: 0)
+    static let close = Animation.spring(response: 0.44, dampingFraction: 0.98, blendDuration: 0)
     static let reduced = Animation.linear(duration: 0.12)
 }
 
-/// Hysteresis timings used by the AppKit controller.
 enum NotchTiming {
     static let openDwell:  TimeInterval = 0.18
     static let closeGrace: TimeInterval = 0.12
 }
 
-// MARK: - Content size measurement (for the controller's hit-testing only)
+// MARK: - Measurement keys
 
 private struct NotchContentSizeKey: PreferenceKey {
     static var defaultValue: CGSize = .zero
@@ -79,7 +74,15 @@ private struct NotchContentSizeKey: PreferenceKey {
     }
 }
 
-private struct NotchValueWidthKey: PreferenceKey {
+private struct NotchLeftWidthKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        let n = nextValue()
+        if n > 0 { value = n }
+    }
+}
+
+private struct NotchRightWidthKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         let n = nextValue()
@@ -89,21 +92,24 @@ private struct NotchValueWidthKey: PreferenceKey {
 
 // MARK: - Shared view model
 
-/// Owned by NotchController, observed by NotchRootView.
 final class NotchViewModel: ObservableObject {
     @Published var isOpen: Bool = false
     @Published var contentSize: CGSize = .zero
     @Published var closedNotchSize: CGSize = .zero
     @Published var isSynthetic: Bool = false
+    @Published var activeWing: NotchWingKind? = nil
+    @Published var anyBusy: Bool = false
+    @Published var anyWaiting: Bool = false
+    @Published var compactGapOffset: CGFloat = 0
 
     var onAcquireModalLock: ((NotchModalLock) -> Void)?
     var onReleaseModalLock: ((NotchModalLock) -> Void)?
+    var onTapWing: ((String) -> Void)?
+    var onRequestClose: (() -> Void)?
 
     func acquireModalLock(_ lock: NotchModalLock) { onAcquireModalLock?(lock) }
     func releaseModalLock(_ lock: NotchModalLock) { onReleaseModalLock?(lock) }
 }
-
-// MARK: - Environment plumbing for the shared footer menus
 
 private struct NotchViewModelKey: EnvironmentKey {
     static let defaultValue: NotchViewModel? = nil
@@ -116,107 +122,199 @@ extension EnvironmentValues {
     }
 }
 
-// MARK: - COMPACT content (the idle pill): icon hugs left shoulder, value hugs right
+// MARK: - COMPACT content (Idle Pill + Inverted Live Wing Block)
 
-/// Intrinsic-width pill: Antigravity logo just left of the notch, value just right,
-/// with the physical-notch-width clear gap between them.
 struct CompactNotchView: View {
     @ObservedObject var store: UsageStore
     @ObservedObject var sessionStore: SessionStore
+    @ObservedObject var vm: NotchViewModel
     var notchWidth: CGFloat
     var notchHeight: CGFloat
 
-    static let iconBlockWidth: CGFloat = 14 + 16 + 10
     static let innerPad: CGFloat = 10
     static let outerPad: CGFloat = 14
 
+    private var loc: Localizer { Localizer(language: store.language) }
+    private var darkTheme: AGYTheme {
+        AGYTheme(preset: store.themePreset, colorScheme: .dark, isNotch: true)
+    }
+
     var body: some View {
         HStack(spacing: 0) {
-            SessionAwareLogo(sessionStore: sessionStore,
-                             size: 16, color: .agyBrand, dotSize: 5)
-                .padding(.leading, Self.outerPad)
-                .padding(.trailing, Self.innerPad)
+            leftBlock
+                .background(GeometryReader { geo in
+                    Color.clear.preference(key: NotchLeftWidthKey.self, value: geo.size.width)
+                })
 
-            // The physical notch (real black camera housing) sits in this gap.
             Color.clear.frame(width: max(8, notchWidth))
 
-            Text(store.menuBarValue)
-                .font(.system(size: 12, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-                .foregroundColor(.white)
-                .lineLimit(1)
-                .fixedSize()
+            rightBlock
                 .background(GeometryReader { geo in
-                    Color.clear.preference(key: NotchValueWidthKey.self, value: geo.size.width)
+                    Color.clear.preference(key: NotchRightWidthKey.self, value: geo.size.width)
                 })
-                .padding(.leading, Self.innerPad)
-                .padding(.trailing, Self.outerPad)
         }
         .frame(height: max(24, notchHeight))
         .fixedSize()
     }
+
+    @ViewBuilder
+    private var leftBlock: some View {
+        HStack(spacing: 6) {
+            SessionAwareLogo(sessionStore: sessionStore,
+                             size: 14.5, color: darkTheme.accent, dotSize: 5)
+            if let wing = vm.activeWing {
+                Text(wing.workspace)
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundColor(darkTheme.inkPrimary)
+                    .lineLimit(1)
+                    .frame(maxWidth: 108, alignment: .leading)
+            }
+        }
+        .padding(.leading, Self.outerPad)
+        .padding(.trailing, Self.innerPad)
+    }
+
+    @ViewBuilder
+    private var rightBlock: some View {
+        if let wing = vm.activeWing {
+            wingButton(wing)
+                .padding(.leading, Self.innerPad)
+                .padding(.trailing, Self.outerPad)
+        } else {
+            Text(store.menuBarValue)
+                .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                .monospacedDigit()
+                .foregroundColor(vm.anyWaiting ? darkTheme.signalAmber : darkTheme.inkPrimary)
+                .lineLimit(1)
+                .fixedSize()
+                .padding(.leading, Self.innerPad)
+                .padding(.trailing, Self.outerPad)
+        }
+    }
+
+    private func wingButton(_ wing: NotchWingKind) -> some View {
+        let isWaiting = wing.isWaiting
+        let badgeBg: Color = isWaiting ? darkTheme.signalAmber : darkTheme.signalGreen
+        let prefix: String = {
+            switch wing {
+            case .waiting(_, _, _, let needsConfirm):
+                return "▲ \(needsConfirm ? loc("badgeConfirm") : loc("badgeInput"))"
+            case .done:
+                return "● \(loc("badgeDone"))"
+            }
+        }()
+        let surfaceTag = wing.surface.map { " · \($0.uppercased())" } ?? ""
+
+        return HStack(spacing: 4) {
+            Text(prefix + surfaceTag + " ↗")
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundColor(.black)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(badgeBg)
+        .fixedSize()
+        .contentShape(Rectangle())
+        .onTapGesture {
+            vm.onTapWing?(wing.sessionId)
+        }
+    }
 }
 
-// MARK: - Root notch view (one shared black layer that GROWS from the notch)
+// MARK: - Root notch view (Pure Obsidian Black Void)
 
 struct NotchRootView: View {
     @ObservedObject var store: UsageStore
-    // Plain `let`, NOT @ObservedObject: NotchRootView only forwards this down to
-    // CompactNotchView (which observes it itself), avoiding 2s churn on PopoverView.
     let sessionStore: SessionStore
     @ObservedObject var vm: NotchViewModel
     let onQuit: () -> Void
 
     private let hMargin: CGFloat = 18
     private let notchHeaderGap: CGFloat = 6
-    private let popoverInnerTopPadding: CGFloat = 14
+    private let popoverInnerTopPadding: CGFloat = 11
     private let bottomMargin: CGFloat = 14
 
     @State private var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-    @State private var valueWidth: CGFloat = 0
+    @State private var leftWidth: CGFloat = 39
+    @State private var rightWidth: CGFloat = 56
+
+    private var darkTheme: AGYTheme {
+        AGYTheme(preset: store.themePreset, colorScheme: .dark, isNotch: true)
+    }
 
     private var compactGapOffset: CGFloat {
-        let valueBlock = CompactNotchView.innerPad + valueWidth + CompactNotchView.outerPad
-        return (valueBlock - CompactNotchView.iconBlockWidth) / 2
+        (rightWidth - leftWidth) / 2
+    }
+
+    private var currentShape: NotchShape {
+        NotchShape(
+            topCornerRadius: vm.isOpen ? NotchShape.open.top : NotchShape.closed.top,
+            bottomCornerRadius: vm.isOpen ? NotchShape.open.bottom
+                                          : (vm.isSynthetic ? 16 : NotchShape.closed.bottom)
+        )
     }
 
     var body: some View {
         VStack(spacing: 0) {
             if vm.isOpen {
-                PopoverView(store: store, onQuit: onQuit)
-                    .environment(\.notchViewModel, vm)
-                    .fixedSize()
-                    .padding(.horizontal, hMargin)
-                    .padding(.top, max(8, vm.closedNotchSize.height
-                                          + notchHeaderGap - popoverInnerTopPadding))
-                    .padding(.bottom, bottomMargin)
-                    .transition(reduceMotion
-                        ? .opacity
-                        : .scale(scale: 0.9, anchor: .top).combined(with: .opacity))
+                PopoverView(
+                    store: store,
+                    onQuit: onQuit,
+                    onClose: { vm.onRequestClose?() }
+                )
+                .environment(\.notchViewModel, vm)
+                .fixedSize()
+                .padding(.horizontal, hMargin)
+                .padding(.top, max(8, vm.closedNotchSize.height
+                                      + notchHeaderGap - popoverInnerTopPadding))
+                .padding(.bottom, bottomMargin)
+                .transition(reduceMotion
+                    ? .opacity
+                    : .scale(scale: 0.94, anchor: .top).combined(with: .opacity))
             } else {
                 CompactNotchView(store: store,
                                  sessionStore: sessionStore,
+                                 vm: vm,
                                  notchWidth: vm.closedNotchSize.width,
                                  notchHeight: vm.closedNotchSize.height)
             }
         }
-        .background(GeometryReader { geo in
-            Color.black.preference(key: NotchContentSizeKey.self, value: geo.size)
-        })
-        .clipShape(NotchShape(
-            topCornerRadius: vm.isOpen ? NotchShape.open.top : NotchShape.closed.top,
-            bottomCornerRadius: vm.isOpen ? NotchShape.open.bottom
-                                          : (vm.isSynthetic ? 16 : NotchShape.closed.bottom)))
+        .background(
+            ZStack(alignment: .top) {
+                Color.black
+                GeometryReader { geo in
+                    Color.clear.preference(key: NotchContentSizeKey.self, value: geo.size)
+                }
+            }
+        )
+        .overlay(
+            currentShape.stroke(
+                Color.white.opacity(vm.isOpen ? 0.14 : (vm.activeWing != nil ? 0.18 : 0.10)),
+                lineWidth: 1
+            )
+            .allowsHitTesting(false)
+        )
+        .clipShape(currentShape)
         .offset(x: vm.isOpen ? 0 : compactGapOffset)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .animation(currentAnimation, value: vm.isOpen)
-        .animation(reduceMotion ? NotchAnimations.reduced : NotchAnimations.open, value: store.selectedTab)
+        .animation(reduceMotion ? NotchAnimations.reduced : NotchAnimations.open, value: vm.activeWing)
         .preferredColorScheme(.dark)
         .onPreferenceChange(NotchContentSizeKey.self) { size in
             if size != .zero { vm.contentSize = size }
         }
-        .onPreferenceChange(NotchValueWidthKey.self) { w in
-            if w > 0 { valueWidth = w }
+        .onPreferenceChange(NotchLeftWidthKey.self) { w in
+            if w > 0 {
+                leftWidth = w
+                vm.compactGapOffset = compactGapOffset
+            }
+        }
+        .onPreferenceChange(NotchRightWidthKey.self) { w in
+            if w > 0 {
+                rightWidth = w
+                vm.compactGapOffset = compactGapOffset
+            }
         }
         .onReceive(NSWorkspace.shared.notificationCenter.publisher(
             for: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification)) { _ in
