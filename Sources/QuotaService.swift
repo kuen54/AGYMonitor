@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 
 /// App version, single-sourced from Info.plist (CFBundleShortVersionString).
-fileprivate let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.3"
+fileprivate let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.4"
 
 /// UI-facing subset of QuotaFetchResult.
 enum QuotaError: Equatable {
@@ -777,9 +777,7 @@ final class SubscriptionQuotaService {
         for b in buckets {
             let lowerId = (b.id + " " + b.title).lowercased()
             let isWeekly = b.id.lowercased().contains("weekly") || b.title.lowercased().contains("weekly")
-            let hasGeminiClass = b.modelClasses.contains(where: {
-                $0 == .hydrogen || $0 == .carbon || $0 == .argon || $0 == .flash
-            })
+            let hasGeminiClass = b.modelClasses.contains(where: \.isGeminiFamily)
             let hasClaudeOrOtherClass = b.modelClasses.contains(where: {
                 $0 == .claude || $0 == .other
             })

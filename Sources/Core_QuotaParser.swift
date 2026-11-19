@@ -1124,7 +1124,7 @@ public enum AGYQuotaParser {
             if isGemini && !isClaudeOrGPT {
                 canonicalId = isWeekly ? "gemini_weekly" : "gemini"
                 canonicalTitle = isWeekly ? "Gemini · Weekly" : "Gemini Models"
-                classes = [.hydrogen, .carbon, .argon, .flash]
+                classes = ModelClass.allCases.filter(\.isGeminiFamily)
             } else if isClaudeOrGPT {
                 canonicalId = isWeekly ? "claude_partner_weekly" : "claude_partner"
                 canonicalTitle = isWeekly ? "Claude & GPT · Weekly" : "Claude & GPT · 5h"
@@ -1225,7 +1225,7 @@ public enum AGYQuotaParser {
         let probe = "\(rawId) \(rawTitle)".lowercased()
         if probe.contains("gemini") || (!classes.isEmpty && classes.allSatisfy(\.isGeminiFamily)) {
             let title = rawTitle.isEmpty ? "Gemini Models" : rawTitle
-            return ("gemini", title, [.hydrogen, .carbon, .argon, .flash])
+            return ("gemini", title, ModelClass.allCases.filter(\.isGeminiFamily))
         }
         if probe.contains("claude") || probe.contains("partner") || probe.contains("anthropic")
             || (!classes.isEmpty && classes.allSatisfy { !$0.isGeminiFamily }) {

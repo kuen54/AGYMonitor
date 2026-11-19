@@ -55,7 +55,7 @@ struct DateLogicTests {
         let week = AppDate.deriveWeek([d15, d16, d18], now: wed)
         #expect(abs(week.cost - 10.0) < 1e-6)
         #expect(week.totalTokens == 1_400)
-        #expect(week.models.map(\.id) == ["hydrogen", "carbon"])
+        #expect(week.models.map(\.id) == ["carbon", "hydrogen"])
     }
 
     @Test("parseISO8601 supports Go nanoseconds, offsets, and rejects 0001-01-01 sentinels")

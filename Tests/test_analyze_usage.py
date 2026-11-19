@@ -101,7 +101,11 @@ class TestPython39CompatibilityAndMeta(unittest.TestCase):
     def test_python39_syntax_and_version(self) -> None:
         src = SCRIPT_PATH.read_text(encoding="utf-8")
         tree = ast.parse(src, filename=str(SCRIPT_PATH))
-        self.assertEqual(au.__version__, "1.0.3")
+        self.assertEqual(au.__version__, "1.0.4")
+        self.assertEqual(
+            au.MODEL_CLASSES,
+            ("carbon", "argon", "neon", "hydrogen", "flash", "claude", "other"),
+        )
 
         has_future_annotations = False
         for node in ast.walk(tree):
@@ -129,6 +133,15 @@ class TestModelClassification(unittest.TestCase):
             "gemini-4-argon-medium": "argon",
             "gemini-4-argon-high": "argon",
             "gemini-pro-orchestrator-argon": "argon",
+            # Neon (including orchestrator-neon BEFORE orchestrator/carbon!)
+            "gemini-4-neon-low": "neon",
+            "gemini-4-neon-medium": "neon",
+            "gemini-4-neon-high": "neon",
+            "gemini-4-neon-xhigh": "neon",
+            "gemini-4-neon-tiered-high": "neon",
+            "gemini-pro-orchestrator-neon": "neon",
+            "Orchestrator (Neon)": "neon",
+            "Gemini 4 Neon (High)": "neon",
             # Carbon & Pro/Ultra/Orchestrator
             "gemini-4-carbon-low": "carbon",
             "gemini-4-carbon-medium": "carbon",
@@ -194,6 +207,18 @@ class TestPricingAndFallback(unittest.TestCase):
         self.assertAlmostEqual(a["input"], 4.00)
         self.assertAlmostEqual(a["output"], 20.00)
         self.assertAlmostEqual(a["cache_read"], 0.20)
+
+        n = au.lookup_fallback_pricing("gemini-4-neon-high")
+        self.assertAlmostEqual(n["input"], 3.00)
+        self.assertAlmostEqual(n["output"], 15.00)
+        self.assertAlmostEqual(n["cache_write"], 3.75)
+        self.assertAlmostEqual(n["cache_read"], 0.15)
+
+        orch_n = au.lookup_fallback_pricing("gemini-pro-orchestrator-neon")
+        self.assertAlmostEqual(orch_n["input"], 3.00)
+        self.assertAlmostEqual(orch_n["output"], 15.00)
+        self.assertAlmostEqual(orch_n["cache_write"], 3.75)
+        self.assertAlmostEqual(orch_n["cache_read"], 0.15)
 
         orch = au.lookup_fallback_pricing("gemini-pro-orchestrator")
         self.assertAlmostEqual(orch["input"], 4.00)
@@ -287,6 +312,12 @@ class TestPricingAndFallback(unittest.TestCase):
                 "cache_read_input_token_cost": 1.0e-07,
                 "litellm_provider": "gemini",
             },
+            "gemini/gemini-4-neon": {
+                "input_cost_per_token": 1.5e-06,
+                "output_cost_per_token": 7.5e-06,
+                "cache_read_input_token_cost": 7.5e-08,
+                "litellm_provider": "gemini",
+            },
             "gemini-3.8-flash": {
                 "input_cost_per_token": 7.5e-07,
                 "output_cost_per_token": 3.75e-06,
@@ -314,6 +345,15 @@ class TestPricingAndFallback(unittest.TestCase):
             self.assertAlmostEqual(p_carb["input"], 4.00)
             self.assertAlmostEqual(p_carb["output"], 20.00)
             self.assertAlmostEqual(p_carb["cache_read"], 0.20)
+
+        for neon_model in ("gemini-4-neon-high", "gemini-4-neon-xhigh", "gemini-pro-orchestrator-neon"):
+            p_neon = au.lookup_model_pricing(neon_model)
+            self.assertIsNotNone(p_neon)
+            assert p_neon is not None
+            self.assertAlmostEqual(p_neon["input"], 3.00)
+            self.assertAlmostEqual(p_neon["output"], 15.00)
+            self.assertAlmostEqual(p_neon["cache_write"], 3.75)
+            self.assertAlmostEqual(p_neon["cache_read"], 0.15)
 
         p_38 = au.lookup_model_pricing("gemini-3.8-flash-tiered")
         self.assertIsNotNone(p_38)
@@ -456,6 +496,23 @@ class TestScannerTokenMathDedupSentinelAndSQLite(unittest.TestCase):
                 },
             ],
         )
+        _write_transcript(
+            self.gemini_dir,
+            "antigravity-cli",
+            "neon-666",
+            [
+                {
+                    "step_index": 1,
+                    "type": "PLANNER_RESPONSE",
+                    "status": "DONE",
+                    "created_at": "2026-11-16T04:06:00Z",
+                    "model": "gemini-pro-orchestrator-neon",
+                    "input_tokens": 2500,
+                    "cache_read_tokens": 5000,
+                    "output_tokens": 400,
+                },
+            ],
+        )
 
         # Empty transcript & encrypted legacy .pb without transcript
         empty_t = (
@@ -499,6 +556,18 @@ class TestScannerTokenMathDedupSentinelAndSQLite(unittest.TestCase):
         self.assertEqual(argon["cache_read"], 1000)
         self.assertEqual(argon["output_tokens"], 300)
 
+        neon = payload["totals_by_model"]["neon"]
+        self.assertEqual(neon["input_tokens"], 2500)
+        self.assertEqual(neon["cache_read"], 5000)
+        self.assertEqual(neon["output_tokens"], 400)
+        # Neon rate: (2500*3 + 400*15 + 5000*0.15) / 1e6 = (7500+6000+750)/1e6 = 0.01425 -> 0.0143
+        self.assertAlmostEqual(neon["cost"], 0.0143, places=4)
+
+        self.assertEqual(
+            list(payload["totals_by_model"].keys()),
+            ["carbon", "argon", "neon", "hydrogen", "claude"],
+        )
+
         claude = payload["totals_by_model"]["claude"]
         self.assertEqual(claude["input_tokens"], 2000)
         self.assertEqual(claude["cache_read"], 6000)
@@ -507,7 +576,7 @@ class TestScannerTokenMathDedupSentinelAndSQLite(unittest.TestCase):
         self.assertAlmostEqual(claude["cost"], 0.023, places=4)
 
         self.assertEqual(payload["diagnostics"]["skipped_encrypted_pb"], 1)
-        self.assertEqual(len(payload["sessions"]), 4)
+        self.assertEqual(len(payload["sessions"]), 5)
 
     def test_workspace_map_unwraps_conversations_envelope(self) -> None:
         _write_transcript(

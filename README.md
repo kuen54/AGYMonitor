@@ -52,7 +52,7 @@ Antigravity runs across multiple surfaces — the `agy` CLI in your terminal, An
 
 ### What you get
 
-- **Cost & Tokens** — switch seamlessly between API-equivalent spend and token volume, broken down by Antigravity model family (**Gemini Hydrogen**, **Gemini Carbon**, **Gemini Argon**, **Gemini Flash**, **Claude**, and **Other**)
+- **Cost & Tokens** — switch seamlessly between API-equivalent spend and token volume, broken down by Antigravity model family (**Gemini Carbon**, **Gemini Argon**, **Gemini Neon**, **Gemini Hydrogen**, **Gemini Flash**, **Claude**, and **Other**)
 - **Time** — *when* you actually worked with Antigravity, computed from 10-minute gap-merged step timestamps:
   - **Week** — an Apple-Health-style timeline (`Mon–Sun × 0–24h`), each active block colored by dominant model family
   - **Month** — one timeline row per week of the month
@@ -165,12 +165,12 @@ build.sh                      ← universal swiftc build + icon + codesign + DMG
 setup_signing.sh              ← optional one-time self-signed certificate setup
 fix_swift.sh                  ← Command Line Tools SwiftBridging modulemap workaround
 .github/workflows/build.yml   ← CI: plist lint → py_compile & unittest → swift test → DMG build
-Info.plist                    ← LSUIElement=true; single source of app version (1.0.3)
+Info.plist                    ← LSUIElement=true; single source of app version (1.0.4)
 ```
 
 ### On pricing accuracy
 
-Google Antigravity plans combine rolling model quotas and Google One AI Credits rather than raw per-token invoices. `AGYMonitor` computes **API-equivalent cost estimates** using [LiteLLM](https://github.com/BerriAI/litellm) public rates (cached 24h) combined with Google's official standard (non-promotional) API list-rate floor for Antigravity model families (`Gemini Hydrogen`, `Carbon`, `Argon`, `3.8 Flash`, `Claude Opus/Sonnet`, `GPT-OSS`) so you can compare workload intensity across projects and days.
+Google Antigravity plans combine rolling model quotas and Google One AI Credits rather than raw per-token invoices. `AGYMonitor` computes **API-equivalent cost estimates** using [LiteLLM](https://github.com/BerriAI/litellm) public rates (cached 24h) combined with Google's official standard (non-promotional) API list-rate floor for Antigravity model families (`Gemini Carbon`, `Argon`, `Neon`, `Hydrogen`, `3.8 Flash`, `Claude Opus/Sonnet`, `GPT-OSS`) so you can compare workload intensity across projects and days.
 
 ### Durable historical archive
 
@@ -194,7 +194,7 @@ Antigravity 同时运行在多个入口：终端里的 `agy` CLI、Antigravity 2
 
 ### 功能亮点
 
-- **费用 & Tokens 双视图** — 按 Antigravity 模型家族精细拆分（**Gemini Hydrogen**、**Gemini Carbon**、**Gemini Argon**、**Gemini Flash**、**Claude** 与 **Other**）
+- **费用 & Tokens 双视图** — 按 Antigravity 模型家族精细拆分（**Gemini Carbon**、**Gemini Argon**、**Gemini Neon**、**Gemini Hydrogen**、**Gemini Flash**、**Claude** 与 **Other**）
 - **活跃时长（Time）** — 基于 10 分钟间隔合并算法还原你**何时**在使用 Antigravity：
   - **周视图** — Apple 健康睡眠风格的 `周一~周日 × 0–24h` 时间轴，按各时段主力模型着色
   - **月视图** — 按周分行展示整月时间轴

@@ -45,7 +45,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import urllib.parse
 import urllib.request
 
-__version__ = "1.0.3"
+__version__ = "1.0.4"
 
 # ---------------------------------------------------------------------------
 # Antigravity surfaces & cache paths
@@ -78,18 +78,20 @@ _TIME_EPOCH_MAX = 253370764800  # 9999-01-01T00:00:00Z
 # Model classification & pricing
 # ---------------------------------------------------------------------------
 MODEL_CLASSES: Tuple[str, ...] = (
-    "hydrogen",
     "carbon",
     "argon",
+    "neon",
+    "hydrogen",
     "flash",
     "claude",
     "other",
 )
 
 EMOJI: Dict[str, str] = {
-    "hydrogen": "\U0001f7e3",  # 🟣
     "carbon":   "\U0001f535",  # 🔵
     "argon":    "\U0001f7e2",  # 🟢
+    "neon":     "\U0001f534",  # 🔴
+    "hydrogen": "\U0001f7e3",  # 🟣
     "flash":    "\u26a1",      # ⚡
     "claude":   "\U0001f7e0",  # 🟠
     "other":    "\u26aa",      # ⚪
@@ -104,9 +106,10 @@ PRICING_CACHE_TTL = 86400  # 24 hours in seconds
 # Offline API-equivalent fallback pricing (USD per 1M tokens) by ModelClass.
 # Uses Google's official non-promotional standard list rates for Gemini 4 / 3.8.
 FALLBACK_PRICING: Dict[str, Dict[str, float]] = {
-    "hydrogen": {"input": 1.50, "output":  7.50, "cache_write": 1.875,  "cache_read": 0.075},
     "carbon":   {"input": 4.00, "output": 20.00, "cache_write": 5.00,   "cache_read": 0.20},
     "argon":    {"input": 4.00, "output": 20.00, "cache_write": 5.00,   "cache_read": 0.20},
+    "neon":     {"input": 3.00, "output": 15.00, "cache_write": 3.75,   "cache_read": 0.15},
+    "hydrogen": {"input": 1.50, "output":  7.50, "cache_write": 1.875,  "cache_read": 0.075},
     "flash":    {"input": 1.50, "output":  7.50, "cache_write": 1.875,  "cache_read": 0.15},
     "claude":   {"input": 3.00, "output": 15.00, "cache_write": 3.75,   "cache_read": 0.30},
     "other":    {"input": 0.15, "output":  0.60, "cache_write": 0.1875, "cache_read": 0.0375},
@@ -118,6 +121,8 @@ FALLBACK_PRICING: Dict[str, Dict[str, float]] = {
 FALLBACK_FAMILY_PRICING: List[Tuple[str, Dict[str, float]]] = [
     ("gemini-4-hydrogen*",             {"input": 1.50, "output":  7.50, "cache_write": 1.875,  "cache_read": 0.075}),
     ("gemini-flash-worker-agy*",       {"input": 1.50, "output":  7.50, "cache_write": 1.875,  "cache_read": 0.075}),
+    ("gemini-pro-orchestrator-neon*",  {"input": 3.00, "output": 15.00, "cache_write": 3.75,   "cache_read": 0.15}),
+    ("gemini-4-neon*",                 {"input": 3.00, "output": 15.00, "cache_write": 3.75,   "cache_read": 0.15}),
     ("gemini-pro-orchestrator-argon*", {"input": 4.00, "output": 20.00, "cache_write": 5.00,   "cache_read": 0.20}),
     ("gemini-4-argon*",                {"input": 4.00, "output": 20.00, "cache_write": 5.00,   "cache_read": 0.20}),
     ("gemini-4-carbon*",               {"input": 4.00, "output": 20.00, "cache_write": 5.00,   "cache_read": 0.20}),
@@ -142,6 +147,7 @@ FALLBACK_FAMILY_PRICING: List[Tuple[str, Dict[str, float]]] = [
 
 AGY_MODEL_ALIASES: Dict[str, str] = {
     "gemini-flash-worker-agy": "gemini-4-hydrogen",
+    "gemini-pro-orchestrator-neon": "gemini-4-neon",
     "gemini-pro-orchestrator-argon": "gemini-4-argon",
     "gemini-pro-orchestrator": "gemini-4-carbon",
 }
@@ -149,9 +155,10 @@ AGY_MODEL_ALIASES: Dict[str, str] = {
 # Standard (non-promotional) list-price floors applied on top of LiteLLM entries
 # so introductory promo windows do not understate API-equivalent value.
 STANDARD_LIST_PRICE_FLOORS: Dict[str, Dict[str, float]] = {
-    "gemini-4-hydrogen": {"input": 1.50, "output":  7.50, "cache_write": 1.875, "cache_read": 0.075},
     "gemini-4-carbon":   {"input": 4.00, "output": 20.00, "cache_write": 5.00,  "cache_read": 0.20},
     "gemini-4-argon":    {"input": 4.00, "output": 20.00, "cache_write": 5.00,  "cache_read": 0.20},
+    "gemini-4-neon":     {"input": 3.00, "output": 15.00, "cache_write": 3.75,  "cache_read": 0.15},
+    "gemini-4-hydrogen": {"input": 1.50, "output":  7.50, "cache_write": 1.875, "cache_read": 0.075},
     "gemini-3.8-flash":  {"input": 1.50, "output":  7.50, "cache_write": 1.875, "cache_read": 0.15},
 }
 
@@ -473,7 +480,7 @@ def load_pricing(offline: bool = False) -> None:
         if extracted:
             MODEL_PRICING["claude"] = extracted
 
-    for codename in ("hydrogen", "carbon", "argon"):
+    for codename in ("carbon", "argon", "neon", "hydrogen"):
         base_name = f"gemini-4-{codename}"
         for candidate in (base_name, f"gemini/{base_name}", f"vertex_ai/{base_name}"):
             if candidate in raw:
@@ -590,16 +597,18 @@ def lookup_fallback_pricing(model_str: str) -> Dict[str, float]:
 # Classification, timestamps & active-time helpers
 # ---------------------------------------------------------------------------
 def classify_model(raw: str) -> str:
-    """Classify an Antigravity model string into hydrogen/carbon/argon/flash/claude/other.
+    """Classify an Antigravity model string into carbon/argon/neon/hydrogen/flash/claude/other.
 
     Matches `ModelClass.classify(_:)` in `Sources/Core_ModelClass.swift`:
       1. contains "hydrogen" or "flash-worker-agy" -> "hydrogen"
       2. contains "argon"    -> "argon" (checked BEFORE "orchestrator" so
          "gemini-pro-orchestrator-argon" maps to "argon")
-      3. contains "carbon" or "orchestrator" or ("gemini" and "pro") or "ultra" -> "carbon"
-      4. contains "flash" or "lite" -> "flash"
-      5. contains "claude" or "opus" or "sonnet" or "haiku" -> "claude"
-      6. otherwise -> "other"
+      3. contains "neon"     -> "neon" (checked BEFORE "orchestrator" so
+         "gemini-pro-orchestrator-neon" maps to "neon")
+      4. contains "carbon" or "orchestrator" or ("gemini" and "pro") or "ultra" -> "carbon"
+      5. contains "flash" or "lite" -> "flash"
+      6. contains "claude" or "opus" or "sonnet" or "haiku" -> "claude"
+      7. otherwise -> "other"
     """
     if not raw or not isinstance(raw, str):
         return "other"
@@ -610,6 +619,8 @@ def classify_model(raw: str) -> str:
         return "hydrogen"
     if "argon" in m:
         return "argon"
+    if "neon" in m:
+        return "neon"
     if "carbon" in m or "orchestrator" in m or ("gemini" in m and "pro" in m) or "ultra" in m:
         return "carbon"
     if "flash" in m or "lite" in m:

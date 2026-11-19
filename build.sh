@@ -155,7 +155,7 @@ Requirements:
   - Google Antigravity CLI, Desktop, or IDE (data in ~/.gemini/)
 
 Features:
-  - Cost & Tokens dual view with per-model breakdown (Hydrogen / Carbon / Argon / Flash / Claude / Other)
+  - Cost & Tokens dual view with per-model breakdown (Carbon / Argon / Neon / Hydrogen / Flash / Claude / Other)
   - Today / This Week / This Month summary cards + daily stacked chart
   - Active Time view (Week timeline, Month timeline, GitHub-style Year heatmap)
   - Live Antigravity sessions grouped by workspace with click-to-jump

@@ -172,15 +172,38 @@ struct QuotaParserTests {
         #expect(info.tier == "Google AI Ultra")
 
         let modelsStdout = """
+        gemini-4-neon-high\tGemini 4 Neon (High)
+        gemini-pro-orchestrator-neon\tOrchestrator (Neon)
         gemini-4-hydrogen-xhigh\tGemini 4 Hydrogen (XHigh)
         gemini-pro-orchestrator-argon\tOrchestrator (Argon)
         gpt-oss-120b-medium\tGPT-OSS 120B (Medium)
         """
         let rows = AGYQuotaParser.parseAGYModelsOutput(modelsStdout)
-        #expect(rows.count == 3)
-        #expect(rows[0].modelClass == .hydrogen)
-        #expect(rows[1].modelClass == .argon)
-        #expect(rows[2].modelClass == .other)
+        #expect(rows.count == 5)
+        #expect(rows[0].modelClass == .neon)
+        #expect(rows[1].modelClass == .neon)
+        #expect(rows[2].modelClass == .hydrogen)
+        #expect(rows[3].modelClass == .argon)
+        #expect(rows[4].modelClass == .other)
+    }
+
+    @Test("Buckets gemini-4-neon without explicit quotaBucketName into gemini instead of claude_partner")
+    func bucketNeonIntoGeminiWithoutExplicitBucket() {
+        let json = """
+        {
+          "models": {
+            "gemini-4-neon-high": {
+              "displayName": "Gemini 4 Neon (High)",
+              "quotaInfo": { "remainingFraction": 0.78, "resetTime": "2026-11-19T12:00:00Z" }
+            }
+          }
+        }
+        """
+        let buckets = AGYQuotaParser.parseAvailableModelsJSON(Data(json.utf8))
+        #expect(buckets.count == 1)
+        #expect(buckets[0].id == "gemini")
+        #expect(buckets[0].remainingPercent == 78)
+        #expect(buckets[0].modelClasses == [.neon])
     }
 
     @Test("Parses go-keyring-base64 Keychain payload with microsecond expiry and id_token_email")

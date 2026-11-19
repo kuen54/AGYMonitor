@@ -260,7 +260,7 @@ struct SubscriptionView: View {
                         ),
                         usedPercent: q.five_hour.displayPercent,
                         resetAt: q.fiveHourResetDate,
-                        accentModelClasses: [.hydrogen, .carbon, .argon, .flash]
+                        accentModelClasses: ModelClass.allCases.filter(\.isGeminiFamily)
                     )
                 }
 
@@ -270,7 +270,7 @@ struct SubscriptionView: View {
                         label: loc("sub1pWeeklyLabel"),
                         usedPercent: lim.displayPercent,
                         resetAt: lim.resetDate,
-                        accentModelClasses: [.hydrogen, .carbon, .argon, .flash]
+                        accentModelClasses: ModelClass.allCases.filter(\.isGeminiFamily)
                     )
                 }
 

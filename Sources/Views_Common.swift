@@ -8,18 +8,20 @@ import AppKit
 //
 // Color mapping lives in the UI layer so SwiftUI Color stays out of Core_*.swift.
 
-/// Single source of truth for Antigravity's 6 model classes:
-/// - `.hydrogen`: deep violet/indigo (flagship reasoning)
-/// - `.carbon`: Antigravity cobalt blue (default pro / orchestrator)
-/// - `.argon`: cyan/teal (fast pro)
+/// Single source of truth for Antigravity's 7 model classes (tier order):
+/// - `.carbon`: Antigravity cobalt blue (flagship pro / orchestrator)
+/// - `.argon`: cyan/teal (heavy workhorse pro)
+/// - `.neon`: vivid neon magenta/pink (mid-tier pro / orchestrator)
+/// - `.hydrogen`: deep violet/indigo (high-speed reasoning / worker)
 /// - `.flash`: emerald/mint (Gemini Flash)
 /// - `.claude`: warm terracotta/coral (#D97757)
 /// - `.other`: neutral slate
 func modelClassColor(_ mc: ModelClass) -> Color {
     switch mc {
-    case .hydrogen: return Color(red: 0.520, green: 0.320, blue: 0.960) // #8552F5 deep violet/indigo
     case .carbon:   return Color(red: 0.250, green: 0.480, blue: 0.970) // #407AF8 Antigravity cobalt blue
     case .argon:    return Color(red: 0.080, green: 0.710, blue: 0.830) // #14B5D4 cyan/teal
+    case .neon:     return Color(red: 0.925, green: 0.282, blue: 0.600) // #EC4899 neon magenta/pink
+    case .hydrogen: return Color(red: 0.520, green: 0.320, blue: 0.960) // #8552F5 deep violet/indigo
     case .flash:    return Color(red: 0.160, green: 0.770, blue: 0.510) // #29C482 emerald/mint
     case .claude:   return Color(red: 0.851, green: 0.467, blue: 0.341) // #D97757 warm terracotta/coral
     case .other:    return Color(red: 0.560, green: 0.600, blue: 0.660) // #8F99A8 neutral slate

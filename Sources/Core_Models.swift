@@ -124,8 +124,8 @@ public struct MonthlySnapshot: Codable, Equatable, Sendable {
 public struct ActiveInterval: Codable, Equatable, Sendable {
     public let startSec: Int
     public let endSec: Int
-    /// Dominant model class for the interval ("hydrogen"/"carbon"/"argon"/"flash"/
-    /// "claude"/"other"). nil = no model-tagged event in the interval (user-only)
+    /// Dominant model class for the interval ("carbon"/"argon"/"neon"/"hydrogen"/
+    /// "flash"/"claude"/"other"). nil = no model-tagged event in the interval (user-only)
     /// or a pre-attribution payload. Cosmetic only — never affects durations.
     public let model: String?
     public var durationSeconds: Int { endSec - startSec }

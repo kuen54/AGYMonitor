@@ -6,14 +6,16 @@ import Foundation
 // `analyze_usage.py` emits (`totals_by_model` / `daily_breakdown.*.models` keys)
 // and that `AGYQuotaParser` assigns to per-model quota buckets.
 //
-// CaseIterable order IS the display/iteration order (Hydrogen flagship first,
-// then Carbon/Argon/Flash Gemini tiers, Claude partner models, and Other last).
+// CaseIterable order IS the display/iteration order (ordered from highest to
+// lowest model tier: Carbon, Argon, Neon, Hydrogen, Flash Gemini tiers, then
+// Claude partner models, and Other last).
 // Color mapping deliberately lives in Views_Common.swift so SwiftUI never enters
 // the pure core.
 public enum ModelClass: String, Codable, CaseIterable, Sendable {
-    case hydrogen = "hydrogen"
     case carbon   = "carbon"
     case argon    = "argon"
+    case neon     = "neon"
+    case hydrogen = "hydrogen"
     case flash    = "flash"
     case claude   = "claude"
     case other    = "other"
@@ -21,9 +23,10 @@ public enum ModelClass: String, Codable, CaseIterable, Sendable {
     /// Concise human-facing label used in compact model rows and chips.
     public var displayName: String {
         switch self {
-        case .hydrogen: return "Hydrogen"
         case .carbon:   return "Carbon"
         case .argon:    return "Argon"
+        case .neon:     return "Neon"
+        case .hydrogen: return "Hydrogen"
         case .flash:    return "Flash"
         case .claude:   return "Claude"
         case .other:    return "Other"
@@ -33,9 +36,10 @@ public enum ModelClass: String, Codable, CaseIterable, Sendable {
     /// Full provider-qualified display name.
     public var fullDisplayName: String {
         switch self {
-        case .hydrogen: return "Gemini Hydrogen"
         case .carbon:   return "Gemini Carbon"
         case .argon:    return "Gemini Argon"
+        case .neon:     return "Gemini Neon"
+        case .hydrogen: return "Gemini Hydrogen"
         case .flash:    return "Gemini Flash"
         case .claude:   return "Claude"
         case .other:    return "Other"
@@ -45,7 +49,7 @@ public enum ModelClass: String, Codable, CaseIterable, Sendable {
     /// True when this class belongs to Google's first-party Gemini quota family.
     public var isGeminiFamily: Bool {
         switch self {
-        case .hydrogen, .carbon, .argon, .flash:
+        case .carbon, .argon, .neon, .hydrogen, .flash:
             return true
         case .claude, .other:
             return false
@@ -65,10 +69,14 @@ public enum ModelClass: String, Codable, CaseIterable, Sendable {
         if lower.contains("hydrogen") || lower.contains("flash-worker-agy") {
             return .hydrogen
         }
-        // Check "argon" BEFORE "orchestrator" so "gemini-pro-orchestrator-argon"
-        // and "Orchestrator (Argon)" classify as `.argon`.
+        // Check "argon" and "neon" BEFORE "orchestrator" so
+        // "gemini-pro-orchestrator-argon" / "Orchestrator (Argon)" classify as `.argon`
+        // and "gemini-pro-orchestrator-neon" / "Orchestrator (Neon)" classify as `.neon`.
         if lower.contains("argon") {
             return .argon
+        }
+        if lower.contains("neon") {
+            return .neon
         }
         if lower.contains("carbon")
             || lower.contains("orchestrator")

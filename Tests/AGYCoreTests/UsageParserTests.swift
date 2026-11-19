@@ -8,7 +8,7 @@ struct UsageParserTests {
     @Test("parsePeriod decodes canonical and raw model keys in ModelClass order")
     func parsePeriodAndNormalizeKeys() throws {
         let json: [String: Any] = [
-            "grand_total_cost": 14.75,
+            "grand_total_cost": 18.00,
             "totals_by_model": [
                 "gemini-4-carbon-medium": [
                     "input_tokens": 5_000,
@@ -17,6 +17,14 @@ struct UsageParserTests {
                     "cache_write": 0,
                     "messages": 3,
                     "cost": 8.25,
+                ],
+                "gemini-pro-orchestrator-neon": [
+                    "input_tokens": 1_000,
+                    "output_tokens": 200,
+                    "cache_read": 3_000,
+                    "cache_write": 0,
+                    "messages": 2,
+                    "cost": 3.25,
                 ],
                 "hydrogen": [
                     "input_tokens": 2_000,
@@ -38,10 +46,10 @@ struct UsageParserTests {
         ]
 
         let period = try #require(UsageParser.parsePeriod(json))
-        #expect(abs(period.cost - 14.75) < 1e-6)
-        #expect(period.totalMessages == 6)
-        #expect(period.totalTokens == 40_400)
-        #expect(period.models.map(\.id) == ["hydrogen", "carbon", "claude"])
+        #expect(abs(period.cost - 18.00) < 1e-6)
+        #expect(period.totalMessages == 8)
+        #expect(period.totalTokens == 44_600)
+        #expect(period.models.map(\.id) == ["carbon", "neon", "hydrogen", "claude"])
 
         // Also verify real JSONSerialization (NSNumber-backed) dictionary round-trip
         let wireData = try JSONSerialization.data(withJSONObject: json)
