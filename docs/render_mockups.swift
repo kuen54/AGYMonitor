@@ -276,23 +276,31 @@ struct DemoPopover: View {
                         .fill(theme.accent)
                         .frame(width: 13.5, height: 13.5)
                     Text(loc("title").uppercased())
-                        .font(.system(size: 11, weight: .bold, design: .monospaced))
-                        .tracking(1.1)
+                        .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                        .tracking(1.6)
                         .foregroundColor(theme.inkPrimary)
 
-                    Text("▲ \(String(format: loc("waitTagFmt"), 1))")
-                        .font(.system(size: 8.5, weight: .bold, design: .monospaced))
-                        .foregroundColor(.black)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1.5)
-                        .background(theme.signalAmber)
+                    HStack(spacing: 4) {
+                        Rectangle()
+                            .fill(theme.signalAmber)
+                            .frame(width: 4.5, height: 4.5)
+                            .rotationEffect(.degrees(45))
+                        Text(String(format: loc("waitTagFmt"), 1))
+                            .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
+                            .tracking(0.4)
+                            .foregroundColor(theme.signalAmber)
+                    }
+                    .padding(.horizontal, 5.5)
+                    .padding(.vertical, 2)
+                    .background(theme.signalAmber.opacity(theme.isDark ? 0.12 : 0.08))
+                    .overlay(Rectangle().stroke(theme.signalAmber.opacity(0.48), lineWidth: 0.75))
                 }
 
                 Spacer(minLength: 4)
 
                 headerAccessory
             }
-            .padding(.horizontal, 12)
+            .padding(.horizontal, 14)
             .padding(.top, 11)
             .padding(.bottom, 9)
 
@@ -344,11 +352,16 @@ struct DemoPopover: View {
                     demoBareIcon("power")
                 }
             }
-            .padding(.horizontal, 12)
+            .padding(.horizontal, 14)
             .padding(.vertical, 7)
         }
         .frame(width: AGYTheme.panelWidth)
-        .background(notch ? Color.clear : theme.canvas)
+        .background(
+            ZStack {
+                notch ? Color.clear : theme.canvas
+                ArchivalGrainOverlay()
+            }
+        )
         .environment(\.localizer, loc)
         .environment(\.agyTheme, theme)
         .environment(\.telemetryStaticRender, true)

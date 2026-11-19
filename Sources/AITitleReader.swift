@@ -159,33 +159,33 @@ enum AITitleReader {
         return bestPath
     }
 
-    /// Bounded 256 KB-chunk backwards tail reader (4 MB cap) extracting title + latest user prompt.
+    /// Exponentially widening bounded tail reader (256 KB -> 1 MB -> 4 MB cap)
+    /// extracting title + latest user prompt without O(N²) chunk re-scanning.
     static func summary(inFileAt path: String, needInstruction: Bool = true) -> TranscriptSummary {
         guard let handle = FileHandle(forReadingAtPath: path) else { return .empty }
         defer { try? handle.close() }
 
-        let chunk = 256 * 1024            // 256 KB per step
-        let cap: UInt64 = 4 * 1024 * 1024 // 4 MB max tail read
-
         guard let end = try? handle.seekToEnd(), end > 0 else { return .empty }
-        var pos = end
-        var buffer = Data()
+        let windowSizes: [UInt64] = [256 * 1024, 1024 * 1024, 4 * 1024 * 1024]
         var result = TranscriptSummary.empty
-        while pos > 0 && UInt64(buffer.count) < cap {
-            let step = Int(min(UInt64(chunk), pos))
-            pos -= UInt64(step)
-            do { try handle.seek(toOffset: pos) } catch { break }
-            let data = handle.readData(ofLength: step)
-            buffer = data + buffer
-            result = TranscriptParse.scan(buffer)
-            if (!needInstruction && result.title != nil)
-                || (needInstruction && result.instruction != nil && (result.title != nil || pos == 0)) {
+        var scannedBytes: UInt64 = 0
+
+        for targetWindow in windowSizes {
+            let readLen = min(targetWindow, end)
+            if readLen <= scannedBytes { break }
+            let offset = end - readLen
+            do { try handle.seek(toOffset: offset) } catch { break }
+            let data = handle.readData(ofLength: Int(readLen))
+            scannedBytes = readLen
+            result = TranscriptParse.scan(data)
+
+            if !needInstruction && result.title != nil {
                 break
             }
-            // In AGY transcripts, titles usually live in annotations/*.pbtxt rather than
-            // inside transcript.jsonl; once we found the latest instruction in the first
-            // chunk(s), avoid scanning megabytes looking for an absent inline title.
-            if needInstruction && result.instruction != nil && buffer.count >= 512 * 1024 {
+            if needInstruction && result.instruction != nil {
+                break
+            }
+            if readLen >= end {
                 break
             }
         }

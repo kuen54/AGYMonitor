@@ -97,6 +97,9 @@ struct SessionAwareLogo: View {
     var size: CGFloat = 16
     var color: Color = .agyBrand
     var dotSize: CGFloat = 5
+    /// Set to false whenever the hosting surface is hidden (e.g. menu bar in Notch mode,
+    /// closed popover, or hidden fullscreen notch pill) so the logo drops to 0 Hz.
+    var isActive: Bool = true
 
     @State private var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
     @Environment(\.telemetryStaticRender) private var isStaticRender
@@ -110,58 +113,68 @@ struct SessionAwareLogo: View {
 
     private var visualState: LogoVisualState {
         LogoVisualState.resolve(
-            anyBusy: sessionStore.anyBusy && !isStaticRender,
+            anyBusy: sessionStore.anyBusy && !isStaticRender && isActive,
             anyWaiting: sessionStore.anyWaiting,
             anyDoneUnseen: sessionStore.anyDoneUnseen,
-            reduceMotion: reduceMotion || isStaticRender
+            reduceMotion: reduceMotion || isStaticRender || !isActive
         )
     }
 
     @ViewBuilder private var animatedLogo: some View {
         switch visualState.animation {
         case .levitate:
-            TimelineView(.animation) { ctx in
+            // Pure Canvas at 12fps: avoids 120Hz NSHostingView AutoLayout passes & dynamic color churn.
+            TimelineView(.animation(minimumInterval: 1.0 / 12.0)) { ctx in
                 let t = ctx.date.timeIntervalSinceReferenceDate
                 let rawProgress = (t / Self.levitatePeriod).truncatingRemainder(dividingBy: 1.0)
                 let progress = rawProgress < 0 ? rawProgress + 1.0 : rawProgress
                 let wave = sin(2 * Double.pi * progress)
-                let yOffset = -size * 0.08 * wave
-                let scale = 1.0 + 0.04 * wave
-                let sweepY = 1.35 - 1.70 * progress
+                let yOffset = CGFloat(-size * 0.08 * wave)
+                let scale = CGFloat(1.0 + 0.04 * wave)
+                let sweepY = CGFloat(1.35 - 1.70 * progress)
 
-                ZStack {
-                    Capsule()
-                        .fill(color.opacity(0.75 * (1.0 - progress)))
-                        .frame(
-                            width: size * 0.28 * (1.0 - 0.35 * progress),
-                            height: max(1.3, size * 0.085)
-                        )
-                        .offset(y: size * (0.28 + 0.16 * progress))
+                Canvas { context, canvasSize in
+                    let w = canvasSize.width
+                    let h = canvasSize.height
 
-                    ZStack {
-                        LogoShape().fill(color.opacity(0.82))
-                        LogoShape().fill(
-                            LinearGradient(
-                                stops: [
+                    // Ground shadow capsule
+                    let capW = w * 0.28 * CGFloat(1.0 - 0.35 * progress)
+                    let capH = max(1.3, h * 0.085)
+                    let capY = h * 0.5 + h * CGFloat(0.28 + 0.16 * progress) - capH * 0.5
+                    let capRect = CGRect(x: (w - capW) * 0.5, y: capY, width: capW, height: capH)
+                    context.fill(
+                        Path(roundedRect: capRect, cornerRadius: capH * 0.5),
+                        with: .color(color.opacity(0.75 * (1.0 - progress)))
+                    )
+
+                    // Levitating logo mark + upward optical sheen
+                    context.drawLayer { layer in
+                        layer.translateBy(x: w * 0.5, y: h * 0.5 + yOffset)
+                        layer.scaleBy(x: scale, y: scale)
+                        layer.translateBy(x: -w * 0.5, y: -h * 0.5)
+
+                        let logoPath = AGYLogo.swiftUIPath(in: CGRect(origin: .zero, size: canvasSize))
+                        layer.fill(logoPath, with: .color(color.opacity(0.84)))
+                        layer.fill(
+                            logoPath,
+                            with: .linearGradient(
+                                Gradient(stops: [
                                     .init(color: .clear, location: 0.0),
                                     .init(color: Color(red: 0.45, green: 0.88, blue: 1.0).opacity(0.85), location: 0.35),
                                     .init(color: Color.white.opacity(0.95), location: 0.50),
                                     .init(color: Color(red: 0.45, green: 0.88, blue: 1.0).opacity(0.85), location: 0.65),
                                     .init(color: .clear, location: 1.0),
-                                ],
-                                startPoint: UnitPoint(x: 0.5, y: sweepY + 0.38),
-                                endPoint: UnitPoint(x: 0.5, y: sweepY - 0.38)
+                                ]),
+                                startPoint: CGPoint(x: w * 0.5, y: h * (sweepY + 0.38)),
+                                endPoint: CGPoint(x: w * 0.5, y: h * (sweepY - 0.38))
                             )
                         )
                     }
-                    .frame(width: size, height: size)
-                    .scaleEffect(scale)
-                    .offset(y: yOffset)
                 }
                 .frame(width: size, height: size)
             }
         case .breatheOpacity:
-            TimelineView(.animation) { ctx in
+            TimelineView(.animation(minimumInterval: 1.0 / 8.0)) { ctx in
                 let t = ctx.date.timeIntervalSinceReferenceDate
                 let phase = (sin(2 * Double.pi * t / Self.breathePeriod) + 1) / 2
                 logoMark.opacity(0.55 + 0.45 * phase)
@@ -250,18 +263,190 @@ struct HairlineRule: View {
                 if showCrosshairs {
                     GeometryReader { geo in
                         let w = geo.size.width
-                        let inset: CGFloat = 12
+                        let inset: CGFloat = 14
                         Path { p in
-                            p.move(to: CGPoint(x: inset, y: -2.5))
-                            p.addLine(to: CGPoint(x: inset, y: 3.5))
-                            p.move(to: CGPoint(x: w - inset, y: -2.5))
-                            p.addLine(to: CGPoint(x: w - inset, y: 3.5))
+                            p.move(to: CGPoint(x: inset, y: -2.0))
+                            p.addLine(to: CGPoint(x: inset, y: 3.0))
+                            p.move(to: CGPoint(x: w - inset, y: -2.0))
+                            p.addLine(to: CGPoint(x: w - inset, y: 3.0))
                         }
-                        .stroke(theme.reticle, lineWidth: 1)
+                        .stroke(theme.reticle.opacity(0.68), lineWidth: 0.85)
                     }
                     .allowsHitTesting(false)
                 }
             }
+    }
+}
+
+/// Deterministic archival paper / film micro-grain tile pre-baked with premultiplied alpha.
+/// Uses native hardware-tiled Image(.tile) with normal source-over compositing — ZERO offscreen
+/// `.blendMode` render pass, ZERO per-frame Canvas draw loops, identical print materiality.
+struct ArchivalGrainOverlay: View {
+    @Environment(\.agyTheme) private var theme
+
+    private static func makePremultipliedTile(darkMode: Bool) -> NSImage? {
+        let side = 128
+        var rgba = [UInt8](repeating: 0, count: side * side * 4)
+        var seed: UInt64 = 0x9E3779B97F4A7C15
+        for i in 0..<(side * side) {
+            seed = seed &* 6364136223846793005 &+ 1442695040888963407
+            let r1 = Int((seed >> 33) & 0xFF)
+            seed = seed &* 6364136223846793005 &+ 1442695040888963407
+            let r2 = Int((seed >> 33) & 0xFF)
+            let n = (r1 + r2) >> 1 // triangular 0...255 centered around 128
+            let base = i * 4
+            if darkMode {
+                // Subtle bright film micro-grain (premultiplied white, alpha 0...11/255)
+                let a = UInt8(min(11, max(0, (n * 11) / 255)))
+                rgba[base] = a
+                rgba[base + 1] = a
+                rgba[base + 2] = a
+                rgba[base + 3] = a
+            } else {
+                // Subtle dark archival paper fiber (premultiplied charcoal, alpha 0...12/255)
+                let inv = 255 - n
+                let a = UInt8(min(12, max(0, (inv * 12) / 255)))
+                rgba[base] = 0
+                rgba[base + 1] = 0
+                rgba[base + 2] = 0
+                rgba[base + 3] = a
+            }
+        }
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let provider = CGDataProvider(data: Data(rgba) as CFData) else { return nil }
+        guard let cg = CGImage(
+            width: side,
+            height: side,
+            bitsPerComponent: 8,
+            bitsPerPixel: 32,
+            bytesPerRow: side * 4,
+            space: colorSpace,
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: false,
+            intent: .defaultIntent
+        ) else { return nil }
+        return NSImage(cgImage: cg, size: NSSize(width: side, height: side))
+    }
+
+    private static let lightTileImage: NSImage? = makePremultipliedTile(darkMode: false)
+    private static let darkTileImage: NSImage? = makePremultipliedTile(darkMode: true)
+
+    var body: some View {
+        if !theme.isNotch, let nsImage = (theme.isDark ? Self.darkTileImage : Self.lightTileImage) {
+            Image(nsImage: nsImage)
+                .resizable(resizingMode: .tile)
+                .allowsHitTesting(false)
+        }
+    }
+}
+
+/// Bounded LRU cache of pre-rendered 2x Retina NSImages for heavy static Canvas artwork
+/// (10,000-dot stipple clouds, 12-band Marching Squares contours, 6-stratum rock lithologies).
+/// Renders ONCE via SwiftUI ImageRenderer and blits as a native GPU texture (~0.03ms) across
+/// every subsequent hover, scroll, tab switch, and Notch open/close without CAMetalLayer stalls.
+@MainActor
+final class TelemetryArtworkCache {
+    static let shared = TelemetryArtworkCache()
+
+    private var entries: [AnyHashable: NSImage] = [:]
+    private var order: [AnyHashable] = []
+    private let maxEntries = 24
+
+    func image<K: Hashable, V: View>(
+        for key: K,
+        size: CGSize,
+        @ViewBuilder content: () -> V
+    ) -> NSImage? {
+        guard size.width >= 2, size.height >= 2 else { return nil }
+        let box = AnyHashable(key)
+        if let hit = entries[box] {
+            if let idx = order.firstIndex(of: box) {
+                order.remove(at: idx)
+                order.append(box)
+            }
+            return hit
+        }
+        let renderer = ImageRenderer(
+            content: content()
+                .frame(width: size.width, height: size.height)
+                .environment(\.telemetryStaticRender, true)
+        )
+        renderer.scale = 2.0
+        guard let img = renderer.nsImage else { return nil }
+        entries[box] = img
+        order.removeAll { $0 == box }
+        order.append(box)
+        while order.count > maxEntries {
+            let evicted = order.removeFirst()
+            entries.removeValue(forKey: evicted)
+        }
+        return img
+    }
+}
+
+/// Renders a heavy static Canvas artwork once into `TelemetryArtworkCache` at 2x Retina scale
+/// and blits the cached `NSImage` on all subsequent opens, tab switches, and hovers.
+/// Falls back directly to live vector rendering during `ImageRenderer` export snapshots.
+struct CachedTelemetryArtwork<Key: Hashable, Content: View>: View {
+    let key: Key
+    let width: CGFloat
+    let height: CGFloat
+    let content: () -> Content
+
+    @Environment(\.telemetryStaticRender) private var isStaticRender
+
+    private struct SizedKey: Hashable {
+        let key: Key
+        let wPx: Int
+        let hPx: Int
+    }
+
+    init(
+        key: Key,
+        width: CGFloat,
+        height: CGFloat,
+        @ViewBuilder content: @escaping () -> Content
+    ) {
+        self.key = key
+        self.width = width
+        self.height = height
+        self.content = content
+    }
+
+    var body: some View {
+        if isStaticRender || width < 2 || height < 2 {
+            content()
+                .frame(width: width, height: height)
+        } else {
+            let sizedKey = SizedKey(
+                key: key,
+                wPx: Int((width * 2.0).rounded()),
+                hPx: Int((height * 2.0).rounded())
+            )
+            if let img = TelemetryArtworkCache.shared.image(
+                for: sizedKey,
+                size: CGSize(width: width, height: height),
+                content: content
+            ) {
+                Image(nsImage: img)
+                    .resizable()
+                    .frame(width: width, height: height)
+            } else {
+                content()
+                    .frame(width: width, height: height)
+            }
+        }
+    }
+}
+
+extension View {
+    /// Retained as an intentional no-op: heavy static Canvases now use `CachedTelemetryArtwork`
+    /// instead of `.drawingGroup()` to avoid CAMetalLayer creation hitches on Notch open / tab switch.
+    @ViewBuilder
+    func telemetryRasterized(_ enabled: Bool) -> some View {
+        self
     }
 }
 
@@ -273,14 +458,18 @@ struct DotGraticuleBackground: View {
     var body: some View {
         Canvas { context, size in
             let color = theme.hairline.opacity(0.65)
+            var dots = Path()
             var y: CGFloat = spacing * 0.5
             while y < size.height {
                 var x: CGFloat = spacing * 0.5
                 while x < size.width {
-                    context.fill(Path(CGRect(x: x, y: y, width: 1, height: 1)), with: .color(color))
+                    dots.addRect(CGRect(x: x, y: y, width: 1, height: 1))
                     x += spacing
                 }
                 y += spacing
+            }
+            if !dots.isEmpty {
+                context.fill(dots, with: .color(color))
             }
         }
         .allowsHitTesting(false)
@@ -336,17 +525,21 @@ func drawStrataRect(
         context.drawLayer { layer in
             layer.clip(to: Path(rect))
             let step: CGFloat = 3.0
+            var dots = Path()
             var row = 0
             var y = rect.minY + 0.5
             while y < rect.maxY {
                 let offset: CGFloat = (row % 2 == 0) ? 0.5 : 2.0
                 var x = rect.minX + offset
                 while x < rect.maxX {
-                    layer.fill(Path(CGRect(x: x, y: y, width: 1.2, height: 1.2)), with: .color(color))
+                    dots.addRect(CGRect(x: x, y: y, width: 1.2, height: 1.2))
                     x += step
                 }
                 row += 1
                 y += step * 0.85
+            }
+            if !dots.isEmpty {
+                layer.fill(dots, with: .color(color))
             }
         }
     case .outline:
@@ -436,14 +629,25 @@ struct VernierScaleBar: View {
             let tickW = max(1.0, step * 0.46)
             let filledCount = clamped > 0 ? max(1, Int((clamped * CGFloat(ticks)).rounded(.up))) : 0
 
+            var litTicks = Path()
+            var dimTicks = Path()
             for i in 0..<ticks {
                 let isMajor = (i % 15 == 0 || i == ticks - 1)
                 let tickH: CGFloat = isMajor ? (barBottom - topPad) : (barBottom - topPad) * 0.66
                 let y = barBottom - tickH
                 let x = CGFloat(i) * step + (step - tickW) * 0.5
                 let rect = CGRect(x: x, y: y, width: tickW, height: tickH)
-                let c = (i < filledCount) ? fillColor : theme.hairlineStrong.opacity(theme.isDark ? 0.55 : 0.48)
-                context.fill(Path(rect), with: .color(c))
+                if i < filledCount {
+                    litTicks.addRect(rect)
+                } else {
+                    dimTicks.addRect(rect)
+                }
+            }
+            if !dimTicks.isEmpty {
+                context.fill(dimTicks, with: .color(theme.hairlineStrong.opacity(theme.isDark ? 0.55 : 0.48)))
+            }
+            if !litTicks.isEmpty {
+                context.fill(litTicks, with: .color(fillColor))
             }
 
             if let pace = paceMarkerFraction {
@@ -451,17 +655,14 @@ struct VernierScaleBar: View {
                 let px = size.width * pClamped
                 let markerColor = paceWarning ? theme.signalAmber : theme.inkPrimary
 
-                // Inverted precision index triangle `▼`
-                var tri = Path()
-                tri.move(to: CGPoint(x: px - 3, y: 0))
-                tri.addLine(to: CGPoint(x: px + 3, y: 0))
-                tri.addLine(to: CGPoint(x: px, y: 3.5))
-                tri.closeSubpath()
-                context.fill(tri, with: .color(markerColor))
-
-                // Vertical calibrated cursor line cutting across ticks
-                let cursorRect = CGRect(x: px - 0.6, y: 3, width: 1.2, height: barBottom - 2)
-                context.fill(Path(cursorRect), with: .color(markerColor))
+                // Inverted precision index triangle `▼` + calibrated cursor line
+                var marker = Path()
+                marker.move(to: CGPoint(x: px - 3, y: 0))
+                marker.addLine(to: CGPoint(x: px + 3, y: 0))
+                marker.addLine(to: CGPoint(x: px, y: 3.5))
+                marker.closeSubpath()
+                marker.addRect(CGRect(x: px - 0.6, y: 3, width: 1.2, height: barBottom - 2))
+                context.fill(marker, with: .color(markerColor))
             }
         }
         .frame(height: 17)
@@ -474,6 +675,7 @@ struct PrecisionHeroNumber: View {
     var fraction: String? = nil
     var suffix: String? = nil
     var size: CGFloat = 34
+    var weight: Font.Weight = .light
     var accentPrimary: Color? = nil
 
     @Environment(\.agyTheme) private var theme
@@ -482,25 +684,25 @@ struct PrecisionHeroNumber: View {
         HStack(alignment: .firstTextBaseline, spacing: 0) {
             if let p = prefix, !p.isEmpty {
                 Text(p)
-                    .font(.system(size: size * 0.48, weight: .light, design: .monospaced))
-                    .foregroundColor(theme.inkSecondary)
-                    .padding(.trailing, 2)
+                    .font(.system(size: size * 0.44, weight: .light, design: .monospaced))
+                    .foregroundColor(theme.inkMuted)
+                    .padding(.trailing, 2.5)
             }
             Text(whole)
-                .font(.system(size: size, weight: .light, design: .monospaced))
+                .font(.system(size: size, weight: weight, design: .monospaced))
                 .monospacedDigit()
                 .foregroundColor(accentPrimary ?? theme.inkPrimary)
                 .contentTransition(.numericText())
             if let f = fraction, !f.isEmpty {
                 Text(f)
-                    .font(.system(size: size * 0.54, weight: .light, design: .monospaced))
+                    .font(.system(size: size * 0.50, weight: .light, design: .monospaced))
                     .monospacedDigit()
                     .foregroundColor(accentPrimary?.opacity(0.8) ?? theme.inkSecondary)
                     .contentTransition(.numericText())
             }
             if let s = suffix, !s.isEmpty {
                 Text(s)
-                    .font(.system(size: size * 0.42, weight: .medium, design: .monospaced))
+                    .font(.system(size: size * 0.40, weight: .medium, design: .monospaced))
                     .foregroundColor(theme.inkSecondary)
                     .padding(.leading, 3)
             }
@@ -514,13 +716,14 @@ struct RadarStatusDot: View {
     let kind: SessionLogic.SessionDotKind
     @Environment(\.agyTheme) private var theme
     @Environment(\.telemetryStaticRender) private var isStaticRender
+    @Environment(\.telemetryPanelVisible) private var isPanelVisible
     @State private var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
 
     var body: some View {
         Group {
             switch kind {
             case .busy:
-                if reduceMotion || isStaticRender {
+                if reduceMotion || isStaticRender || !isPanelVisible {
                     ZStack {
                         Circle()
                             .stroke(theme.accent.opacity(0.45), lineWidth: 1)
@@ -530,7 +733,7 @@ struct RadarStatusDot: View {
                             .frame(width: 5.5, height: 5.5)
                     }
                 } else {
-                    TimelineView(.animation) { ctx in
+                    TimelineView(.animation(minimumInterval: 1.0 / 12.0)) { ctx in
                         let raw = (ctx.date.timeIntervalSinceReferenceDate / 1.6)
                             .truncatingRemainder(dividingBy: 1.0)
                         let t = raw < 0 ? raw + 1.0 : raw
@@ -571,14 +774,15 @@ struct TelemetrySkeleton: View {
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
     @Environment(\.telemetryStaticRender) private var isStaticRender
+    @Environment(\.telemetryPanelVisible) private var isPanelVisible
     @State private var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
 
     var body: some View {
         Group {
-            if isStaticRender || reduceMotion {
+            if isStaticRender || reduceMotion || !isPanelVisible {
                 content(opacity: 0.85)
             } else {
-                TimelineView(.animation) { ctx in
+                TimelineView(.animation(minimumInterval: 1.0 / 12.0)) { ctx in
                     let wave = (sin(ctx.date.timeIntervalSinceReferenceDate * 3.5) + 1) / 2
                     content(opacity: 0.45 + 0.45 * wave)
                 }
@@ -666,13 +870,14 @@ struct RefreshToolbarButton: View {
 
     @Environment(\.agyTheme) private var theme
     @Environment(\.telemetryStaticRender) private var isStaticRender
+    @Environment(\.telemetryPanelVisible) private var isPanelVisible
     @State private var hovering = false
     @State private var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
 
     var body: some View {
         Group {
-            if isLoading && !isStaticRender && !reduceMotion {
-                TimelineView(.animation) { ctx in
+            if isLoading && isPanelVisible && !isStaticRender && !reduceMotion {
+                TimelineView(.animation(minimumInterval: 1.0 / 20.0)) { ctx in
                     let angle = (ctx.date.timeIntervalSinceReferenceDate * 360.0)
                         .truncatingRemainder(dividingBy: 360.0)
                     iconView(angle: angle, tint: theme.accent)
@@ -719,7 +924,7 @@ extension DisplayTab {
 }
 
 /// Full-bleed 5-column drafting tab grid bounded by edge-to-edge 1px hairlines.
-/// Active tab flips cleanly into a sharp inverted cursor block.
+/// Active tab uses a whisper-clean tonal plate + 1.5px bottom accent rule instead of heavy solid slabs.
 struct TelemetryTabBar: View {
     let items: [DisplayTab]
     @Binding var selection: DisplayTab
@@ -742,11 +947,12 @@ struct TelemetryTabBar: View {
 
                     HStack(spacing: 3.5) {
                         Text(indexLabel)
-                            .font(.system(size: 8.5, weight: .medium, design: .monospaced))
-                            .foregroundColor(isSelected ? theme.invertedInk.opacity(0.68) : theme.inkMuted)
+                            .font(.system(size: 8, weight: isSelected ? .semibold : .regular, design: .monospaced))
+                            .foregroundColor(isSelected ? theme.accent : theme.inkMuted.opacity(0.8))
                         Text(tab.shortLabel(loc))
-                            .font(.system(size: 10, weight: isSelected ? .bold : .medium, design: .monospaced))
-                            .foregroundColor(isSelected ? theme.invertedInk : theme.inkSecondary)
+                            .font(.system(size: 9.5, weight: isSelected ? .semibold : .regular, design: .monospaced))
+                            .tracking(0.4)
+                            .foregroundColor(isSelected ? theme.inkPrimary : (isHovered ? theme.inkPrimary.opacity(0.85) : theme.inkSecondary))
                             .lineLimit(1)
                             .minimumScaleFactor(0.85)
                         if tab == .session {
@@ -754,33 +960,36 @@ struct TelemetryTabBar: View {
                         }
                     }
                     .frame(maxWidth: .infinity)
-                    .frame(height: 26)
+                    .frame(height: 25)
                     .background(
-                        ZStack {
+                        ZStack(alignment: .bottom) {
                             if isSelected {
                                 Rectangle()
-                                    .fill(theme.invertedBg)
+                                    .fill(theme.surfaceRaised.opacity(theme.isDark ? 0.50 : 0.72))
                                     .matchedGeometryEffect(id: "activeTabPlate", in: tabNamespace)
+                                Rectangle()
+                                    .fill(theme.accent)
+                                    .frame(height: 1.5)
+                                    .matchedGeometryEffect(id: "activeTabRule", in: tabNamespace)
                             } else if isHovered {
                                 Rectangle()
-                                    .fill(theme.surfaceRaised.opacity(0.75))
+                                    .fill(theme.surfaceRaised.opacity(0.42))
                             }
                         }
                     )
                     .contentShape(Rectangle())
                     .onHover { inside in hovered = inside ? tab : (hovered == tab ? nil : hovered) }
                     .onTapGesture {
-                        withAnimation(.spring(response: 0.22, dampingFraction: 0.88)) {
-                            selection = tab
-                        }
+                        selection = tab
                     }
 
                     if index < items.count - 1 {
-                        Rectangle().fill(theme.hairline).frame(width: 1)
+                        Rectangle().fill(theme.hairline.opacity(0.75)).frame(width: 1)
                     }
                 }
             }
             .fixedSize(horizontal: false, vertical: true)
+            .animation(.easeOut(duration: 0.12), value: selection)
 
             Rectangle().fill(theme.hairline).frame(height: 1)
         }
@@ -791,26 +1000,27 @@ struct TelemetryTabBar: View {
         let count = sessionStore.liveCount
         if sessionStore.anyWaiting {
             HStack(spacing: 2) {
-                Circle().fill(theme.signalAmber).frame(width: 4.5, height: 4.5)
+                Circle().fill(theme.signalAmber).frame(width: 4, height: 4)
                 Text("\(count)")
-                    .font(.system(size: 8.5, weight: .bold, design: .monospaced))
-                    .foregroundColor(isSelected ? theme.signalAmber : theme.signalAmber)
+                    .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                    .foregroundColor(theme.signalAmber)
             }
         } else if count > 0 {
             let dotColor: Color = sessionStore.anyBusy
-                ? (isSelected ? theme.invertedInk : theme.accent)
-                : (sessionStore.anyDoneUnseen ? theme.signalGreen : (isSelected ? theme.invertedInk.opacity(0.7) : theme.inkMuted))
+                ? theme.accent
+                : (sessionStore.anyDoneUnseen ? theme.signalGreen : theme.inkMuted)
             HStack(spacing: 2) {
-                Circle().fill(dotColor).frame(width: 4, height: 4)
+                Circle().fill(dotColor).frame(width: 3.5, height: 3.5)
                 Text("\(count)")
-                    .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
-                    .foregroundColor(isSelected ? theme.invertedInk : (dotColor == theme.inkMuted ? theme.inkSecondary : dotColor))
+                    .font(.system(size: 8, weight: .medium, design: .monospaced))
+                    .foregroundColor(isSelected ? theme.inkPrimary : (dotColor == theme.inkMuted ? theme.inkSecondary : dotColor))
             }
         }
     }
 }
 
 /// Edge-to-edge sub-tab strip bounded by 1px hairlines (Week / Month / Year).
+/// Selected segment uses whisper-light tonal plate + 1.5px bottom accent rule (no heavy solid slab).
 struct TelemetrySegmentedStrip<Value: Hashable>: View {
     let items: [Value]
     @Binding var selection: Value
@@ -828,37 +1038,44 @@ struct TelemetrySegmentedStrip<Value: Hashable>: View {
                     let isHovered = (item == hovered)
 
                     Text(label(item).uppercased())
-                        .font(.system(size: 9.5, weight: isSelected ? .bold : .medium, design: .monospaced))
+                        .font(.system(size: 9.5, weight: isSelected ? .semibold : .regular, design: .monospaced))
                         .tracking(0.8)
-                        .foregroundColor(isSelected ? theme.invertedInk : theme.inkSecondary)
+                        .foregroundColor(
+                            isSelected
+                                ? theme.inkPrimary
+                                : (isHovered ? theme.inkPrimary.opacity(0.85) : theme.inkSecondary)
+                        )
                         .frame(maxWidth: .infinity)
                         .frame(height: 24)
                         .background(
-                            ZStack {
+                            ZStack(alignment: .bottom) {
                                 if isSelected {
                                     Rectangle()
-                                        .fill(theme.invertedBg)
+                                        .fill(theme.surfaceRaised.opacity(theme.isDark ? 0.45 : 0.68))
                                         .matchedGeometryEffect(id: "subPlate", in: stripNamespace)
+                                    Rectangle()
+                                        .fill(theme.accent)
+                                        .frame(height: 1.5)
+                                        .matchedGeometryEffect(id: "subRule", in: stripNamespace)
                                 } else if isHovered {
                                     Rectangle()
-                                        .fill(theme.surfaceRaised.opacity(0.75))
+                                        .fill(theme.surfaceRaised.opacity(0.42))
                                 }
                             }
                         )
                         .contentShape(Rectangle())
                         .onHover { inside in hovered = inside ? item : (hovered == item ? nil : hovered) }
                         .onTapGesture {
-                            withAnimation(.spring(response: 0.20, dampingFraction: 0.88)) {
-                                selection = item
-                            }
+                            selection = item
                         }
 
                     if index < items.count - 1 {
-                        Rectangle().fill(theme.hairline).frame(width: 1)
+                        Rectangle().fill(theme.hairline.opacity(0.75)).frame(width: 1)
                     }
                 }
             }
             .fixedSize(horizontal: false, vertical: true)
+            .animation(.easeOut(duration: 0.12), value: selection)
 
             HairlineRule(showCrosshairs: true)
         }

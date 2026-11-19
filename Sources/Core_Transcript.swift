@@ -175,6 +175,13 @@ public struct TranscriptSummary: Equatable, Sendable {
 
 public enum TranscriptParse {
 
+    /// Fast pure-UTF8 literal ASCII substring check (avoids Foundation's expensive
+    /// locale/grapheme-cluster `String.contains` on large JSONL lines).
+    @inline(__always)
+    private static func fastContains(_ s: String, _ asciiNeedle: String) -> Bool {
+        s.range(of: asciiNeedle, options: .literal) != nil
+    }
+
     /// One in-order pass over a tail buffer's lines, last qualifying entry winning.
     public static func scan(_ buffer: Data) -> TranscriptSummary {
         scan(text: String(decoding: buffer, as: UTF8.self))
@@ -187,6 +194,7 @@ public enum TranscriptParse {
         var title: String? = nil
         var instruction: String? = nil
         var lastStep: TranscriptStep? = nil
+        var lastSeenModel: String? = nil
         var activePlannerTools: [String] = []
         var activePlannerHasQuestion = false
         var completedToolOutputsAfterPlanner = 0
@@ -194,18 +202,17 @@ public enum TranscriptParse {
         for sub in text.split(separator: "\n", omittingEmptySubsequences: true) {
             let line = String(sub)
 
-            if line.contains("\"ai-title\""), let t = parseAITitle(line) {
+            if fastContains(line, "\"ai-title\""), let t = parseAITitle(line) {
                 title = t
             }
-            if line.contains("\"last-prompt\""), let lp = parseLastPrompt(line) {
+            if fastContains(line, "\"last-prompt\""), let lp = parseLastPrompt(line) {
                 instruction = lp
             }
 
             if let step = parseStep(line) {
                 lastStep = step
                 if let model = step.model, !model.isEmpty {
-                    // Tracked via lastStep / lastSeenModel below.
-                    _ = model
+                    lastSeenModel = model
                 }
                 switch step.type {
                 case .userInput:
@@ -231,7 +238,7 @@ public enum TranscriptParse {
                 case .systemMessage, .unknown:
                     break
                 }
-            } else if line.contains("\"type\":\"user\"") || line.contains("\"type\": \"user\"") {
+            } else if fastContains(line, "\"type\":\"user\"") || fastContains(line, "\"type\": \"user\"") {
                 if let txt = parseUserInstruction(line) {
                     instruction = txt
                 }
@@ -252,17 +259,7 @@ public enum TranscriptParse {
         let waitingForQuestion = activePlannerHasQuestion
             && completedToolOutputsAfterPlanner < activePlannerTools.count
 
-        // Find newest non-empty model across the tail if lastStep wasn't PLANNER_RESPONSE.
-        var lastModel = lastStep?.model
-        if lastModel == nil, text.contains("\"model\"") {
-            for sub in text.split(separator: "\n", omittingEmptySubsequences: true).reversed() {
-                let line = String(sub)
-                if line.contains("\"model\""), let step = parseStep(line), let m = step.model, !m.isEmpty {
-                    lastModel = m
-                    break
-                }
-            }
-        }
+        let lastModel = lastStep?.model ?? lastSeenModel
 
         return TranscriptSummary(
             title: cleaned(title),
@@ -289,9 +286,9 @@ public enum TranscriptParse {
     /// Parse one Antigravity `transcript.jsonl` step line. Returns nil if `line`
     /// is malformed JSON or not an Antigravity step object.
     public static func parseStep(_ line: String) -> TranscriptStep? {
-        guard line.contains("\"step_index\"") || line.contains("\"PLANNER_RESPONSE\"")
-                || line.contains("\"USER_INPUT\"") || line.contains("\"SYSTEM_MESSAGE\"")
-                || line.contains("\"GENERIC\"") else {
+        guard fastContains(line, "\"step_index\"") || fastContains(line, "\"PLANNER_RESPONSE\"")
+                || fastContains(line, "\"USER_INPUT\"") || fastContains(line, "\"SYSTEM_MESSAGE\"")
+                || fastContains(line, "\"GENERIC\"") else {
             return nil
         }
         guard let data = line.data(using: .utf8),

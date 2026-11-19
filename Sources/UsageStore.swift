@@ -85,6 +85,10 @@ class UsageStore: ObservableObject {
     /// Switchable chart visualization style: scientific Instruments (default) vs Classic.
     @Published var visualMode: TelemetryVisualMode = .instrument
 
+    /// Whether the popover or notch drawer is currently visible on screen.
+    /// Gates all live panel animations (TimelineView) so hidden panels run at 0 Hz.
+    @Published var isPanelVisible: Bool = false
+
     // MARK: Live sessions ("Sessions" tab)
 
     let sessionStore = SessionStore()
@@ -163,15 +167,29 @@ class UsageStore: ObservableObject {
         return quotaState
     }
 
+    private static let monthLabelLock = NSLock()
+    private static var monthLabelFormatters: [String: DateFormatter] = [:]
+
     var viewingMonthLabel: String {
-        let df = DateFormatter()
-        df.dateFormat = "MMMM yyyy"
-        df.locale = Locale(identifier: language.rawValue)
         var comps = DateComponents()
         comps.year = viewingYear
         comps.month = viewingMonth
         comps.day = 1
         guard let date = AppDate.gregorian.date(from: comps) else { return "" }
+        let localeId = language.rawValue
+        Self.monthLabelLock.lock()
+        defer { Self.monthLabelLock.unlock() }
+        let df: DateFormatter
+        if let cached = Self.monthLabelFormatters[localeId] {
+            df = cached
+        } else {
+            let created = DateFormatter()
+            created.calendar = AppDate.gregorian
+            created.dateFormat = "MMMM yyyy"
+            created.locale = Locale(identifier: localeId)
+            Self.monthLabelFormatters[localeId] = created
+            df = created
+        }
         return df.string(from: date)
     }
 
@@ -432,7 +450,12 @@ class UsageStore: ObservableObject {
     // MARK: - Live session monitoring (forwarded to sessionStore)
 
     func startSessionMonitoring() { sessionStore.startMonitoring() }
-    func setSessionMonitorActive(_ active: Bool) { sessionStore.setActive(active) }
+    func setSessionMonitorActive(_ active: Bool) {
+        if isPanelVisible != active {
+            isPanelVisible = active
+        }
+        sessionStore.setActive(active)
+    }
     func stopSessionMonitoring() { sessionStore.stopMonitoring() }
 
     // MARK: - Local archive (durable history)

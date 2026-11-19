@@ -188,11 +188,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             notchController?.stop()
             notchController = nil
             menuBarAnchor.setMenuBarVisible(true)
+            menuBarModel.isVisible = true
             menuBarModel.text = menuBarAnchor.displayedText
             statusItem.length = CGFloat(menuBarAnchor.appliedWidth)
             statusItem.isVisible = true
         case .notch:
             menuBarAnchor.setMenuBarVisible(false)
+            menuBarModel.isVisible = false
             statusItem.isVisible = false
             // If the popover happened to be open when switching, close it.
             if popover.isShown { popover.performClose(nil) }
@@ -552,11 +554,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
 // MARK: - Menu-bar status-item content (SwiftUI)
 
-/// Holds the current menu-bar value string. AppDelegate is the sole writer (it defers
-/// updates while the popover is open); the hosting view re-renders on change.
+/// Holds the current menu-bar value string and visibility state. AppDelegate is the sole
+/// writer (it defers updates while the popover is open); when hidden in Notch mode,
+/// `isVisible = false` stops the menu-bar logo's TimelineView at 0 Hz.
 final class MenuBarModel: ObservableObject {
     @Published var text: String
-    init(text: String) { self.text = text }
+    @Published var isVisible: Bool
+    init(text: String, isVisible: Bool = true) {
+        self.text = text
+        self.isVisible = isVisible
+    }
 }
 
 /// Reports the intrinsic width of the menu-bar content up to AppDelegate so it can
@@ -570,17 +577,26 @@ private struct MenuBarWidthKey: PreferenceKey {
 }
 
 /// The status-item content: the session-aware Antigravity mark (levitates + pulses while busy,
-/// carries the amber/green attention dot) + the current value. Uses `.agyBrand` so
-/// the menu bar, compact notch pill, and popover header share one visual identity.
+/// carries the amber/green attention dot) + the current value. Resolves a concrete value Color
+/// from `@Environment(\.colorScheme)` so animation ticks never invoke dynamic NSColor/NSAppearance lookup.
 struct MenuBarContentView: View {
     @ObservedObject var sessionStore: SessionStore
     @ObservedObject var model: MenuBarModel
     var onWidth: (CGFloat) -> Void
 
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var brandColor: Color {
+        colorScheme == .dark
+            ? Color(red: 0x4F / 255.0, green: 0x7C / 255.0, blue: 1.0)
+            : Color(red: 0x26 / 255.0, green: 0x48 / 255.0, blue: 1.0)
+    }
+
     var body: some View {
         HStack(spacing: 5) {
             SessionAwareLogo(sessionStore: sessionStore,
-                             size: 15, color: .agyBrand, dotSize: 5)
+                             size: 15, color: brandColor, dotSize: 5,
+                             isActive: model.isVisible)
             Text(model.text)
                 .font(.system(size: 12, weight: .medium, design: .monospaced))
                 .monospacedDigit()

@@ -47,13 +47,26 @@ struct TelemetryStepper: View {
     }
 }
 
+@MainActor
+private enum PopoverHeightMemory {
+    static var byTab: [DisplayTab: CGFloat] = [:]
+}
+
 struct PopoverView: View {
     @ObservedObject var store: UsageStore
     let onQuit: () -> Void
     var onClose: (() -> Void)? = nil
 
     @Environment(\.colorScheme) private var colorScheme
-    @State private var contentHeight: CGFloat = 460
+    @State private var contentHeight: CGFloat
+
+    init(store: UsageStore, onQuit: @escaping () -> Void, onClose: (() -> Void)? = nil) {
+        self.store = store
+        self.onQuit = onQuit
+        self.onClose = onClose
+        let initialH = PopoverHeightMemory.byTab[store.selectedTab] ?? 460
+        _contentHeight = State(initialValue: initialH)
+    }
 
     private var loc: Localizer { Localizer(language: store.language) }
     private var isNotch: Bool { store.displayMode == .notch }
@@ -86,7 +99,7 @@ struct PopoverView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-                .padding(.horizontal, 12)
+                .padding(.horizontal, 14)
                 .padding(.top, 11)
                 .padding(.bottom, 9)
 
@@ -106,6 +119,7 @@ struct PopoverView: View {
             .onPreferenceChange(ContentHeightKey.self) { next in
                 if abs(next - contentHeight) > 0.5, next > 1 {
                     contentHeight = next
+                    PopoverHeightMemory.byTab[store.selectedTab] = next
                 }
             }
             .frame(height: min(max(contentHeight, 1), maxContentHeight))
@@ -116,9 +130,15 @@ struct PopoverView: View {
         }
         .overlay(keyboardShortcutsOverlay)
         .frame(width: AGYTheme.panelWidth)
-        .background(isNotch ? Color.clear : theme.canvas)
+        .background(
+            ZStack {
+                isNotch ? Color.clear : theme.canvas
+                ArchivalGrainOverlay()
+            }
+        )
         .environment(\.localizer, loc)
         .environment(\.agyTheme, theme)
+        .environment(\.telemetryPanelVisible, store.isPanelVisible)
     }
 
     // MARK: - Bare Context-Aware Header
@@ -127,10 +147,11 @@ struct PopoverView: View {
         HStack(spacing: 8) {
             HStack(spacing: 6) {
                 SessionAwareLogo(sessionStore: store.sessionStore,
-                                 size: 13.5, color: theme.accent, dotSize: 5)
+                                 size: 13, color: theme.accent, dotSize: 4.5,
+                                 isActive: store.isPanelVisible)
                 Text(loc("title").uppercased())
-                    .font(.system(size: 11, weight: .bold, design: .monospaced))
-                    .tracking(1.1)
+                    .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                    .tracking(1.6)
                     .foregroundColor(theme.inkPrimary)
 
                 liveHeaderTag
@@ -147,19 +168,27 @@ struct PopoverView: View {
         let waitingCount = store.sessionStore.sessions.filter { $0.status == .waiting }.count
         let busyCount = store.sessionStore.sessions.filter { $0.status == .busy }.count
         if waitingCount > 0 {
-            Text("▲ \(String(format: loc("waitTagFmt"), waitingCount))")
-                .font(.system(size: 8.5, weight: .bold, design: .monospaced))
-                .foregroundColor(.black)
-                .padding(.horizontal, 5)
-                .padding(.vertical, 1.5)
-                .background(theme.signalAmber)
-                .contentShape(Rectangle())
-                .onTapGesture { store.selectedTab = .session }
+            HStack(spacing: 4) {
+                Rectangle()
+                    .fill(theme.signalAmber)
+                    .frame(width: 4.5, height: 4.5)
+                    .rotationEffect(.degrees(45))
+                Text(String(format: loc("waitTagFmt"), waitingCount))
+                    .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
+                    .tracking(0.4)
+                    .foregroundColor(theme.signalAmber)
+            }
+            .padding(.horizontal, 5.5)
+            .padding(.vertical, 2)
+            .background(theme.signalAmber.opacity(theme.isDark ? 0.12 : 0.08))
+            .overlay(Rectangle().stroke(theme.signalAmber.opacity(0.48), lineWidth: 0.75))
+            .contentShape(Rectangle())
+            .onTapGesture { store.selectedTab = .session }
         } else if busyCount > 0 {
-            HStack(spacing: 3) {
-                Circle().fill(theme.accent).frame(width: 4.5, height: 4.5)
+            HStack(spacing: 3.5) {
+                Circle().fill(theme.accent).frame(width: 4, height: 4)
                 Text(String(format: loc("runTagFmt"), busyCount))
-                    .font(.system(size: 8.5, weight: .bold, design: .monospaced))
+                    .font(.system(size: 8.5, weight: .medium, design: .monospaced))
                     .foregroundColor(theme.accent)
             }
             .contentShape(Rectangle())
@@ -250,7 +279,7 @@ struct PopoverView: View {
                 ToolbarIconButton(systemName: "power", helpText: loc("quit"), action: onQuit)
             }
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, 14)
         .padding(.vertical, 7)
     }
 

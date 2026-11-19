@@ -14,7 +14,8 @@ struct UsageOverviewSection: View {
     @State private var focusedModelId: String? = nil
 
     var body: some View {
-        if store.isCurrentMonth {
+        Group {
+            if store.isCurrentMonth {
             switch store.effectiveCurrentMonthPhase {
             case .loaded(let bundle), .loading(cached: .some(let bundle)), .failed(_, cached: .some(let bundle)):
                 let scope = store.selectedPeriodScope
@@ -33,6 +34,25 @@ struct UsageOverviewSection: View {
                     }
                 }()
 
+                if store.visualMode == .instrument && store.selectedTab == .cost {
+                    CostInstrumentView(
+                        usage: activeUsage,
+                        bundle: bundle,
+                        selectedScope: $store.selectedPeriodScope,
+                        year: store.viewingYear,
+                        month: store.viewingMonth,
+                        focusedModelId: $focusedModelId
+                    )
+                } else if store.visualMode == .instrument && store.selectedTab == .tokens {
+                    TokensInstrumentView(
+                        usage: activeUsage,
+                        bundle: bundle,
+                        selectedScope: $store.selectedPeriodScope,
+                        year: store.viewingYear,
+                        month: store.viewingMonth,
+                        focusedModelId: $focusedModelId
+                    )
+                } else {
                 VStack(spacing: 0) {
                     HeroTelemetrySection(
                         metric: store.selectedTab,
@@ -55,36 +75,19 @@ struct UsageOverviewSection: View {
                     HairlineRule(showCrosshairs: true)
 
                     if store.visualMode == .instrument {
-                        if store.selectedTab == .cost {
-                            BoreholeModelSection(
-                                usage: activeUsage,
-                                focusedModelId: $focusedModelId
-                            )
+                        FoldedTokenFlowChart(
+                            usage: activeUsage,
+                            focusedModelId: $focusedModelId
+                        )
 
-                            if let daily = bundle.dailyBreakdown, !daily.isEmpty {
-                                HairlineRule(showCrosshairs: true)
-                                TopographicRidgeChart(
-                                    data: daily,
-                                    year: store.viewingYear,
-                                    month: store.viewingMonth,
-                                    focusedModelId: focusedModelId
-                                )
-                            }
-                        } else {
-                            FoldedTokenFlowChart(
-                                usage: activeUsage,
-                                focusedModelId: $focusedModelId
+                        if let daily = bundle.dailyBreakdown, !daily.isEmpty {
+                            HairlineRule(showCrosshairs: true)
+                            TokenDensityMatrix(
+                                data: daily,
+                                year: store.viewingYear,
+                                month: store.viewingMonth,
+                                focusedModelId: focusedModelId
                             )
-
-                            if let daily = bundle.dailyBreakdown, !daily.isEmpty {
-                                HairlineRule(showCrosshairs: true)
-                                TokenDensityMatrix(
-                                    data: daily,
-                                    year: store.viewingYear,
-                                    month: store.viewingMonth,
-                                    focusedModelId: focusedModelId
-                                )
-                            }
                         }
                     } else {
                         ModelLedgerSection(
@@ -110,6 +113,7 @@ struct UsageOverviewSection: View {
                         apiEquivFootnote
                     }
                 }
+                }
 
             case .loading(cached: nil), .idle:
                 TelemetrySkeleton()
@@ -121,6 +125,27 @@ struct UsageOverviewSection: View {
         } else {
             switch store.effectiveHistoricalMonthPhase {
             case .loaded(let bundle), .loading(cached: .some(let bundle)), .failed(_, cached: .some(let bundle)):
+                if store.visualMode == .instrument && store.selectedTab == .cost {
+                    CostInstrumentView(
+                        usage: bundle.month,
+                        bundle: nil,
+                        dailyOverride: bundle.dailyBreakdown,
+                        selectedScope: nil,
+                        year: store.viewingYear,
+                        month: store.viewingMonth,
+                        focusedModelId: $focusedModelId
+                    )
+                } else if store.visualMode == .instrument && store.selectedTab == .tokens {
+                    TokensInstrumentView(
+                        usage: bundle.month,
+                        bundle: nil,
+                        dailyOverride: bundle.dailyBreakdown,
+                        selectedScope: nil,
+                        year: store.viewingYear,
+                        month: store.viewingMonth,
+                        focusedModelId: $focusedModelId
+                    )
+                } else {
                 VStack(spacing: 0) {
                     HeroTelemetrySection(
                         metric: store.selectedTab,
@@ -135,36 +160,19 @@ struct UsageOverviewSection: View {
                     HairlineRule(showCrosshairs: true)
 
                     if store.visualMode == .instrument {
-                        if store.selectedTab == .cost {
-                            BoreholeModelSection(
-                                usage: bundle.month,
-                                focusedModelId: $focusedModelId
-                            )
+                        FoldedTokenFlowChart(
+                            usage: bundle.month,
+                            focusedModelId: $focusedModelId
+                        )
 
-                            if let daily = bundle.dailyBreakdown, !daily.isEmpty {
-                                HairlineRule(showCrosshairs: true)
-                                TopographicRidgeChart(
-                                    data: daily,
-                                    year: store.viewingYear,
-                                    month: store.viewingMonth,
-                                    focusedModelId: focusedModelId
-                                )
-                            }
-                        } else {
-                            FoldedTokenFlowChart(
-                                usage: bundle.month,
-                                focusedModelId: $focusedModelId
+                        if let daily = bundle.dailyBreakdown, !daily.isEmpty {
+                            HairlineRule(showCrosshairs: true)
+                            TokenDensityMatrix(
+                                data: daily,
+                                year: store.viewingYear,
+                                month: store.viewingMonth,
+                                focusedModelId: focusedModelId
                             )
-
-                            if let daily = bundle.dailyBreakdown, !daily.isEmpty {
-                                HairlineRule(showCrosshairs: true)
-                                TokenDensityMatrix(
-                                    data: daily,
-                                    year: store.viewingYear,
-                                    month: store.viewingMonth,
-                                    focusedModelId: focusedModelId
-                                )
-                            }
                         }
                     } else {
                         ModelLedgerSection(
@@ -190,6 +198,7 @@ struct UsageOverviewSection: View {
                         apiEquivFootnote
                     }
                 }
+                }
 
             case .loading(cached: nil), .idle:
                 TelemetrySkeleton()
@@ -199,6 +208,11 @@ struct UsageOverviewSection: View {
                 stateBox(icon: "exclamationmark.triangle", tint: theme.signalAmber, text: loc("loadFailed"), showRetry: true)
             }
         }
+        }
+        .onChange(of: store.selectedTab) { _ in focusedModelId = nil }
+        .onChange(of: store.viewingMonth) { _ in focusedModelId = nil }
+        .onChange(of: store.viewingYear) { _ in focusedModelId = nil }
+        .onChange(of: store.selectedPeriodScope) { _ in focusedModelId = nil }
     }
 
     private var apiEquivFootnote: some View {
@@ -370,9 +384,7 @@ struct PeriodScopeStrip: View {
                 .contentShape(Rectangle())
                 .onHover { inside in hovered = inside ? item.scope : (hovered == item.scope ? nil : hovered) }
                 .onTapGesture {
-                    withAnimation(.easeInOut(duration: 0.14)) {
-                        selection = item.scope
-                    }
+                    selection = item.scope
                 }
 
                 if idx < cells.count - 1 {
