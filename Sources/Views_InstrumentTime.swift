@@ -514,7 +514,11 @@ private struct PolarDialBezelLayer: View, Equatable {
                 with: .color(theme.hairline.opacity(0.32)),
                 style: StrokeStyle(lineWidth: 0.5, dash: [1.5, 3.0])
             )
-            context.stroke(cardinalSpokes, with: .color(theme.hairline.opacity(0.65)), lineWidth: 0.65)
+            context.stroke(
+                cardinalSpokes,
+                with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.24 : 0.20)),
+                lineWidth: 0.65
+            )
 
             // 2. Outer calibrated 24-hour bezel ring + delicate chapter ring
             let bezelRect = CGRect(x: cx - bezelR, y: cy - bezelR, width: bezelR * 2, height: bezelR * 2)
@@ -547,7 +551,7 @@ private struct PolarDialBezelLayer: View, Equatable {
             }
             context.stroke(minorTicks, with: .color(theme.hairlineStrong.opacity(0.82)), lineWidth: 0.6)
             context.stroke(octantTicks, with: .color(theme.inkSecondary.opacity(0.76)), lineWidth: 0.75)
-            context.stroke(cardinalTicks, with: .color(theme.inkSecondary), lineWidth: 0.95)
+            context.stroke(cardinalTicks, with: .color(theme.accentSecondary.opacity(0.75)), lineWidth: 0.95)
 
             // 4. Subtle outer stippled compass dots (72 steps = every 5 deg, batched into 1 Path)
             var compassDots = Path()
@@ -579,7 +583,7 @@ private struct PolarDialBezelLayer: View, Equatable {
                         weight: mark.primary ? .medium : .regular,
                         design: .monospaced
                     ))
-                    .foregroundColor(mark.primary ? theme.inkSecondary : theme.inkMuted.opacity(0.80))
+                    .foregroundColor(mark.primary ? theme.accentSecondary.opacity(0.75) : theme.inkMuted.opacity(0.80))
                 context.draw(tView, at: pos)
             }
         }
@@ -633,11 +637,14 @@ private struct PolarDialActivityLayer: View {
                 )
             }
 
-            // 2. Precision dual-rail engraved activity arcs + fine radial hatch ticks (batched)
+            // 2. Precision dual-rail engraved activity arcs + fine radial hatch ticks (batched by model & state)
             var outMonthMain = Path()
-            var inMonthMain = Path()
-            var inMonthRail = Path()
-            var inMonthTicks = Path()
+            var modelMain: [ModelClass: Path] = [:]
+            var modelRail: [ModelClass: Path] = [:]
+            var modelTicks: [ModelClass: Path] = [:]
+            var peakMain = Path()
+            var peakRail = Path()
+            var peakTicks = Path()
             var todayMain = Path()
             var todayRail = Path()
             var todayTicks = Path()
@@ -685,32 +692,44 @@ private struct PolarDialActivityLayer: View {
             }
 
             var longestArc: PolarArc? = nil
-            for arc in arcs {
-                if arc.inMonth {
-                    if let cur = longestArc {
-                        if arc.interval.durationSeconds > cur.interval.durationSeconds { longestArc = arc }
-                    } else if arc.interval.durationSeconds > 0 {
-                        longestArc = arc
-                    }
+            for arc in arcs where arc.inMonth && arc.interval.durationSeconds > 0 {
+                if let cur = longestArc {
+                    if arc.interval.durationSeconds > cur.interval.durationSeconds { longestArc = arc }
+                } else {
+                    longestArc = arc
                 }
+            }
 
+            for arc in arcs {
                 let r = outerRadius - CGFloat(arc.dayIndex) * ringStep
                 let isHoveredArc = (hoveredArc == arc)
                 let isHoveredDayArc = (hoveredArc == nil && hoveredDayKey != nil && hoveredDayKey == arc.dayKey)
                 let isTodayArc = (arc.dayKey == todayKey)
+                let isPeakArc = (arc == longestArc)
 
                 if isHoveredArc || isHoveredDayArc {
                     appendArc(to: &focusedMain, radius: r, start: arc.startAngle, end: arc.endAngle)
                     appendArc(to: &focusedRail, radius: r + railOffset, start: arc.startAngle, end: arc.endAngle)
                     appendEngravedTicks(to: &focusedTicks, radius: r, start: arc.startAngle, end: arc.endAngle)
+                } else if isPeakArc && arc.inMonth {
+                    appendArc(to: &peakMain, radius: r, start: arc.startAngle, end: arc.endAngle)
+                    appendArc(to: &peakRail, radius: r + railOffset, start: arc.startAngle, end: arc.endAngle)
+                    appendEngravedTicks(to: &peakTicks, radius: r, start: arc.startAngle, end: arc.endAngle)
                 } else if isTodayArc && arc.inMonth {
                     appendArc(to: &todayMain, radius: r, start: arc.startAngle, end: arc.endAngle)
                     appendArc(to: &todayRail, radius: r + railOffset, start: arc.startAngle, end: arc.endAngle)
                     appendEngravedTicks(to: &todayTicks, radius: r, start: arc.startAngle, end: arc.endAngle)
                 } else if arc.inMonth {
-                    appendArc(to: &inMonthMain, radius: r, start: arc.startAngle, end: arc.endAngle)
-                    appendArc(to: &inMonthRail, radius: r + railOffset, start: arc.startAngle, end: arc.endAngle)
-                    appendEngravedTicks(to: &inMonthTicks, radius: r, start: arc.startAngle, end: arc.endAngle)
+                    let mc = Self.classifyModel(arc.interval.model)
+                    var mPath = modelMain[mc] ?? Path()
+                    var rPath = modelRail[mc] ?? Path()
+                    var tPath = modelTicks[mc] ?? Path()
+                    appendArc(to: &mPath, radius: r, start: arc.startAngle, end: arc.endAngle)
+                    appendArc(to: &rPath, radius: r + railOffset, start: arc.startAngle, end: arc.endAngle)
+                    appendEngravedTicks(to: &tPath, radius: r, start: arc.startAngle, end: arc.endAngle)
+                    modelMain[mc] = mPath
+                    modelRail[mc] = rPath
+                    modelTicks[mc] = tPath
                 } else {
                     appendArc(to: &outMonthMain, radius: r, start: arc.startAngle, end: arc.endAngle)
                 }
@@ -723,22 +742,28 @@ private struct PolarDialActivityLayer: View {
                     style: StrokeStyle(lineWidth: 1.8, lineCap: .butt)
                 )
             }
-            if !inMonthMain.isEmpty {
+            for mc in ModelClass.allCases {
+                guard let mPath = modelMain[mc], !mPath.isEmpty else { continue }
+                let color = theme.modelColor(mc)
                 context.stroke(
-                    inMonthMain,
-                    with: .color(theme.inkPrimary.opacity(anyFocus ? 0.20 : 0.78)),
+                    mPath,
+                    with: .color(color.opacity(anyFocus ? 0.20 : 0.86)),
                     style: StrokeStyle(lineWidth: 2.4, lineCap: .butt)
                 )
-                context.stroke(
-                    inMonthRail,
-                    with: .color(theme.inkPrimary.opacity(anyFocus ? 0.10 : 0.36)),
-                    style: StrokeStyle(lineWidth: 0.5, lineCap: .butt)
-                )
-                context.stroke(
-                    inMonthTicks,
-                    with: .color(theme.inkPrimary.opacity(anyFocus ? 0.10 : 0.42)),
-                    lineWidth: 0.5
-                )
+                if let rPath = modelRail[mc], !rPath.isEmpty {
+                    context.stroke(
+                        rPath,
+                        with: .color(color.opacity(anyFocus ? 0.10 : 0.42)),
+                        style: StrokeStyle(lineWidth: 0.5, lineCap: .butt)
+                    )
+                }
+                if let tPath = modelTicks[mc], !tPath.isEmpty {
+                    context.stroke(
+                        tPath,
+                        with: .color(color.opacity(anyFocus ? 0.10 : 0.48)),
+                        lineWidth: 0.5
+                    )
+                }
             }
             if !todayMain.isEmpty {
                 if theme.isDark && !anyFocus {
@@ -761,6 +786,30 @@ private struct PolarDialActivityLayer: View {
                 context.stroke(
                     todayTicks,
                     with: .color(theme.accent.opacity(anyFocus ? 0.20 : 0.62)),
+                    lineWidth: 0.55
+                )
+            }
+            if !peakMain.isEmpty {
+                if theme.isDark && !anyFocus {
+                    context.stroke(
+                        peakMain,
+                        with: .color(theme.accent.opacity(0.24)),
+                        style: StrokeStyle(lineWidth: 6.2, lineCap: .butt)
+                    )
+                }
+                context.stroke(
+                    peakMain,
+                    with: .color(theme.accent.opacity(anyFocus ? 0.34 : 1.0)),
+                    style: StrokeStyle(lineWidth: 2.6, lineCap: .butt)
+                )
+                context.stroke(
+                    peakRail,
+                    with: .color(theme.accent.opacity(anyFocus ? 0.20 : 0.62)),
+                    style: StrokeStyle(lineWidth: 0.55, lineCap: .butt)
+                )
+                context.stroke(
+                    peakTicks,
+                    with: .color(theme.accent.opacity(anyFocus ? 0.20 : 0.68)),
                     lineWidth: 0.55
                 )
             }
@@ -849,6 +898,11 @@ private struct PolarDialActivityLayer: View {
         }
         .allowsHitTesting(false)
     }
+
+    private static func classifyModel(_ id: String?) -> ModelClass {
+        guard let raw = id, !raw.isEmpty else { return .other }
+        return ModelClass(rawValue: raw.lowercased()) ?? ModelClass.classify(raw)
+    }
 }
 
 /// Isolated NOW radar stippled sweep + live HH:MM center hub cached per minute in TelemetryArtworkCache
@@ -897,7 +951,7 @@ private struct PolarNowSweepAndHubLayer: View {
                         clockwise: false
                     )
                     sweep.closeSubpath()
-                    context.fill(sweep, with: .color(theme.accent.opacity(theme.isDark ? 0.075 : 0.045)))
+                    context.fill(sweep, with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.11 : 0.07)))
 
                     var sweepDenseDots = Path()
                     var sweepSoftDots = Path()
@@ -936,39 +990,43 @@ private struct PolarNowSweepAndHubLayer: View {
                         }
                     }
                     if !sweepSoftDots.isEmpty {
-                        context.fill(sweepSoftDots, with: .color(theme.accent.opacity(theme.isDark ? 0.28 : 0.22)))
+                        context.fill(sweepSoftDots, with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.34 : 0.26)))
                     }
                     if !sweepDenseDots.isEmpty {
-                        context.fill(sweepDenseDots, with: .color(theme.accent.opacity(theme.isDark ? 0.58 : 0.46)))
+                        context.fill(sweepDenseDots, with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.66 : 0.54)))
                     }
 
                     var ray = Path()
                     ray.move(to: CGPoint(x: cx + cos(nowAngle) * innerHubR, y: cy + sin(nowAngle) * innerHubR))
                     ray.addLine(to: CGPoint(x: cx + cos(nowAngle) * bezelR, y: cy + sin(nowAngle) * bezelR))
                     if theme.isDark {
-                        context.stroke(ray, with: .color(theme.accent.opacity(0.24)), lineWidth: 3.0)
+                        context.stroke(ray, with: .color(theme.accentSecondary.opacity(0.28)), lineWidth: 3.0)
                     }
-                    context.stroke(ray, with: .color(theme.accent), lineWidth: 1.05)
+                    context.stroke(ray, with: .color(theme.accentSecondary), lineWidth: 1.1)
 
                     let tipX = cx + cos(nowAngle) * bezelR
                     let tipY = cy + sin(nowAngle) * bezelR
                     context.fill(
                         Path(CGRect(x: tipX - 1.75, y: tipY - 1.75, width: 3.5, height: 3.5)),
-                        with: .color(theme.accent)
+                        with: .color(theme.accentSecondary)
                     )
                 }
 
-                // Center core hub ring + live HH:MM readout
+                // Center core hub ring + live HH:MM readout (Color 2 contrasting against Color 1 peak/hover)
                 let hubRect = CGRect(x: cx - innerHubR, y: cy - innerHubR, width: innerHubR * 2, height: innerHubR * 2)
                 context.fill(Path(ellipseIn: hubRect), with: .color(theme.canvas))
-                context.stroke(Path(ellipseIn: hubRect), with: .color(theme.hairlineStrong.opacity(0.85)), lineWidth: 0.75)
+                context.stroke(
+                    Path(ellipseIn: hubRect),
+                    with: .color(showsToday ? theme.accentSecondary.opacity(0.75) : theme.hairlineStrong.opacity(0.85)),
+                    lineWidth: showsToday ? 0.85 : 0.75
+                )
 
                 let clockLabel = Text(TimeLogic.formatClock(nowSec))
                     .font(.system(size: 8.5, weight: .medium, design: .monospaced))
-                    .foregroundColor(showsToday ? theme.accent : theme.inkPrimary)
+                    .foregroundColor(showsToday ? theme.accentSecondary : theme.inkPrimary)
                 let subLabel = Text("24H")
                     .font(.system(size: 6.5, weight: .regular, design: .monospaced))
-                    .foregroundColor(theme.inkMuted)
+                    .foregroundColor(showsToday ? theme.accentSecondary.opacity(0.65) : theme.inkMuted)
                 context.draw(clockLabel, at: CGPoint(x: cx, y: cy - 3.2))
                 context.draw(subLabel, at: CGPoint(x: cx, y: cy + 5.8))
             }
@@ -1226,7 +1284,7 @@ private struct YearContourInteractiveStage: View {
                     Text(names[entry.month - 1])
                         .font(.system(size: 7, weight: .regular, design: .monospaced))
                         .tracking(0.4)
-                        .foregroundColor(theme.inkMuted)
+                        .foregroundColor(theme.accentSecondary.opacity(0.76))
                         .offset(x: geo.size.width * CGFloat(entry.col) / 53.0)
                 }
             }
@@ -1240,8 +1298,9 @@ private struct YearContourInteractiveStage: View {
                 .font(.system(size: 7, weight: .regular, design: .monospaced))
                 .foregroundColor(theme.inkMuted)
             HStack(spacing: 2.5) {
-                Rectangle().fill(theme.inkSecondary.opacity(0.32)).frame(width: 8, height: 0.75)
-                Rectangle().fill(theme.inkPrimary.opacity(0.68)).frame(width: 8, height: 1.0)
+                Rectangle().fill(theme.accentSecondary.opacity(0.38)).frame(width: 8, height: 0.75)
+                Rectangle().fill(theme.accentSecondary.opacity(0.78)).frame(width: 8, height: 0.95)
+                Rectangle().fill(theme.accent.opacity(0.68)).frame(width: 8, height: 1.15)
                 Rectangle().fill(theme.accent).frame(width: 8, height: 1.5)
             }
             Text(loc("timeMore").uppercased())
@@ -1272,14 +1331,28 @@ private struct StaticYearContourCanvas: View, Equatable {
                 CGPoint(x: CGFloat(p.x) * size.width, y: padY + CGFloat(p.y) * innerH)
             }
 
-            // 1. Subtle monthly vertical cartographic meridian lines — single batched Path
+            // 1. Subtle monthly vertical cartographic meridian lines + edge ticks — batched Paths
             var meridians = Path()
+            var monthTicks = Path()
             for col in monthColumns where col > 0 {
                 let mx = size.width * CGFloat(col) / 53.0
                 meridians.move(to: CGPoint(x: mx, y: 0))
                 meridians.addLine(to: CGPoint(x: mx, y: size.height))
+                monthTicks.move(to: CGPoint(x: mx, y: 0))
+                monthTicks.addLine(to: CGPoint(x: mx, y: 3.5))
+                monthTicks.move(to: CGPoint(x: mx, y: size.height - 3.5))
+                monthTicks.addLine(to: CGPoint(x: mx, y: size.height))
             }
-            context.stroke(meridians, with: .color(theme.hairline.opacity(0.55)), lineWidth: 0.65)
+            context.stroke(
+                meridians,
+                with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.20 : 0.16)),
+                lineWidth: 0.65
+            )
+            context.stroke(
+                monthTicks,
+                with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.52 : 0.45)),
+                lineWidth: 0.75
+            )
 
             if field.levels.isEmpty {
                 let emptyLabel = Text(noDataLabel)
@@ -1289,23 +1362,30 @@ private struct StaticYearContourCanvas: View, Equatable {
                 return
             }
 
-            // 2. Organic interior basin stippling inside high-elevation contour zones (level >= 7),
-            //    with denser printmaker grain in summit cores (level >= 9) — batched into 1 Path.
+            // 2. Organic interior stippling stepped across Color 2 foothills (level < 0.55)
+            //    into Color 1 high-density summit basins & cores (level >= 0.55) — batched Paths.
             let totalLevels = field.levels.count
-            let basinIdx = min(totalLevels - 1, max(0, (totalLevels * 7) / 12))
-            let coreIdx = min(totalLevels - 1, max(basinIdx, (totalLevels * 9) / 12))
-            let basinSegments = field.levels[basinIdx].segments
-            let coreSegments = (coreIdx > basinIdx) ? field.levels[coreIdx].segments : []
+            let midIdx = min(totalLevels - 1, max(0, (totalLevels * 4) / 12))
+            let summitIdx = min(totalLevels - 1, max(midIdx, (totalLevels * 7) / 12))
+            let coreIdx = min(totalLevels - 1, max(summitIdx, (totalLevels * 9) / 12))
+            let midSegments = field.levels[midIdx].segments
+            let summitSegments = field.levels[summitIdx].segments
+            let coreSegments = (coreIdx > summitIdx) ? field.levels[coreIdx].segments : []
 
-            if !basinSegments.isEmpty {
-                var basinStipple = Path()
+            if !midSegments.isEmpty || !summitSegments.isEmpty {
+                let outerSegments = !midSegments.isEmpty ? midSegments : summitSegments
+                var midStipple = Path()
+                var summitStipple = Path()
+                var coreStipple = Path()
                 let stepX: CGFloat = 2.45
                 let stepY: CGFloat = 2.45
                 let rowCount = Int(innerH / stepY)
 
-                var basinXs: [CGFloat] = []
+                var outerXs: [CGFloat] = []
+                var summitXs: [CGFloat] = []
                 var coreXs: [CGFloat] = []
-                basinXs.reserveCapacity(16)
+                outerXs.reserveCapacity(16)
+                summitXs.reserveCapacity(14)
                 coreXs.reserveCapacity(12)
 
                 for iy in 0...max(0, rowCount) {
@@ -1314,12 +1394,23 @@ private struct StaticYearContourCanvas: View, Equatable {
                     guard ny > 0.0, ny < 1.0 else { continue }
 
                     Self.scanlineIntersections(
-                        segments: basinSegments,
+                        segments: outerSegments,
                         ny: ny,
                         width: size.width,
-                        out: &basinXs
+                        out: &outerXs
                     )
-                    guard basinXs.count >= 2 else { continue }
+                    guard outerXs.count >= 2 else { continue }
+
+                    if !summitSegments.isEmpty {
+                        Self.scanlineIntersections(
+                            segments: summitSegments,
+                            ny: ny,
+                            width: size.width,
+                            out: &summitXs
+                        )
+                    } else {
+                        summitXs.removeAll(keepingCapacity: true)
+                    }
 
                     if !coreSegments.isEmpty {
                         Self.scanlineIntersections(
@@ -1333,9 +1424,9 @@ private struct StaticYearContourCanvas: View, Equatable {
                     }
 
                     var spanIdx = 0
-                    while spanIdx + 1 < basinXs.count {
-                        let x0 = basinXs[spanIdx]
-                        let x1 = basinXs[spanIdx + 1]
+                    while spanIdx + 1 < outerXs.count {
+                        let x0 = outerXs[spanIdx]
+                        let x1 = outerXs[spanIdx + 1]
                         spanIdx += 2
                         guard x1 - x0 > 1.2 else { continue }
 
@@ -1353,27 +1444,46 @@ private struct StaticYearContourCanvas: View, Equatable {
                                   gy >= padY, gy <= size.height - padY else { continue }
 
                             let inCore = Self.containsX(gx, inSortedSpans: coreXs)
-                            let prob = inCore ? 0.72 : 0.40
+                            let inSummit = inCore || Self.containsX(gx, inSortedSpans: summitXs)
+                            let prob = inCore ? 0.72 : (inSummit ? 0.42 : 0.24)
                             let roll = Double((h >> 16) & 0x3FF) / 1023.0
                             if roll < prob {
                                 let sz: CGFloat = ((h >> 26) & 1 == 0) ? 0.95 : 1.25
-                                basinStipple.addRect(CGRect(x: gx, y: gy, width: sz, height: sz))
+                                let rect = CGRect(x: gx, y: gy, width: sz, height: sz)
+                                if inCore {
+                                    coreStipple.addRect(rect)
+                                } else if inSummit {
+                                    summitStipple.addRect(rect)
+                                } else {
+                                    midStipple.addRect(rect)
+                                }
                             }
                         }
                     }
                 }
 
-                if !basinStipple.isEmpty {
+                if !midStipple.isEmpty {
                     context.fill(
-                        basinStipple,
-                        with: .color(theme.inkPrimary.opacity(theme.isDark ? 0.36 : 0.30))
+                        midStipple,
+                        with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.34 : 0.28))
+                    )
+                }
+                if !summitStipple.isEmpty {
+                    context.fill(
+                        summitStipple,
+                        with: .color(theme.accent.opacity(theme.isDark ? 0.40 : 0.32))
+                    )
+                }
+                if !coreStipple.isEmpty {
+                    context.fill(
+                        coreStipple,
+                        with: .color(theme.accent.opacity(theme.isDark ? 0.56 : 0.46))
                     )
                 }
             }
 
-            // 3. Render 12 silky Marching Squares isobar contours (levels 0..9 monochrome, top 2 accent)
-            let monochromeCount = max(1, totalLevels - 2)
-
+            // 3. Render 12 silky Marching Squares isobar contours stepping from
+            //    theme.accentSecondary (normLevel < 0.55) up to theme.accent (normLevel >= 0.55)
             for lvl in field.levels {
                 guard !lvl.segments.isEmpty else { continue }
                 var path = Path()
@@ -1382,6 +1492,7 @@ private struct StaticYearContourCanvas: View, Equatable {
                     path.addLine(to: pt(seg.b))
                 }
 
+                let normLevel = totalLevels > 1 ? Double(lvl.level) / Double(totalLevels - 1) : 1.0
                 let isTopPeak = (lvl.level == totalLevels - 1)
                 let isSecondPeak = (lvl.level == totalLevels - 2) && totalLevels >= 2
 
@@ -1394,18 +1505,16 @@ private struct StaticYearContourCanvas: View, Equatable {
                     if theme.isDark {
                         context.stroke(path, with: .color(theme.accent.opacity(0.11)), lineWidth: 2.3)
                     }
-                    context.stroke(path, with: .color(theme.accent.opacity(0.78)), lineWidth: 0.95)
+                    context.stroke(path, with: .color(theme.accent.opacity(0.84)), lineWidth: 0.95)
+                } else if normLevel < 0.55 {
+                    let localT = normLevel / 0.55
+                    let color = theme.accentSecondary.opacity(0.24 + localT * 0.54)
+                    let lw: CGFloat = 0.55 + CGFloat(localT) * 0.25
+                    context.stroke(path, with: .color(color), lineWidth: lw)
                 } else {
-                    let t = Double(lvl.level) / Double(max(1, monochromeCount - 1))
-                    let color: Color
-                    if t < 0.45 {
-                        let localT = t / 0.45
-                        color = theme.inkSecondary.opacity(0.22 + localT * 0.24)
-                    } else {
-                        let localT = (t - 0.45) / 0.55
-                        color = theme.inkPrimary.opacity(0.30 + localT * 0.42)
-                    }
-                    let lw: CGFloat = 0.55 + CGFloat(t) * 0.30
+                    let localT = (normLevel - 0.55) / 0.45
+                    let color = theme.accent.opacity(0.46 + localT * 0.34)
+                    let lw: CGFloat = 0.78 + CGFloat(localT) * 0.14
                     context.stroke(path, with: .color(color), lineWidth: lw)
                 }
             }
@@ -1444,13 +1553,13 @@ private struct StaticYearContourCanvas: View, Equatable {
                 context.fill(circlePath, with: .color(theme.canvas.opacity(0.92)))
                 context.stroke(
                     circlePath,
-                    with: .color(isPrimary ? theme.accent : theme.accent.opacity(0.78)),
+                    with: .color(isPrimary ? theme.accent : theme.accent.opacity(0.84)),
                     lineWidth: 0.75
                 )
 
                 let hGlyph = Text("H")
                     .font(.system(size: 6, weight: .semibold, design: .monospaced))
-                    .foregroundColor(isPrimary ? theme.accent : theme.inkPrimary)
+                    .foregroundColor(isPrimary ? theme.accent : theme.accent.opacity(0.88))
                 context.draw(hGlyph, at: p)
 
                 // Clean borderless `6.7h` value beside the circular mark (collision-avoided)
@@ -1571,7 +1680,7 @@ private struct ContourHoverReticleCanvas: View {
             lines.move(to: CGPoint(x: 0, y: hy))
             lines.addLine(to: CGPoint(x: size.width, y: hy))
 
-            context.stroke(lines, with: .color(theme.reticle.opacity(0.72)), lineWidth: 0.75)
+            context.stroke(lines, with: .color(theme.accent.opacity(0.62)), lineWidth: 0.75)
             context.fill(
                 Path(CGRect(x: hx - 1.75, y: hy - 1.75, width: 3.5, height: 3.5)),
                 with: .color(theme.accent)

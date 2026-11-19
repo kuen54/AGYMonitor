@@ -27,10 +27,8 @@ struct SessionTabView: View {
     @Environment(\.agyTheme) private var theme
     @Environment(\.telemetryStaticRender) private var isStaticRender
 
-    @State private var filter: SessionStatusFilter = .all
+    @State private var deck = SessionDeckState()
     @State private var hoveredFilter: SessionStatusFilter? = nil
-    @State private var selectedSessionId: String? = nil
-    @State private var hoveredRadarSessionId: String? = nil
     @State private var hostWindow: NSWindow? = nil
     @State private var keyMonitor: Any? = nil
 
@@ -41,26 +39,29 @@ struct SessionTabView: View {
 
     private var filteredGroups: [SessionGroup] {
         let baseGroups: [SessionGroup]
-        if filter == .all {
+        if deck.filter == .all {
             baseGroups = SessionFilterLogic.nonWaitingGroups(from: sessionStore.groups)
         } else {
             baseGroups = sessionStore.groups
         }
         return baseGroups.compactMap { group in
-            let filtered = group.sessions.filter { matchesFilter($0) }
+            let filtered = group.sessions.filter { matchesFilter($0, filter: deck.filter) }
             guard !filtered.isEmpty else { return nil }
             return SessionGroup(cwd: group.cwd, label: group.label, sessions: filtered)
         }
     }
 
-    private var orderedVisibleSessionIds: [String] {
+    private func visibleSessionIds(for activeFilter: SessionStatusFilter) -> [String] {
         var ids: [String] = []
-        if (filter == .all || filter == .waiting) && !waitingSessions.isEmpty {
+        if (activeFilter == .all || activeFilter == .waiting) && !waitingSessions.isEmpty {
             ids.append(contentsOf: waitingSessions.map(\.sessionId))
         }
-        if filter != .waiting {
-            for group in filteredGroups {
-                for s in group.sessions where !ids.contains(s.sessionId) {
+        if activeFilter != .waiting {
+            let baseGroups = (activeFilter == .all)
+                ? SessionFilterLogic.nonWaitingGroups(from: sessionStore.groups)
+                : sessionStore.groups
+            for group in baseGroups {
+                for s in group.sessions where matchesFilter(s, filter: activeFilter) && !ids.contains(s.sessionId) {
                     ids.append(s.sessionId)
                 }
             }
@@ -68,13 +69,38 @@ struct SessionTabView: View {
         return ids
     }
 
-    private func matchesFilter(_ s: SessionInfo) -> Bool {
+    private var orderedVisibleSessionIds: [String] {
+        visibleSessionIds(for: deck.filter)
+    }
+
+    private func matchesFilter(_ s: SessionInfo, filter: SessionStatusFilter) -> Bool {
         switch filter {
         case .all:     return true
         case .running: return s.status == .busy
         case .waiting: return s.status == .waiting
         case .done:    return sessionStore.doneUnseen.contains(s.sessionId)
         }
+    }
+
+    private func dispatchDeck(_ event: SessionDeckEvent) {
+        let effects = SessionDeckMachine.reduce(&deck, event: event)
+        for effect in effects {
+            switch effect {
+            case .jumpToSession(let sid):
+                if let match = sessionStore.sessions.first(where: { $0.sessionId == sid }) {
+                    sessionStore.jump(match)
+                }
+            }
+        }
+    }
+
+    private var radarHoveredBinding: Binding<String?> {
+        Binding(
+            get: { deck.hoveredSessionId },
+            set: { next in
+                dispatchDeck(.setHoveredSession(next, visibleIds: orderedVisibleSessionIds))
+            }
+        )
     }
 
     var body: some View {
@@ -92,8 +118,8 @@ struct SessionTabView: View {
                         sessions: allSessions,
                         sessionStore: sessionStore,
                         visibleSessionIds: Set(orderedVisibleSessionIds),
-                        selectedSessionId: selectedSessionId,
-                        hoveredSessionId: $hoveredRadarSessionId
+                        selectedSessionId: deck.selectedSessionId,
+                        hoveredSessionId: radarHoveredBinding
                     )
                     HairlineRule(showCrosshairs: true)
                 }
@@ -103,18 +129,18 @@ struct SessionTabView: View {
                     HairlineRule(showCrosshairs: false)
                 }
 
-                if (filter == .all || filter == .waiting) && !waitingSessions.isEmpty {
+                if (deck.filter == .all || deck.filter == .waiting) && !waitingSessions.isEmpty {
                     needsAttentionSection
                     HairlineRule(showCrosshairs: true)
                 }
 
-                if filter != .waiting {
+                if deck.filter != .waiting {
                     ForEach(Array(filteredGroups.enumerated()), id: \.element.id) { idx, group in
                         SessionGroupSection(
                             group: group,
                             sessionStore: sessionStore,
-                            selectedSessionId: selectedSessionId,
-                            hoveredRadarSessionId: hoveredRadarSessionId
+                            selectedSessionId: deck.selectedSessionId,
+                            hoveredRadarSessionId: deck.hoveredSessionId
                         )
                         if idx < filteredGroups.count - 1 {
                             HairlineRule(showCrosshairs: true)
@@ -133,6 +159,9 @@ struct SessionTabView: View {
             }
         }
         .animation(.easeInOut(duration: 0.16), value: sessionStore.jumpHint)
+        .onChange(of: orderedVisibleSessionIds) { ids in
+            dispatchDeck(.reconcileVisibleIds(ids))
+        }
         .onAppear { if !isStaticRender { installKeyMonitor() } }
         .onDisappear { removeKeyMonitor() }
     }
@@ -149,7 +178,7 @@ struct SessionTabView: View {
 
         return HStack(spacing: 4) {
             ForEach(chips, id: \.kind) { item in
-                let isSelected = (filter == item.kind)
+                let isSelected = (deck.filter == item.kind)
                 let isHovered = (hoveredFilter == item.kind)
                 let squareColor = item.tint ?? theme.accent
 
@@ -205,7 +234,7 @@ struct SessionTabView: View {
                     hoveredFilter = inside ? item.kind : (hoveredFilter == item.kind ? nil : hoveredFilter)
                 }
                 .onTapGesture {
-                    filter = item.kind
+                    dispatchDeck(.selectFilter(item.kind, visibleIds: visibleSessionIds(for: item.kind)))
                 }
             }
             Spacer(minLength: 0)
@@ -249,7 +278,7 @@ struct SessionTabView: View {
                         sessionStore: sessionStore,
                         rowIndex: idx + 1,
                         workspacePrefix: wsLabel,
-                        isSelected: selectedSessionId == session.sessionId || hoveredRadarSessionId == session.sessionId
+                        isSelected: deck.selectedSessionId == session.sessionId || deck.hoveredSessionId == session.sessionId
                     )
                     if idx < waitingSessions.count - 1 {
                         Rectangle()
@@ -344,27 +373,16 @@ struct SessionTabView: View {
 
             switch event.keyCode {
             case 125:
-                selectedSessionId = SessionNavLogic.moveSelection(
-                    currentId: selectedSessionId,
-                    orderedIds: orderedVisibleSessionIds,
-                    delta: 1
-                )
+                dispatchDeck(.moveKeyboardSelection(delta: 1, visibleIds: orderedVisibleSessionIds))
                 return nil
             case 126:
-                selectedSessionId = SessionNavLogic.moveSelection(
-                    currentId: selectedSessionId,
-                    orderedIds: orderedVisibleSessionIds,
-                    delta: -1
-                )
+                dispatchDeck(.moveKeyboardSelection(delta: -1, visibleIds: orderedVisibleSessionIds))
                 return nil
             case 36, 76:
-                let targetId = selectedSessionId ?? orderedVisibleSessionIds.first
-                if let sid = targetId,
-                   let match = sessionStore.sessions.first(where: { $0.sessionId == sid }) {
-                    sessionStore.jump(match)
-                    return nil
-                }
-                return event
+                let ids = orderedVisibleSessionIds
+                guard !ids.isEmpty else { return event }
+                dispatchDeck(.activateSelected(visibleIds: ids))
+                return nil
             default:
                 return event
             }
@@ -393,7 +411,7 @@ struct SessionGroupSection: View {
             HStack(spacing: 5) {
                 Text("+")
                     .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
-                    .foregroundColor(theme.accent.opacity(0.9))
+                    .foregroundColor(theme.accentSecondary.opacity(0.9))
                 Text(group.label.uppercased())
                     .font(.system(size: 8, weight: .medium, design: .monospaced))
                     .tracking(0.95)
@@ -541,10 +559,13 @@ struct SessionRow: View {
         .onHover { inside in
             guard inside != hovering else { return }
             hovering = inside
-            if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+            PointingCursorCoordinator.shared.setPointing(inside, token: "session-row-\(session.sessionId)")
         }
         .onDisappear {
-            if hovering { NSCursor.pop(); hovering = false }
+            if hovering {
+                hovering = false
+                PointingCursorCoordinator.shared.setPointing(false, token: "session-row-\(session.sessionId)")
+            }
         }
         .onTapGesture { sessionStore.jump(session) }
     }

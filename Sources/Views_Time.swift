@@ -516,12 +516,13 @@ struct MonthTimeChart: View {
         let peak = peakDay
         let peakKey = peak?.key
         let peakSeconds = peak?.seconds ?? 0
+        let avgSeconds = activeDays > 0 ? monthTotal / activeDays : 0
         let monthStr = String(format: "%04d.%02d", year, month)
 
         VStack(alignment: .leading, spacing: 0) {
             TimeKpiStrip(items: [
                 (loc("timeMonthTotal"), TimeLogic.formatDurationShort(monthTotal)),
-                (loc("timeDailyAvg"), TimeLogic.formatDurationShort(activeDays > 0 ? monthTotal / activeDays : 0)),
+                (loc("timeDailyAvg"), TimeLogic.formatDurationShort(avgSeconds)),
                 (loc("timeLongest"), TimeLogic.formatDurationShort(
                     TimeLogic.longestIntervalSeconds(in: timeData.days, dayKeys: monthDayKeys))),
             ])
@@ -562,9 +563,9 @@ struct MonthTimeChart: View {
                             }
                         } else if peakSeconds > 0 {
                             Text("\(loc("peakTag")) \(TimeLogic.formatDurationShort(peakSeconds).uppercased())")
-                                .font(.system(size: 8, weight: .regular, design: .monospaced))
+                                .font(.system(size: 8, weight: .medium, design: .monospaced))
                                 .monospacedDigit()
-                                .foregroundColor(theme.inkMuted)
+                                .foregroundColor(theme.accent.opacity(0.88))
                         }
                     }
                     .frame(height: 12)
@@ -590,7 +591,7 @@ struct MonthTimeChart: View {
 
                 VStack(spacing: 2) {
                     ForEach(Array(weeks.enumerated()), id: \.offset) { _, dayKeys in
-                        weekRow(dayKeys: dayKeys, peakKey: peakKey, peakSeconds: peakSeconds)
+                        weekRow(dayKeys: dayKeys, peakKey: peakKey, peakSeconds: peakSeconds, avgSeconds: avgSeconds)
                     }
                 }
             }
@@ -650,7 +651,7 @@ struct MonthTimeChart: View {
         }
     }
 
-    private func weekRow(dayKeys: [String], peakKey: String?, peakSeconds: Int) -> some View {
+    private func weekRow(dayKeys: [String], peakKey: String?, peakSeconds: Int, avgSeconds: Int) -> some View {
         let inMonthKeys = dayKeys.filter { $0.hasPrefix(monthPrefix) }
         let total = TimeLogic.totalSeconds(in: timeData.days, dayKeys: inMonthKeys)
         let containsPeak = (peakKey != nil && inMonthKeys.contains(peakKey!))
@@ -660,7 +661,7 @@ struct MonthTimeChart: View {
                 .monospacedDigit()
                 .foregroundColor(theme.inkMuted)
                 .frame(width: labelWidth, alignment: .leading)
-            timeline(dayKeys: dayKeys, peakKey: peakKey, peakSeconds: peakSeconds)
+            timeline(dayKeys: dayKeys, peakKey: peakKey, peakSeconds: peakSeconds, avgSeconds: avgSeconds)
                 .frame(height: rowHeight)
             Text(TimeLogic.formatDurationShort(total).uppercased())
                 .font(.system(size: 8.5, weight: total > 0 ? .medium : .regular, design: .monospaced))
@@ -676,15 +677,15 @@ struct MonthTimeChart: View {
     }
 
     @ViewBuilder
-    private func timeline(dayKeys: [String], peakKey: String?, peakSeconds: Int) -> some View {
+    private func timeline(dayKeys: [String], peakKey: String?, peakSeconds: Int, avgSeconds: Int) -> some View {
         if instrumentElevation {
-            instrumentTimeline(dayKeys: dayKeys, peakKey: peakKey, peakSeconds: peakSeconds)
+            instrumentTimeline(dayKeys: dayKeys, peakKey: peakKey, peakSeconds: peakSeconds, avgSeconds: avgSeconds)
         } else {
             classicTimeline(dayKeys: dayKeys)
         }
     }
 
-    private func instrumentTimeline(dayKeys: [String], peakKey: String?, peakSeconds: Int) -> some View {
+    private func instrumentTimeline(dayKeys: [String], peakKey: String?, peakSeconds: Int, avgSeconds: Int) -> some View {
         let normDenom = Double(max(3600, peakSeconds))
         let dayTotals = dayKeys.map { key -> Int in
             key.hasPrefix(monthPrefix) ? (timeData.days[key]?.totalSeconds ?? 0) : 0
@@ -704,7 +705,7 @@ struct MonthTimeChart: View {
             let dayW = w / 7.0
             ZStack {
                 // Static hover-independent Archival Monthly Signal Specimen cells:
-                // deterministic stipple density wash, 24h micro-oscilloscope baseline,
+                // deterministic stipple density wash, AVG dashed reference line, 24h micro-oscilloscope baseline,
                 // Fred corner brackets + 3x3 accent apex square on peak day, 1.5px top rule on today.
                 StaticMonthRowCanvas(
                     dayKeys: dayKeys,
@@ -713,6 +714,7 @@ struct MonthTimeChart: View {
                     inMonthFlags: inMonthFlags,
                     todayIdx: todayIdx,
                     peakIdx: peakIdx,
+                    avgSeconds: avgSeconds,
                     normDenom: normDenom,
                     theme: theme
                 )
@@ -895,8 +897,9 @@ struct MonthTimeChart: View {
 }
 
 /// Hover-independent Archival Monthly Signal Specimen row canvas (Equatable).
-/// Batches cell frames, out-of-month hatch, deterministic stippled density washes,
-/// 24h micro-oscilloscope baselines, today top rule, and peak Fred corner brackets.
+/// Batches cell frames, out-of-month hatch, duotone stippled density washes (peak in Color 1,
+/// other active days & AVG dashed line in Color 2), 24h micro-oscilloscope baselines,
+/// today top rule, and peak Fred corner brackets.
 private struct StaticMonthRowCanvas: View, Equatable {
     let dayKeys: [String]
     let dayTotals: [Int]
@@ -904,6 +907,7 @@ private struct StaticMonthRowCanvas: View, Equatable {
     let inMonthFlags: [Bool]
     let todayIdx: Int?
     let peakIdx: Int?
+    let avgSeconds: Int
     let normDenom: Double
     let theme: AGYTheme
 
@@ -922,16 +926,26 @@ private struct StaticMonthRowCanvas: View, Equatable {
             var cellBorders = Path()
             var outBorders = Path()
             var baselines = Path()
-            var denseStipple = Path()
-            var softStipple = Path()
+            var avgDashedLine = Path()
+            var otherDenseStipple = Path()
+            var otherSoftStipple = Path()
+            var peakDenseStipple = Path()
+            var peakSoftStipple = Path()
 
             let stippleStep: CGFloat = 2.35
+            let avgLineY: CGFloat? = {
+                guard avgSeconds > 0 else { return nil }
+                let avgFrac = min(1.0, Double(avgSeconds) / normDenom)
+                let reach = max(3.5, CGFloat(avgFrac) * (cellH - 8.0))
+                return max(cellY + 3.0, min(baseY - 2.0, baseY - reach))
+            }()
 
             for i in 0..<count {
                 let cellX = dayW * CGFloat(i) + 1.0
                 let cellW = max(0, dayW - 2.0)
                 let rect = CGRect(x: cellX, y: cellY, width: cellW, height: cellH)
                 let inMonth = inMonthFlags[i]
+                let isPeak = (i == peakIdx)
 
                 if !inMonth {
                     outMonthCells.addRect(rect)
@@ -954,7 +968,7 @@ private struct StaticMonthRowCanvas: View, Equatable {
                 }
 
                 inMonthCells.addRect(rect)
-                if i != peakIdx {
+                if !isPeak {
                     cellBorders.addRect(rect)
                 }
 
@@ -967,6 +981,16 @@ private struct StaticMonthRowCanvas: View, Equatable {
                     let midX = (lineX0 + lineX1) * 0.5
                     baselines.move(to: CGPoint(x: midX, y: baseY - 1.2))
                     baselines.addLine(to: CGPoint(x: midX, y: baseY + 1.2))
+                }
+
+                // Monthly AVG dashed elevation benchmark (Color 2) across in-month cells
+                if let ay = avgLineY {
+                    let avgX0 = (ay < cellY + 9.5) ? (cellX + 13.0) : (cellX + 2.0)
+                    let avgX1 = cellX + cellW - 2.0
+                    if avgX1 > avgX0 + 2.0 {
+                        avgDashedLine.move(to: CGPoint(x: avgX0, y: ay))
+                        avgDashedLine.addLine(to: CGPoint(x: avgX1, y: ay))
+                    }
                 }
 
                 // Deterministic stippled density wash proportional to daily active hours
@@ -1004,10 +1028,18 @@ private struct StaticMonthRowCanvas: View, Equatable {
                             if roll < prob {
                                 let sz: CGFloat = ((h >> 26) & 1 == 0) ? 0.9 : 1.15
                                 let dotRect = CGRect(x: gx, y: gy, width: sz, height: sz)
-                                if distAboveBase < maxReach * 0.55 {
-                                    denseStipple.addRect(dotRect)
+                                if isPeak {
+                                    if distAboveBase < maxReach * 0.55 {
+                                        peakDenseStipple.addRect(dotRect)
+                                    } else {
+                                        peakSoftStipple.addRect(dotRect)
+                                    }
                                 } else {
-                                    softStipple.addRect(dotRect)
+                                    if distAboveBase < maxReach * 0.55 {
+                                        otherDenseStipple.addRect(dotRect)
+                                    } else {
+                                        otherSoftStipple.addRect(dotRect)
+                                    }
                                 }
                             }
                         }
@@ -1024,26 +1056,39 @@ private struct StaticMonthRowCanvas: View, Equatable {
             if !inMonthCells.isEmpty {
                 context.fill(inMonthCells, with: .color(theme.surface.opacity(theme.isDark ? 0.24 : 0.38)))
             }
-            if !softStipple.isEmpty {
-                context.fill(softStipple, with: .color(theme.inkSecondary.opacity(theme.isDark ? 0.28 : 0.22)))
+            if !otherSoftStipple.isEmpty {
+                context.fill(otherSoftStipple, with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.26 : 0.20)))
             }
-            if !denseStipple.isEmpty {
-                context.fill(denseStipple, with: .color(theme.inkPrimary.opacity(theme.isDark ? 0.40 : 0.34)))
+            if !otherDenseStipple.isEmpty {
+                context.fill(otherDenseStipple, with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.42 : 0.34)))
+            }
+            if !peakSoftStipple.isEmpty {
+                context.fill(peakSoftStipple, with: .color(theme.accent.opacity(theme.isDark ? 0.30 : 0.24)))
+            }
+            if !peakDenseStipple.isEmpty {
+                context.fill(peakDenseStipple, with: .color(theme.accent.opacity(theme.isDark ? 0.48 : 0.40)))
             }
             if !baselines.isEmpty {
                 context.stroke(baselines, with: .color(theme.hairlineStrong.opacity(0.55)), lineWidth: 0.55)
+            }
+            if !avgDashedLine.isEmpty {
+                context.stroke(
+                    avgDashedLine,
+                    with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.62 : 0.54)),
+                    style: StrokeStyle(lineWidth: 0.65, dash: [2.0, 2.0])
+                )
             }
             if !cellBorders.isEmpty {
                 context.stroke(cellBorders, with: .color(theme.hairline.opacity(0.58)), lineWidth: 0.65)
             }
 
-            // Today: clean 1.5px top theme.accent rule
+            // Today: clean 1.5px top rule (Color 1 if peak day, Color 2 otherwise)
             if let ti = todayIdx, ti < count, inMonthFlags[ti] {
                 let cellX = dayW * CGFloat(ti) + 1.0
                 let cellW = max(0, dayW - 2.0)
                 context.fill(
                     Path(CGRect(x: cellX, y: cellY, width: cellW, height: 1.5)),
-                    with: .color(theme.accent)
+                    with: .color(ti == peakIdx ? theme.accent : theme.accentSecondary)
                 )
             }
 
@@ -1091,13 +1136,15 @@ private struct StaticMonthRowCanvas: View, Equatable {
                 )
             }
 
-            // Crisp day numbers anchored top-left
+            // Crisp day numbers anchored top-left (peak in Color 1, today in Color 2, others muted)
             for i in 0..<count where inMonthFlags[i] {
                 let cellX = dayW * CGFloat(i) + 1.0
-                let isSpecial = (i == todayIdx || i == peakIdx)
+                let isPeak = (i == peakIdx)
+                let isToday = (i == todayIdx)
+                let numColor: Color = isPeak ? theme.accent : (isToday ? theme.accentSecondary : theme.inkMuted)
                 let label = Text(dayNumbers[i])
-                    .font(.system(size: 7, weight: isSpecial ? .medium : .regular, design: .monospaced))
-                    .foregroundColor(isSpecial ? theme.accent : theme.inkMuted)
+                    .font(.system(size: 7, weight: (isPeak || isToday) ? .medium : .regular, design: .monospaced))
+                    .foregroundColor(numColor)
                 context.draw(label, at: CGPoint(x: cellX + 3.0, y: cellY + 2.2), anchor: .topLeading)
             }
         }
@@ -1119,7 +1166,7 @@ private struct StaticMonthRowCanvas: View, Equatable {
 }
 
 /// Lightweight dynamic pulse-tick overlay for Month Cadence (Instrument mode).
-/// Batches 24h micro-oscilloscope interval traces and hover accent highlight.
+/// Batches 24h micro-oscilloscope interval traces (peak & hover in Color 1, other active days in Color 2).
 private struct MonthRowPulseOverlayCanvas: View {
     let dayKeys: [String]
     let rowIntervals: [[ActiveInterval]]
@@ -1141,10 +1188,12 @@ private struct MonthRowPulseOverlayCanvas: View {
             let cellH = max(4.0, size.height - 2.0)
             let baseY = cellY + cellH - 5.2
 
-            var normalBars = Path()
-            var normalTicks = Path()
-            var accentBars = Path()
-            var accentTicks = Path()
+            var secondaryBars = Path()
+            var secondaryTicks = Path()
+            var peakBars = Path()
+            var peakTicks = Path()
+            var focusedBars = Path()
+            var focusedTicks = Path()
 
             for i in 0..<count where inMonthFlags[i] {
                 let key = dayKeys[i]
@@ -1153,6 +1202,7 @@ private struct MonthRowPulseOverlayCanvas: View {
                 let innerX0 = cellX + 2.5
                 let innerW = max(1.0, cellW - 5.0)
                 let isHoveredDay = (hoveredDayKey == key)
+                let isPeakDay = (peakIdx == i)
 
                 if isHoveredDay {
                     context.stroke(
@@ -1170,44 +1220,64 @@ private struct MonthRowPulseOverlayCanvas: View {
                     )
                     let isHoveredExact = (hoveredIntervalDayKey == key && hoveredInterval == interval)
                     let isDayFocused = (hoveredInterval == nil && isHoveredDay)
-                    let isAccent = isHoveredExact || isDayFocused
+                    let isFocused = isHoveredExact || isDayFocused
 
                     let pulseH: CGFloat = isHoveredExact ? 3.2 : 2.2
                     let tickTop = baseY - (isHoveredExact ? 5.2 : 4.2)
                     let tickBot = baseY + 1.4
                     let barRect = CGRect(x: ix, y: baseY - pulseH, width: iw, height: pulseH)
 
-                    if isAccent {
-                        accentBars.addRect(barRect)
-                        accentTicks.move(to: CGPoint(x: ix + 0.4, y: tickTop))
-                        accentTicks.addLine(to: CGPoint(x: ix + 0.4, y: tickBot))
+                    if isFocused {
+                        focusedBars.addRect(barRect)
+                        focusedTicks.move(to: CGPoint(x: ix + 0.4, y: tickTop))
+                        focusedTicks.addLine(to: CGPoint(x: ix + 0.4, y: tickBot))
                         if iw >= 3.2 {
-                            accentTicks.move(to: CGPoint(x: ix + iw - 0.4, y: tickTop))
-                            accentTicks.addLine(to: CGPoint(x: ix + iw - 0.4, y: tickBot))
+                            focusedTicks.move(to: CGPoint(x: ix + iw - 0.4, y: tickTop))
+                            focusedTicks.addLine(to: CGPoint(x: ix + iw - 0.4, y: tickBot))
+                        }
+                    } else if isPeakDay {
+                        peakBars.addRect(barRect)
+                        peakTicks.move(to: CGPoint(x: ix + 0.4, y: tickTop))
+                        peakTicks.addLine(to: CGPoint(x: ix + 0.4, y: tickBot))
+                        if iw >= 3.2 {
+                            peakTicks.move(to: CGPoint(x: ix + iw - 0.4, y: tickTop))
+                            peakTicks.addLine(to: CGPoint(x: ix + iw - 0.4, y: tickBot))
                         }
                     } else {
-                        normalBars.addRect(barRect)
-                        normalTicks.move(to: CGPoint(x: ix + 0.4, y: tickTop))
-                        normalTicks.addLine(to: CGPoint(x: ix + 0.4, y: tickBot))
+                        secondaryBars.addRect(barRect)
+                        secondaryTicks.move(to: CGPoint(x: ix + 0.4, y: tickTop))
+                        secondaryTicks.addLine(to: CGPoint(x: ix + 0.4, y: tickBot))
                         if iw >= 3.2 {
-                            normalTicks.move(to: CGPoint(x: ix + iw - 0.4, y: tickTop))
-                            normalTicks.addLine(to: CGPoint(x: ix + iw - 0.4, y: tickBot))
+                            secondaryTicks.move(to: CGPoint(x: ix + iw - 0.4, y: tickTop))
+                            secondaryTicks.addLine(to: CGPoint(x: ix + iw - 0.4, y: tickBot))
                         }
                     }
                 }
             }
 
-            if !normalBars.isEmpty {
-                let alpha: Double = anyHovered ? 0.28 : 0.82
-                context.fill(normalBars, with: .color(theme.inkPrimary.opacity(alpha)))
-                context.stroke(normalTicks, with: .color(theme.inkPrimary.opacity(min(0.95, alpha + 0.12))), lineWidth: 0.75)
+            if !secondaryBars.isEmpty {
+                let alpha: Double = anyHovered ? 0.28 : 0.86
+                context.fill(secondaryBars, with: .color(theme.accentSecondary.opacity(alpha)))
+                context.stroke(
+                    secondaryTicks,
+                    with: .color(theme.accentSecondary.opacity(min(0.96, alpha + 0.10))),
+                    lineWidth: 0.75
+                )
             }
-            if !accentBars.isEmpty {
-                if theme.isDark {
-                    context.stroke(accentTicks, with: .color(theme.accent.opacity(0.28)), lineWidth: 2.6)
+            if !peakBars.isEmpty {
+                let alpha: Double = anyHovered ? 0.34 : 0.96
+                if theme.isDark && !anyHovered {
+                    context.stroke(peakTicks, with: .color(theme.accent.opacity(0.24)), lineWidth: 2.2)
                 }
-                context.fill(accentBars, with: .color(theme.accent))
-                context.stroke(accentTicks, with: .color(theme.accent), lineWidth: 0.9)
+                context.fill(peakBars, with: .color(theme.accent.opacity(alpha)))
+                context.stroke(peakTicks, with: .color(theme.accent.opacity(alpha)), lineWidth: 0.85)
+            }
+            if !focusedBars.isEmpty {
+                if theme.isDark {
+                    context.stroke(focusedTicks, with: .color(theme.accent.opacity(0.28)), lineWidth: 2.6)
+                }
+                context.fill(focusedBars, with: .color(theme.accent))
+                context.stroke(focusedTicks, with: .color(theme.accent), lineWidth: 0.9)
             }
         }
     }

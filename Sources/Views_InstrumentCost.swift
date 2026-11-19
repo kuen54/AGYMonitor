@@ -95,7 +95,7 @@ struct CostInstrumentView: View {
                     let signed = formatSignedPercent(delta)
                     Text(String(format: loc("vs7dAvgFmt"), signed).uppercased())
                         .font(.system(size: 8.5, weight: .medium, design: .monospaced))
-                        .foregroundColor(delta > 0 ? theme.accent : theme.inkSecondary)
+                        .foregroundColor(delta > 0 ? theme.accent : theme.accentSecondary)
                 }
             }
 
@@ -477,10 +477,14 @@ struct TopographicRidgeChart: View {
                     .font(.system(size: 8, weight: .semibold, design: .monospaced))
                     .foregroundColor(theme.accent)
             } else {
-                Text("\(String(format: loc("avgFmt"), avgText))/D · \(String(format: loc("maxFmt"), maxText))")
-                    .font(.system(size: 8, weight: .regular, design: .monospaced))
-                    .monospacedDigit()
-                    .foregroundColor(theme.inkMuted)
+                HStack(spacing: 3) {
+                    Text("\(String(format: loc("avgFmt"), avgText))/D")
+                        .foregroundColor(theme.accentSecondary.opacity(theme.isDark ? 0.90 : 0.86))
+                    Text("· \(String(format: loc("maxFmt"), maxText))")
+                        .foregroundColor(theme.inkMuted)
+                }
+                .font(.system(size: 8, weight: .regular, design: .monospaced))
+                .monospacedDigit()
             }
         }
     }
@@ -578,7 +582,7 @@ private struct StaticTopographicTerrainCanvas: View, Equatable {
 
             let outerPoints = ridge.layers.first?.points ?? []
 
-            // 1. Dashed monthly average elevation rule + collision-free edge marginalia
+            // 1. Dashed monthly average elevation rule + collision-free edge marginalia (Color 2)
             if ridge.maxValue > 0 && avgValue > 0 {
                 let ratio = min(1.0, avgValue / ridge.maxValue)
                 let ay = baseY - CGFloat(ratio) * usableH
@@ -587,14 +591,14 @@ private struct StaticTopographicTerrainCanvas: View, Equatable {
                 dash.addLine(to: CGPoint(x: size.width, y: ay))
                 context.stroke(
                     dash,
-                    with: .color(theme.hairlineStrong.opacity(0.72)),
+                    with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.54 : 0.48)),
                     style: StrokeStyle(lineWidth: 0.75, dash: [2.5, 3.5])
                 )
                 let leftClear = sampleRidgeCrestNormY(outerPoints: outerPoints, at: 0.04)
                     <= sampleRidgeCrestNormY(outerPoints: outerPoints, at: 0.96)
                 let avgTag = Text("AVG")
-                    .font(.system(size: 6.5, weight: .regular, design: .monospaced))
-                    .foregroundColor(theme.inkMuted.opacity(0.78))
+                    .font(.system(size: 6.5, weight: .medium, design: .monospaced))
+                    .foregroundColor(theme.accentSecondary.opacity(theme.isDark ? 0.88 : 0.82))
                 context.draw(
                     avgTag,
                     at: CGPoint(x: leftClear ? 2 : size.width - 2, y: ay - 5),
@@ -611,20 +615,21 @@ private struct StaticTopographicTerrainCanvas: View, Equatable {
                 silhouette.addLine(to: CGPoint(x: toPt(outerPoints[outerPoints.count - 1]).x, y: baseY))
                 silhouette.closeSubpath()
 
-                // 2a. Whisper-light tonal depth wash under the mountain
+                // 2a. Duotone tonal depth wash: Color 1 peaks shifting into Color 2 valleys
                 context.fill(
                     silhouette,
                     with: .linearGradient(
-                        Gradient(colors: [
-                            theme.inkPrimary.opacity(theme.isDark ? 0.11 : 0.065),
-                            theme.inkPrimary.opacity(0.008),
+                        Gradient(stops: [
+                            .init(color: theme.accent.opacity(theme.isDark ? 0.15 : 0.09), location: 0.0),
+                            .init(color: theme.accentSecondary.opacity(theme.isDark ? 0.10 : 0.065), location: 0.56),
+                            .init(color: theme.accentSecondary.opacity(0.012), location: 1.0),
                         ]),
                         startPoint: CGPoint(x: 0, y: topPad),
                         endPoint: CGPoint(x: 0, y: baseY)
                     )
                 )
 
-                // 2b. Horizontal plotter scanline relief clipped to silhouette (batched into 4 elevation bands)
+                // 2b. Horizontal plotter scanline relief clipped to silhouette (4 elevation bands: Color 2 valleys -> Color 1 peaks)
                 context.drawLayer { layer in
                     layer.clip(to: silhouette)
                     let scanStep: CGFloat = 3.6
@@ -650,23 +655,29 @@ private struct StaticTopographicTerrainCanvas: View, Equatable {
                         sy += scanStep
                         rowIdx += 1
                     }
-                    let bandAlphas: [Double] = [0.056, 0.077, 0.098, 0.120]
+                    let bandColors: [Color] = [
+                        theme.accentSecondary.opacity(theme.isDark ? 0.14 : 0.11),
+                        theme.accentSecondary.opacity(theme.isDark ? 0.19 : 0.15),
+                        theme.inkPrimary.opacity(0.098),
+                        theme.accent.opacity(theme.isDark ? 0.22 : 0.16),
+                    ]
                     for idx in 0..<4 where !bands[idx].isEmpty {
                         layer.stroke(
                             bands[idx],
-                            with: .color(theme.inkPrimary.opacity(bandAlphas[idx])),
+                            with: .color(bandColors[idx]),
                             lineWidth: 0.65
                         )
                     }
                 }
 
-                // 2c. Deterministic organic stipple particle cloud along ridge crest (batched into 2 Paths)
+                // 2c. Deterministic organic stipple particle cloud along ridge crest (batched into 3 Paths)
                 let stepX: CGFloat = 2.3
                 let stepY: CGFloat = 2.3
                 let cols = Int(size.width / stepX)
                 let rows = Int((baseY - topPad + 4) / stepY)
+                var peakDots = Path()
                 var denseDots = Path()
-                var softDots = Path()
+                var valleyDots = Path()
 
                 for ix in 0...cols {
                     let px = CGFloat(ix) * stepX
@@ -701,46 +712,85 @@ private struct StaticTopographicTerrainCanvas: View, Equatable {
                         if roll < prob {
                             let dotSize: CGFloat = ((h >> 26) & 1 == 0) ? 1.0 : 1.3
                             let rect = CGRect(x: gx, y: gy, width: dotSize, height: dotSize)
-                            if distBelow >= 0 && distBelow < 13 {
+                            if distBelow >= -2 && distBelow < 10 && crestNorm >= 0.70 {
+                                peakDots.addRect(rect)
+                            } else if distBelow >= 0 && distBelow < 13 {
                                 denseDots.addRect(rect)
                             } else {
-                                softDots.addRect(rect)
+                                valleyDots.addRect(rect)
                             }
                         }
                     }
                 }
 
-                context.fill(
-                    denseDots,
-                    with: .color(theme.inkPrimary.opacity(theme.isDark ? 0.68 : 0.62))
-                )
-                context.fill(
-                    softDots,
-                    with: .color(theme.inkSecondary.opacity(theme.isDark ? 0.44 : 0.40))
-                )
+                if !valleyDots.isEmpty {
+                    context.fill(
+                        valleyDots,
+                        with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.50 : 0.44))
+                    )
+                }
+                if !denseDots.isEmpty {
+                    context.fill(
+                        denseDots,
+                        with: .color(theme.inkPrimary.opacity(theme.isDark ? 0.66 : 0.60))
+                    )
+                }
+                if !peakDots.isEmpty {
+                    context.fill(
+                        peakDots,
+                        with: .color(theme.accent.opacity(theme.isDark ? 0.86 : 0.78))
+                    )
+                }
 
-                // 2d. 7 silky internal elevation isolines (bottom-up)
+                // 2d. 7 silky internal elevation isolines (bottom-up: Color 2 valleys -> Color 1 peaks)
                 for layer in ridge.layers.dropFirst().reversed() {
                     guard layer.points.count >= 2 else { continue }
                     var iso = Path()
                     iso.move(to: toPt(layer.points[0]))
                     for pt in layer.points.dropFirst() { iso.addLine(to: toPt(pt)) }
-                    let alpha = 0.11 + 0.28 * layer.factor
-                    context.stroke(iso, with: .color(theme.inkPrimary.opacity(alpha)), lineWidth: 0.65)
+                    let isoColor: Color
+                    if layer.factor < 0.72 {
+                        let norm = max(0, min(1, layer.factor / 0.72))
+                        let alpha = 0.28 + 0.26 * norm
+                        isoColor = theme.accentSecondary.opacity(alpha)
+                    } else {
+                        let alpha = (theme.isDark ? 0.34 : 0.28) + 0.24 * layer.factor
+                        isoColor = theme.accent.opacity(alpha)
+                    }
+                    context.stroke(iso, with: .color(isoColor), lineWidth: 0.68)
                 }
 
-                // 2e. Primary ridge silhouette line (+ delicate Fred-style optical bloom in Dark mode)
+                // 2e. Primary ridge silhouette line (+ Color 1 peak crest glow & duotone vertical shift)
                 var crestPath = Path()
                 crestPath.move(to: firstPt)
                 for pt in outerPoints.dropFirst() { crestPath.addLine(to: toPt(pt)) }
 
+                context.stroke(
+                    crestPath,
+                    with: .linearGradient(
+                        Gradient(stops: [
+                            .init(color: theme.accent.opacity(theme.isDark ? 0.28 : 0.14), location: 0.0),
+                            .init(color: theme.accent.opacity(0.0), location: 0.65),
+                        ]),
+                        startPoint: CGPoint(x: 0, y: topPad),
+                        endPoint: CGPoint(x: 0, y: baseY)
+                    ),
+                    lineWidth: theme.isDark ? 4.5 : 3.0
+                )
                 if theme.isDark {
-                    context.stroke(crestPath, with: .color(theme.accent.opacity(0.16)), lineWidth: 4.5)
-                    context.stroke(crestPath, with: .color(theme.inkPrimary.opacity(0.24)), lineWidth: 2.0)
+                    context.stroke(crestPath, with: .color(theme.inkPrimary.opacity(0.22)), lineWidth: 2.0)
                 }
                 context.stroke(
                     crestPath,
-                    with: .color(theme.inkPrimary.opacity(0.92)),
+                    with: .linearGradient(
+                        Gradient(stops: [
+                            .init(color: theme.accent, location: 0.0),
+                            .init(color: theme.inkPrimary.opacity(0.90), location: 0.58),
+                            .init(color: theme.accentSecondary.opacity(0.82), location: 1.0),
+                        ]),
+                        startPoint: CGPoint(x: 0, y: topPad),
+                        endPoint: CGPoint(x: 0, y: baseY)
+                    ),
                     lineWidth: 1.15
                 )
             }
@@ -875,7 +925,7 @@ private struct TopographicOverlayCanvas: View {
                 }
             }
             if !skyCrosses.isEmpty {
-                context.stroke(skyCrosses, with: .color(theme.reticle.opacity(0.32)), lineWidth: 0.75)
+                context.stroke(skyCrosses, with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.44 : 0.36)), lineWidth: 0.75)
             }
 
             // 2. Peak Target Lock HUD (1% Cobalt Accent + Fred micro-coordinates)
@@ -941,14 +991,14 @@ private struct TopographicOverlayCanvas: View {
                 var vline = Path()
                 vline.move(to: CGPoint(x: pt.x, y: 0))
                 vline.addLine(to: CGPoint(x: pt.x, y: baseY))
-                context.stroke(vline, with: .color(theme.reticle.opacity(0.75)), lineWidth: 0.75)
+                context.stroke(vline, with: .color(theme.accent.opacity(0.55)), lineWidth: 0.75)
 
                 var hline = Path()
                 hline.move(to: CGPoint(x: 0, y: pt.y))
                 hline.addLine(to: CGPoint(x: size.width, y: pt.y))
                 context.stroke(
                     hline,
-                    with: .color(theme.reticle.opacity(0.45)),
+                    with: .color(theme.accent.opacity(0.36)),
                     style: StrokeStyle(lineWidth: 0.75, dash: [2, 2.5])
                 )
 
@@ -1003,8 +1053,7 @@ struct BoreholeModelSection: View {
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
     @Environment(\.telemetryStaticRender) private var isStaticRender
-    @State private var hoveredColumnId: String? = nil
-    @State private var hoveredRowId: String? = nil
+    @State private var focusState = ModelFocusState()
 
     private var visibleModels: [ModelUsage] {
         usage.models.filter { $0.cost >= 0.005 }
@@ -1046,8 +1095,8 @@ struct BoreholeModelSection: View {
                         .foregroundColor(theme.accent)
                 } else {
                     Text(String(format: "%02d STRATA", models.count))
-                        .font(.system(size: 8, weight: .regular, design: .monospaced))
-                        .foregroundColor(theme.inkMuted)
+                        .font(.system(size: 8, weight: .medium, design: .monospaced))
+                        .foregroundColor(theme.accentSecondary.opacity(theme.isDark ? 0.88 : 0.82))
                 }
             }
 
@@ -1094,13 +1143,18 @@ struct BoreholeModelSection: View {
         .padding(.bottom, 11)
         .onChange(of: focusedModelId) { newValue in
             if newValue == nil {
-                if hoveredColumnId != nil { hoveredColumnId = nil }
-                if hoveredRowId != nil { hoveredRowId = nil }
+                focusState.reset()
+            }
+        }
+        .onChange(of: models.map(\.id)) { ids in
+            let valid = Set(ids)
+            focusState.reconcile(validIds: valid)
+            if let fid = focusedModelId, !valid.contains(fid) {
+                focusedModelId = focusState.effectiveFocusedId
             }
         }
         .onDisappear {
-            hoveredColumnId = nil
-            hoveredRowId = nil
+            focusState.reset()
         }
     }
 
@@ -1131,7 +1185,7 @@ struct BoreholeModelSection: View {
                 let coreRect = CGRect(x: coreX, y: 0.5, width: coreWidth, height: innerH)
                 context.fill(Path(coreRect), with: .color(theme.surface))
 
-                // 1. Left-margin geological depth ruler (00 / 50 / 100 + minor ticks, batched)
+                // 1. Left-margin geological depth ruler (00 / 50 / 100 + minor ticks, batched in Color 2)
                 var majorDepthTicks = Path()
                 var minorDepthTicks = Path()
                 for step in 0...4 {
@@ -1143,8 +1197,8 @@ struct BoreholeModelSection: View {
                         majorDepthTicks.move(to: CGPoint(x: coreX - tickLen, y: ty))
                         majorDepthTicks.addLine(to: CGPoint(x: coreX, y: ty))
                         let depthLabel = Text(String(format: "%02d", step * 25))
-                            .font(.system(size: 6.5, weight: .regular, design: .monospaced))
-                            .foregroundColor(theme.inkMuted.opacity(0.85))
+                            .font(.system(size: 6.5, weight: .medium, design: .monospaced))
+                            .foregroundColor(theme.accentSecondary.opacity(theme.isDark ? 0.82 : 0.76))
                         let labelY = step == 0 ? ty + 3.5 : (step == 4 ? ty - 3.5 : ty)
                         context.draw(depthLabel, at: CGPoint(x: coreX - 7, y: labelY), anchor: .trailing)
                     } else {
@@ -1152,16 +1206,19 @@ struct BoreholeModelSection: View {
                         minorDepthTicks.addLine(to: CGPoint(x: coreX, y: ty))
                     }
                 }
-                context.stroke(minorDepthTicks, with: .color(theme.hairline), lineWidth: 0.75)
-                context.stroke(majorDepthTicks, with: .color(theme.hairlineStrong), lineWidth: 0.75)
+                context.stroke(minorDepthTicks, with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.30 : 0.26)), lineWidth: 0.75)
+                context.stroke(majorDepthTicks, with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.58 : 0.50)), lineWidth: 0.75)
 
-                // 2. Monochrome archival lithological strata layers (authentic rock textures)
-                let stratumInk = theme.inkPrimary.opacity(0.80)
+                // 2. Archival lithological strata layers (monochrome on .monolith; Color 1 x Color 2 duotone on color presets)
+                let usesMono = theme.preset.usesMonochromeStrata
                 var seams = Path()
                 for stratum in strata {
                     let y0 = 0.5 + CGFloat(stratum.yStart) * innerH
                     let y1 = 0.5 + CGFloat(stratum.yEnd) * innerH
                     let rect = CGRect(x: coreX + 0.5, y: y0, width: coreWidth - 1, height: max(1, y1 - y0))
+                    let stratumInk: Color = usesMono
+                        ? theme.inkPrimary.opacity(0.80)
+                        : theme.modelColor(stratum.modelClass).opacity(theme.isDark ? 0.92 : 0.88)
 
                     var ctx = context
                     BoreholeModelSection.drawLithologyStratum(
@@ -1253,18 +1310,20 @@ struct BoreholeModelSection: View {
             case .active(let pt):
                 let ny = min(1.0, max(0.0, Double(pt.y / max(1, height))))
                 let hit = InstrumentMath.hitTestBoreholeSlice(normalizedY: ny, slices: slices)
-                if hoveredColumnId != hit {
-                    hoveredColumnId = hit
+                if focusState.columnHoveredId != hit {
+                    focusState.setColumnHover(hit)
                 }
-                if focusedModelId != hit {
-                    focusedModelId = hit
+                let nextFocus = focusState.effectiveFocusedId
+                if focusedModelId != nextFocus {
+                    focusedModelId = nextFocus
                 }
             case .ended:
-                if hoveredColumnId != nil {
-                    hoveredColumnId = nil
+                if focusState.columnHoveredId != nil {
+                    focusState.setColumnHover(nil)
                 }
-                if focusedModelId != hoveredRowId {
-                    focusedModelId = hoveredRowId
+                let nextFocus = focusState.effectiveFocusedId
+                if focusedModelId != nextFocus {
+                    focusedModelId = nextFocus
                 }
             }
         }
@@ -1450,7 +1509,9 @@ struct BoreholeModelSection: View {
                 let lineColor: Color = {
                     if isFocused { return theme.accent }
                     if anyFocused { return theme.hairline }
-                    return isBracketed ? theme.accent.opacity(0.72) : theme.hairlineStrong.opacity(0.72)
+                    return isBracketed
+                        ? theme.accent.opacity(0.76)
+                        : theme.accentSecondary.opacity(theme.isDark ? 0.44 : 0.38)
                 }()
 
                 var path = Path()
@@ -1468,7 +1529,11 @@ struct BoreholeModelSection: View {
                         width: dotSize,
                         height: dotSize
                     )),
-                    with: .color((isFocused || (!anyFocused && isBracketed)) ? theme.accent : theme.inkMuted.opacity(anyFocused ? 0.3 : 0.75))
+                    with: .color(
+                        (isFocused || (!anyFocused && isBracketed))
+                            ? theme.accent
+                            : theme.accentSecondary.opacity(anyFocused ? 0.28 : (theme.isDark ? 0.84 : 0.78))
+                    )
                 )
             }
         }
@@ -1490,12 +1555,20 @@ struct BoreholeModelSection: View {
         return HStack(spacing: 5) {
             Text(String(format: "%02d", index + 1))
                 .font(.system(size: 7, weight: .regular, design: .monospaced))
-                .foregroundColor(isFocused ? theme.accent : theme.inkMuted.opacity(0.75))
+                .foregroundColor(
+                    isFocused
+                        ? theme.accent
+                        : (isBracketed ? theme.accent.opacity(0.85) : theme.accentSecondary.opacity(0.72))
+                )
                 .frame(width: 14, alignment: .leading)
 
             Text(m.shortCode)
                 .font(.system(size: 9, weight: (isFocused || isBracketed) ? .semibold : .medium, design: .monospaced))
-                .foregroundColor(isFocused ? theme.accent : theme.inkPrimary)
+                .foregroundColor(
+                    isFocused
+                        ? theme.accent
+                        : (isBracketed ? theme.inkPrimary : theme.accentSecondary.opacity(theme.isDark ? 0.92 : 0.88))
+                )
 
             Text(m.name)
                 .font(.system(size: 9.5, weight: .regular))
@@ -1521,20 +1594,10 @@ struct BoreholeModelSection: View {
         .opacity(dimmed ? 0.36 : 1.0)
         .contentShape(Rectangle())
         .onHover { inside in
-            if inside {
-                if hoveredRowId != m.id {
-                    hoveredRowId = m.id
-                }
-                if focusedModelId != m.id {
-                    focusedModelId = m.id
-                }
-            } else {
-                if hoveredRowId == m.id {
-                    hoveredRowId = nil
-                }
-                if focusedModelId == m.id {
-                    focusedModelId = hoveredColumnId
-                }
+            focusState.setRowHover(m.id, inside: inside)
+            let nextFocus = focusState.effectiveFocusedId
+            if focusedModelId != nextFocus {
+                focusedModelId = nextFocus
             }
         }
     }

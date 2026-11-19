@@ -69,6 +69,8 @@ let package = Package(
                 "Core_UsageState.swift",
                 "Core_QuotaState.swift",
                 "Core_MonitorState.swift",
+                "Core_AppState.swift",
+                "Core_UIState.swift",
                 "Core_Telemetry.swift",
                 "Core_Instruments.swift",
             ]

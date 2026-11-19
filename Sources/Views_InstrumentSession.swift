@@ -239,11 +239,7 @@ struct AgentTelemetryRadarView: View {
     private func setPointingCursor(_ pointing: Bool) {
         guard pointing != isPointingCursor else { return }
         isPointingCursor = pointing
-        if pointing {
-            NSCursor.pointingHand.push()
-        } else {
-            NSCursor.pop()
-        }
+        PointingCursorCoordinator.shared.setPointing(pointing, token: "session-radar")
     }
 }
 
@@ -423,18 +419,18 @@ private struct RadarStaticCanvas: View, Equatable {
             }
 
             if !ringMistHalo.isEmpty {
-                context.fill(ringMistHalo, with: .color(theme.inkSecondary.opacity(theme.isDark ? 0.16 : 0.13)))
+                context.fill(ringMistHalo, with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.12 : 0.09)))
             }
             if !ringMistCore.isEmpty {
-                context.fill(ringMistCore, with: .color(theme.inkPrimary.opacity(theme.isDark ? 0.25 : 0.20)))
+                context.fill(ringMistCore, with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.20 : 0.15)))
             }
             context.stroke(
                 rangeCircles,
-                with: .color(theme.hairline.opacity(0.58)),
+                with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.28 : 0.24)),
                 style: StrokeStyle(lineWidth: 0.65, dash: [2, 3])
             )
             if !azimuthTicks.isEmpty {
-                context.stroke(azimuthTicks, with: .color(theme.hairlineStrong.opacity(0.45)), lineWidth: 0.6)
+                context.stroke(azimuthTicks, with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.46 : 0.38)), lineWidth: 0.6)
             }
 
             var axes = Path()
@@ -452,7 +448,7 @@ private struct RadarStaticCanvas: View, Equatable {
             context.stroke(centerCross, with: .color(theme.reticle.opacity(0.50)), lineWidth: 0.75)
 
             // 3b. Optical calibration compass cardinal labels (000° / 090° / 180° / 270°)
-            let compassColor = theme.inkMuted.opacity(0.65)
+            let compassColor = theme.accentSecondary.opacity(theme.isDark ? 0.62 : 0.58)
             let northLabel = Text("000°").font(.system(size: 6, weight: .regular, design: .monospaced)).tracking(0.3).foregroundColor(compassColor)
             let southLabel = Text("180°").font(.system(size: 6, weight: .regular, design: .monospaced)).tracking(0.3).foregroundColor(compassColor)
             let eastLabel  = Text("090°").font(.system(size: 6, weight: .regular, design: .monospaced)).tracking(0.3).foregroundColor(compassColor)
@@ -880,17 +876,17 @@ private struct RadarStaticCanvas: View, Equatable {
                             with: .color(g)
                         )
                     } else {
-                        let ink = theme.inkSecondary.opacity(0.88 * alphaMul)
+                        let standby = theme.accentSecondary.opacity((theme.isDark ? 0.78 : 0.72) * alphaMul)
                         var cross = Path()
                         cross.move(to: CGPoint(x: np.x - 3.2, y: np.y))
                         cross.addLine(to: CGPoint(x: np.x + 3.2, y: np.y))
                         cross.move(to: CGPoint(x: np.x, y: np.y - 3.2))
                         cross.addLine(to: CGPoint(x: np.x, y: np.y + 3.2))
-                        context.stroke(cross, with: .color(ink), lineWidth: 0.95)
+                        context.stroke(cross, with: .color(standby), lineWidth: 0.95)
                         context.stroke(
-                            Path(ellipseIn: CGRect(x: np.x - 1.6, y: np.y - 1.6, width: 3.2, height: 3.2)),
-                            with: .color(ink.opacity(0.65)),
-                            lineWidth: 0.65
+                            Path(ellipseIn: CGRect(x: np.x - 2.1, y: np.y - 2.1, width: 4.2, height: 4.2)),
+                            with: .color(standby.opacity(0.75)),
+                            lineWidth: 0.7
                         )
                     }
 
@@ -1174,7 +1170,7 @@ private struct RadarActiveTargetOverlay: View {
                 center: np,
                 radius: lockRadius,
                 len: 3.8,
-                color: theme.inkPrimary,
+                color: highlightColor,
                 lineWidth: 0.95
             )
         }

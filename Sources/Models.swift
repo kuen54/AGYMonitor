@@ -309,8 +309,10 @@ extension TelemetryThemePreset {
         switch self {
         case .monolith:  return loc("themeMonolith")
         case .blueprint: return loc("themeBlueprint")
-        case .phosphor:  return loc("themePhosphor")
+        case .risograph: return loc("themeRisograph")
         case .amber:     return loc("themeAmber")
+        case .racing:    return loc("themeRacing")
+        case .volt:      return loc("themeVolt")
         }
     }
 }

@@ -17,16 +17,19 @@ Native macOS (13+) menu bar & notch app monitoring Google Antigravity (`agy` CLI
 
 ## Explicit State Machines (No Shadow Booleans)
 
-All non-trivial UI/lifecycle transitions are modeled as pure `AGYCore` state machines with thin app-layer shells:
+All non-trivial UI/lifecycle transitions are modeled as pure `AGYCore` state machines with thin app-layer shells (full state/event/effect/invariant spec in `docs/STATE_MACHINES.md`):
 
 | Domain | Pure Reducer / State | App-Layer Shell |
 |---|---|---|
-| Notch hover, fullscreen gate & modal locks | `Core_NotchState.swift` (`NotchMachine`) | `NotchController.swift`, `NotchView.swift`, `Views_Menus.swift` |
-| Usage scopes, month nav, refresh queue, gates | `Core_UsageState.swift` (`LoadPhase`, `RefreshQueueState`, `MonthNavigationState`, `YearLoadGate`, `ArchiveSweepGate`) | `UsageStore.swift`, `Views.swift`, `Views_Time.swift` |
-| Plan quota, auth & 429 cooldown | `Core_QuotaState.swift` (`QuotaPhase`, `QuotaCooldownState`, `LiveQuotaHTTPOutcome`, `QuotaStateReducer`) | `QuotaService.swift`, `Views_Plan.swift` |
-| Poll cadence, FSEvents throttle, menu anchor, logo & live status | `Core_MonitorState.swift` (`SessionPollCadence`, `FSEventsThrottleState`, `MenuBarAnchorState`, `LogoVisualState`, `SessionLogic.resolveLiveSessionStatus`) | `SessionMonitor.swift`, `AITitleReader.swift`, `AppDelegate.swift`, `Views_Common.swift`, `Views_Session.swift` |
+| App presentation surface, popover/notch visibility & hotkey | `Core_AppState.swift` (`AppPresentationMachine`) | `AppDelegate.swift`, `NotchController.swift` |
+| Notch hover, fullscreen gate, clickable wing & modal locks | `Core_NotchState.swift` (`NotchMachine`) | `NotchController.swift`, `NotchView.swift`, `Views_Menus.swift` |
+| Notch Live Wing alert priority & auto-retract | `Core_Telemetry.swift` (`NotchLiveWingMachine`) | `NotchController.swift`, `NotchView.swift` |
+| Usage scopes, month nav, refresh queue, historical/year/archive gates | `Core_UsageState.swift` (`LoadPhase`, `RefreshQueueState`, `MonthNavigationState`, `HistoricalMonthLoadGate`, `YearLoadGate`, `ArchiveSweepGate`) | `UsageStore.swift`, `Views.swift`, `Views_Time.swift` |
+| Plan quota, auth, 429 cooldown, fetch coalescing & SWR token probe | `Core_QuotaState.swift` (`QuotaPhase`, `QuotaCooldownState`, `LiveQuotaHTTPOutcome`, `QuotaStateReducer`, `QuotaFetchGate`, `TokenPresenceProbeState`) | `QuotaService.swift`, `UsageStore.swift`, `Views_Plan.swift` |
+| Session monitor lifecycle, poll cadence, FSEvents throttle, menu anchor, logo & live status | `Core_MonitorState.swift` (`SessionMonitorLifecycleMachine`, `SessionPollCadence`, `FSEventsThrottleState`, `MenuBarAnchorState`, `LogoVisualState`, `SessionLogic.resolveLiveSessionStatus`) | `SessionMonitor.swift`, `AITitleReader.swift`, `AppDelegate.swift`, `Views_Common.swift` |
+| Sessions deck filter/selection, global cursor stack, borehole focus & transient banners | `Core_UIState.swift` (`SessionDeckMachine`, `CursorStackState`, `ModelFocusState`, `TransientBannerState`) | `Views_Session.swift`, `Views_InstrumentSession.swift`, `Views_InstrumentCost.swift`, `Views_Common.swift`, `SessionStore.swift` |
 
-Never add raw parallel booleans (like `preventClose` or shared `isLoading`) in app shells when a state-machine transition belongs in `Core_*State.swift`.
+Never add raw parallel booleans (like `preventClose`, `isStarted`+`fsHealthy`+`pollInterval`, raw `NSCursor.push/pop`, or shared `isLoading`) in app shells when a state-machine transition belongs in `Core_*State.swift`.
 
 ## Single Source of Truth (Anti-Split-Brain Rule)
 

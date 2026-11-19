@@ -142,4 +142,46 @@ struct MonitorStateTests {
             now: now
         ) == (.idle, nil))
     }
+
+    @Test("SessionMonitorLifecycleMachine enforces start/stop idempotency, post-stop scan safety, and poll cadence")
+    func sessionMonitorLifecycleReducer() {
+        var state = SessionMonitorLifecycleState()
+        let t0 = Date(timeIntervalSince1970: 10_000)
+
+        // Events while stopped are strictly no-ops (cannot spawn ps/lsof after stop)
+        #expect(SessionMonitorLifecycleMachine.reduce(&state, event: .fsEventReceived).isEmpty)
+        #expect(SessionMonitorLifecycleMachine.reduce(&state, event: .fsCoalesceFired(now: t0)).isEmpty)
+        #expect(SessionMonitorLifecycleMachine.reduce(&state, event: .pollTimerFired(now: t0)).isEmpty)
+
+        // Start once emits watcher start + initial scan; duplicate start is a no-op
+        let startEffects = SessionMonitorLifecycleMachine.reduce(&state, event: .start(now: t0))
+        #expect(state.isStarted)
+        #expect(startEffects == [.startFSWatcher, .runScan])
+        #expect(SessionMonitorLifecycleMachine.reduce(&state, event: .start(now: t0)).isEmpty)
+
+        // Healthy watcher + 0 live sessions + inactive -> 15s poll
+        let fsEffects = SessionMonitorLifecycleMachine.reduce(&state, event: .fsWatcherAttempted(healthy: true, at: t0))
+        #expect(fsEffects == [.setPollTimer(15.0)])
+
+        // Scan detects 2 live sessions while inactive -> tightens to 6s
+        let scan1 = SessionMonitorLifecycleMachine.reduce(&state, event: .scanCompleted(liveCount: 2))
+        #expect(scan1 == [.setPollTimer(6.0)])
+
+        // Panel opens -> active scan -> tightens to 2s
+        let activeEffects = SessionMonitorLifecycleMachine.reduce(&state, event: .setActive(true, now: t0.addingTimeInterval(5)))
+        #expect(activeEffects == [.runScan])
+        let scan2 = SessionMonitorLifecycleMachine.reduce(&state, event: .scanCompleted(liveCount: 2))
+        #expect(scan2 == [.setPollTimer(2.0)])
+
+        // Degraded watcher retries after 30s on next timer tick
+        SessionMonitorLifecycleMachine.reduce(&state, event: .fsWatcherAttempted(healthy: false, at: t0.addingTimeInterval(10)))
+        let retryTick = SessionMonitorLifecycleMachine.reduce(&state, event: .pollTimerFired(now: t0.addingTimeInterval(45)))
+        #expect(retryTick == [.startFSWatcher, .runScan])
+
+        // Stop tears down coalesce, timer, and FS watcher; late callbacks become no-ops
+        let stopEffects = SessionMonitorLifecycleMachine.reduce(&state, event: .stop)
+        #expect(!state.isStarted)
+        #expect(stopEffects == [.cancelFSCoalesce, .setPollTimer(nil), .stopFSWatcher])
+        #expect(SessionMonitorLifecycleMachine.reduce(&state, event: .fsCoalesceFired(now: t0.addingTimeInterval(50))).isEmpty)
+    }
 }

@@ -213,6 +213,7 @@ struct UsageOverviewSection: View {
         .onChange(of: store.viewingMonth) { _ in focusedModelId = nil }
         .onChange(of: store.viewingYear) { _ in focusedModelId = nil }
         .onChange(of: store.selectedPeriodScope) { _ in focusedModelId = nil }
+        .onChange(of: store.visualMode) { _ in focusedModelId = nil }
     }
 
     private var apiEquivFootnote: some View {
@@ -292,11 +293,11 @@ struct HeroTelemetrySection: View {
                     let signed = formatSignedPercent(delta)
                     Text(String(format: loc("vs7dAvgFmt"), signed).uppercased())
                         .font(.system(size: 9, weight: .bold, design: .monospaced))
-                        .foregroundColor(delta > 0 ? theme.accent : theme.signalGreen)
+                        .foregroundColor(delta > 0 ? theme.accent : theme.accentSecondary)
                 } else if let hit = cacheHitPct {
                     Text(String(format: loc("cacheHitFmt"), Int(hit.rounded())))
                         .font(.system(size: 9, weight: .bold, design: .monospaced))
-                        .foregroundColor(theme.accent)
+                        .foregroundColor(theme.accentSecondary)
                 }
             }
 
@@ -575,7 +576,7 @@ struct ModelLedgerSection: View {
 
             Text(hitPct)
                 .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
-                .foregroundColor(theme.accent)
+                .foregroundColor(theme.accentSecondary)
                 .frame(width: 36, alignment: .trailing)
         }
         .monospacedDigit()
@@ -667,14 +668,14 @@ struct DailyChart: View {
             let slotW = size.width / CGFloat(count)
             let barW = max(3.0, min(6.5, slotW * 0.62))
 
-            // 1. Dashed monthly average horizontal reference rule
+            // 1. Dashed monthly average horizontal reference rule (Color 2)
             if maxValue > 0 && avgValue > 0 {
                 let ratio = min(1.0, avgValue / maxValue)
                 let y = max(1, size.height - CGFloat(ratio) * size.height)
                 var dash = Path()
                 dash.move(to: CGPoint(x: 0, y: y))
                 dash.addLine(to: CGPoint(x: size.width, y: y))
-                context.stroke(dash, with: .color(theme.hairlineStrong),
+                context.stroke(dash, with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.62 : 0.55)),
                                style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
             }
 
@@ -798,9 +799,14 @@ struct DailyChart: View {
                 .tracking(0.5)
                 .foregroundColor(theme.inkSecondary)
             Spacer()
-            Text("\(String(format: loc("avgFmt"), avgText))/D · \(String(format: loc("maxFmt"), maxText))")
-                .font(.system(size: 8.5, weight: .medium, design: .monospaced))
-                .foregroundColor(theme.inkMuted)
+            HStack(spacing: 3) {
+                Text("\(String(format: loc("avgFmt"), avgText))/D")
+                    .foregroundColor(theme.accentSecondary.opacity(theme.isDark ? 0.90 : 0.86))
+                Text("· \(String(format: loc("maxFmt"), maxText))")
+                    .foregroundColor(theme.inkMuted)
+            }
+            .font(.system(size: 8.5, weight: .medium, design: .monospaced))
+            .monospacedDigit()
         }
     }
 }

@@ -33,9 +33,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var menuBarHostingView: NSView?
     private var menuBarAnchor = MenuBarAnchorState(initialText: "…", initialWidth: 40, isMenuBarVisible: true)
 
-    // Notch display mode. When displayMode == .notch the controller owns the notch
-    // panel + its whole lifecycle; the displayMode sink below is the SINGLE writer of
-    // statusItem.isVisible and the only place the controller is built/torn down.
+    // App presentation state machine: single source of truth for display surface
+    // (menu bar vs notch), popover/notch visibility, statusItem visibility, and hotkey.
+    private var presentation = AppPresentationState()
     private var notchController: NotchController?
     private var displayModeCancellable: AnyCancellable?
     private let hotKeyManager = GlobalHotKeyManager()
@@ -156,54 +156,84 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             )
         }
 
-        // Display-mode lifecycle: the SINGLE owner of statusItem visibility and the
-        // notch controller. @Published delivers the current value on subscribe, so
-        // this sink also performs the initial build for a saved .notch preference.
+        // Display-mode lifecycle: AppPresentationMachine is the SINGLE authority for
+        // statusItem visibility, notch controller lifecycle, panel visibility, and hotkey.
         displayModeCancellable = store.$displayMode
             .removeDuplicates()
             .receive(on: RunLoop.main)
-            .sink { [weak self] mode in self?.applyDisplayMode(mode) }
+            .sink { [weak self] mode in
+                let surface: AppDisplaySurface = (mode == .notch) ? .notch : .menubar
+                self?.dispatchPresentation(.displaySurfaceChanged(surface))
+            }
 
         hotkeyCancellable = store.$globalHotkeyEnabled
             .removeDuplicates()
             .receive(on: RunLoop.main)
             .sink { [weak self] enabled in
-                guard let self = self else { return }
-                if enabled {
-                    self.hotKeyManager.register { [weak self] in
-                        self?.toggleFromGlobalHotKey()
-                    }
-                } else {
-                    self.hotKeyManager.unregister()
-                }
+                self?.dispatchPresentation(.hotkeyPreferenceChanged(enabled))
             }
     }
 
-    /// Build or tear down the notch UI and toggle the menu-bar item to match the mode.
-    /// Idempotent — safe to call repeatedly with the same value. The one place that
-    /// writes statusItem.isVisible while a notch controller may exist.
-    private func applyDisplayMode(_ mode: DisplayMode) {
-        switch mode {
-        case .menubar:
-            notchController?.stop()
-            notchController = nil
-            menuBarAnchor.setMenuBarVisible(true)
-            menuBarModel.isVisible = true
-            menuBarModel.text = menuBarAnchor.displayedText
-            statusItem.length = CGFloat(menuBarAnchor.appliedWidth)
-            statusItem.isVisible = true
-        case .notch:
-            menuBarAnchor.setMenuBarVisible(false)
-            menuBarModel.isVisible = false
-            statusItem.isVisible = false
-            // If the popover happened to be open when switching, close it.
-            if popover.isShown { popover.performClose(nil) }
-            if notchController == nil {
-                let controller = NotchController(store: store, onQuit: {
-                    NSApplication.shared.terminate(nil)
-                })
-                notchController = controller
-                controller.start()
+    private func dispatchPresentation(_ event: AppPresentationEvent) {
+        let effects = AppPresentationMachine.reduce(&presentation, event: event)
+        for effect in effects {
+            switch effect {
+            case .startNotchController:
+                if notchController == nil {
+                    let controller = NotchController(
+                        store: store,
+                        onQuit: { NSApplication.shared.terminate(nil) },
+                        onOpenStateChanged: { [weak self] open in
+                            self?.dispatchPresentation(.notchOpenChanged(open))
+                        }
+                    )
+                    notchController = controller
+                    controller.start()
+                }
+            case .stopNotchController:
+                notchController?.stop()
+                notchController = nil
+            case .setStatusItemVisible(let visible):
+                menuBarAnchor.setMenuBarVisible(visible)
+                if visible {
+                    menuBarModel.text = menuBarAnchor.displayedText
+                    statusItem.length = CGFloat(menuBarAnchor.appliedWidth)
+                }
+                statusItem.isVisible = visible
+            case .setMenuBarLogoActive(let active):
+                if menuBarModel.isVisible != active {
+                    menuBarModel.isVisible = active
+                }
+            case .setPopoverAnimates(let animates):
+                popover.animates = animates
+            case .openPopover:
+                if let button = statusItem.button, !popover.isShown {
+                    popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+                    popover.contentViewController?.view.window?.makeKey()
+                    retryBrainWatcherIfNeeded()
+                    store.refresh()
+                }
+            case .closePopover:
+                if popover.isShown { popover.performClose(nil) }
+            case .showStatusContextMenu:
+                if let button = statusItem.button {
+                    showStatusContextMenu(anchorButton: button)
+                }
+            case .revealNotch:
+                notchController?.reveal()
+            case .toggleNotch:
+                notchController?.toggle()
+            case .syncPanelVisibility(let visible):
+                if !visible {
+                    Task { @MainActor in PointingCursorCoordinator.shared.releaseAll() }
+                }
+                store.setSessionMonitorActive(visible)
+            case .registerHotkey:
+                hotKeyManager.register { [weak self] in
+                    self?.dispatchPresentation(.globalHotkeyTriggered)
+                }
+            case .unregisterHotkey:
+                hotKeyManager.unregister()
             }
         }
     }
@@ -213,20 +243,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     /// popover left); popoverDidClose restores appliedWidth.
     private func updateMenuBarWidth(_ w: CGFloat) {
         menuBarAnchor.updateMeasuredWidth(Double(w))
-        guard store.displayMode == .menubar, !popover.isShown else { return }
+        guard presentation.isStatusItemVisible, !popover.isShown else { return }
         statusItem.length = CGFloat(menuBarAnchor.appliedWidth)
     }
 
     // Called when user opens the app again (double-click, Spotlight, Launchpad, etc.)
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        showPopover()
+        dispatchPresentation(.reopenRequested)
         return false
     }
 
     @objc private func onShowRequest(_ note: Notification) {
         // DistributedNotification may arrive on a non-main thread
         DispatchQueue.main.async { [weak self] in
-            self?.showPopover()
+            self?.dispatchPresentation(.reopenRequested)
         }
     }
 
@@ -235,42 +265,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     func popoverDidClose(_ notification: Notification) {
         menuBarAnchor.popoverClosed()
         menuBarModel.text = menuBarAnchor.displayedText
-        if store.displayMode == .menubar {
+        if presentation.isStatusItemVisible {
             statusItem.length = CGFloat(menuBarAnchor.appliedWidth)
         }
-        store.setSessionMonitorActive(false)
+        dispatchPresentation(.popoverClosed)
     }
 
     // Animate the open, but stop animating once shown so per-tab content-height
     // changes resize the popover instantly instead of jittering the rows above.
     func popoverDidShow(_ notification: Notification) {
-        popover.animates = false
         menuBarAnchor.popoverOpened()
-        store.setSessionMonitorActive(true)
-    }
-
-    private func showPopover() {
-        // In notch mode there is no status item to anchor to — a relaunch / reopen
-        // expands the notch instead of popping the (hidden) menu-bar popover.
-        if store.displayMode == .notch {
-            notchController?.reveal()
-            return
-        }
-        // Ensure the status item is visible in case macOS hid it in overflow
-        statusItem.isVisible = true
-        guard let button = statusItem.button else { return }
-        if !popover.isShown {
-            openPopover(anchorButton: button)
-        }
-    }
-
-    private func openPopover(anchorButton button: NSStatusBarButton) {
-        popover.animates = true
-        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-        popover.contentViewController?.view.window?.makeKey()
-        retryBrainWatcherIfNeeded()
-        // Non-forced kick: fingerprint short-circuits when nothing changed.
-        store.refresh()
+        dispatchPresentation(.popoverShown)
     }
 
     // MARK: - FSEvents watcher (Antigravity brain directories)
@@ -370,10 +375,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        hotKeyManager.unregister()
+        dispatchPresentation(.appWillTerminate)
         store.stopSessionMonitoring()
-        notchController?.stop()
-        notchController = nil
         fsRefreshDebounce?.cancel()
         fsRefreshDebounce = nil
         if let stream = fsEventStream {
@@ -395,28 +398,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let event = NSApp.currentEvent
         let isRightClick = event?.type == .rightMouseUp
             || (event?.type == .leftMouseUp && event?.modifierFlags.contains(.control) == true)
-        if isRightClick, let button = statusItem.button {
-            showStatusContextMenu(anchorButton: button)
-        } else {
-            togglePopover()
-        }
-    }
-
-    @objc private func togglePopover() {
-        guard let button = statusItem.button else { return }
-        if popover.isShown {
-            popover.performClose(nil)
-        } else {
-            openPopover(anchorButton: button)
-        }
-    }
-
-    private func toggleFromGlobalHotKey() {
-        if store.displayMode == .notch {
-            notchController?.toggle()
-        } else {
-            togglePopover()
-        }
+        dispatchPresentation(isRightClick ? .statusItemRightClicked : .statusItemLeftClicked)
     }
 
     private func showStatusContextMenu(anchorButton button: NSStatusBarButton) {

@@ -50,7 +50,8 @@ struct OrbitalPlanDeck: View {
                             usedPercent: quota.seven_day.displayPercent,
                             resetAt: quota.sevenDayResetDate,
                             windowDurationSeconds: QuotaPaceLogic.fiveHourWindowSeconds,
-                            dialSeed: 29
+                            dialSeed: 29,
+                            useSecondaryAccent: true
                         )
                         .frame(maxWidth: .infinity)
                     }
@@ -72,9 +73,9 @@ struct OrbitalPlanDeck: View {
 
     private var weeklyHorizonStrip: some View {
         let now = Date()
-        let items: [(title: String, lim: OAuthUsageLimit)] =
-            geminiWeeklyLimits.map { ("GEMINI · 7D", $0) }
-            + claudeWeeklyLimits.map { ("CLAUDE · 7D", $0) }
+        let items: [(title: String, lim: OAuthUsageLimit, useSecondaryAccent: Bool)] =
+            geminiWeeklyLimits.map { ("GEMINI · 7D", $0, false) }
+            + claudeWeeklyLimits.map { ("CLAUDE · 7D", $0, true) }
 
         return HStack(spacing: 0) {
             ForEach(Array(items.enumerated()), id: \.offset) { idx, entry in
@@ -86,6 +87,7 @@ struct OrbitalPlanDeck: View {
                     windowDurationSeconds: QuotaPaceLogic.sevenDayWindowSeconds,
                     now: now
                 )
+                let familyAccent = entry.useSecondaryAccent ? theme.accentSecondary : theme.accent
                 let alertColor: Color? = {
                     switch remaining {
                     case 30...:   return nil
@@ -131,9 +133,9 @@ struct OrbitalPlanDeck: View {
 
                     DraftingVernierBar(
                         fraction: frac,
-                        litColor: alertColor ?? theme.inkPrimary.opacity(0.82),
+                        litColor: alertColor ?? familyAccent.opacity(0.88),
                         paceMarkerFraction: pace.map { CGFloat($0.expectedRemainingFraction) },
-                        paceMarkerColor: (pace?.isOverPaceWarning == true) ? theme.signalAmber : theme.accent,
+                        paceMarkerColor: (pace?.isOverPaceWarning == true) ? theme.signalAmber : familyAccent,
                         isOverPace: pace?.isOverPaceWarning == true,
                         ticks: 48,
                         barSeed: idx + 1
@@ -162,6 +164,7 @@ private struct OrbitalQuotaDial: View {
     let resetAt: Date?
     let windowDurationSeconds: TimeInterval
     let dialSeed: Int
+    var useSecondaryAccent: Bool = false
 
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
@@ -176,15 +179,20 @@ private struct OrbitalQuotaDial: View {
         let paceAngleMilli: Int?
         let isOverPace: Bool
         let dialSeed: Int
+        let useSecondaryAccent: Bool
         let theme: AGYTheme.CacheKey
     }
 
     private var remaining: Int { max(0, 100 - usedPercent) }
     private var remainingFraction: Double { max(0.0, min(1.0, Double(remaining) / 100.0)) }
 
+    private var dialAccent: Color {
+        useSecondaryAccent ? theme.accentSecondary : theme.accent
+    }
+
     private var statusColor: Color {
         switch remaining {
-        case 30...:   return theme.accent
+        case 30...:   return dialAccent
         case 10..<30: return theme.signalAmber
         default:      return theme.signalRed
         }
@@ -209,7 +217,7 @@ private struct OrbitalQuotaDial: View {
                 HStack(spacing: 5) {
                     Text(indexTag)
                         .font(.system(size: 8, weight: .semibold, design: .monospaced))
-                        .foregroundColor(theme.accent.opacity(0.9))
+                        .foregroundColor(dialAccent.opacity(0.9))
                     Text(title)
                         .font(.system(size: 8.5, weight: .medium, design: .monospaced))
                         .tracking(0.6)
@@ -232,6 +240,7 @@ private struct OrbitalQuotaDial: View {
                         paceAngleMilli: angles.paceAngle.map { Int(($0 * 1000.0).rounded()) },
                         isOverPace: currentPace?.isOverPaceWarning == true,
                         dialSeed: dialSeed,
+                        useSecondaryAccent: useSecondaryAccent,
                         theme: theme.cacheKey
                     ),
                     width: dialWidth,
@@ -249,9 +258,13 @@ private struct OrbitalQuotaDial: View {
 
                 // Sculptural .ultraLight Center Numeral aligned to dial aperture center
                 VStack(spacing: 1) {
-                    HStack(alignment: .firstTextBaseline, spacing: 1) {
+                    HStack(alignment: .firstTextBaseline, spacing: 1.5) {
+                        Text("%")
+                            .font(.system(size: 10, weight: .light, design: .monospaced))
+                            .opacity(0)
+                            .accessibilityHidden(true)
                         Text("\(remaining)")
-                            .font(.system(size: 26, weight: .ultraLight, design: .monospaced))
+                            .font(.system(size: remaining >= 100 ? 24 : 26, weight: .ultraLight, design: .monospaced))
                             .monospacedDigit()
                             .foregroundColor(remaining < 30 ? statusColor : theme.inkPrimary)
                             .contentTransition((telemetryStaticRender || reduceMotion) ? .identity : .numericText())
@@ -262,9 +275,10 @@ private struct OrbitalQuotaDial: View {
                     Text("LEFT")
                         .font(.system(size: 7, weight: .regular, design: .monospaced))
                         .tracking(1.0)
+                        .padding(.leading, 1.0)
                         .foregroundColor(theme.inkMuted)
                 }
-                .offset(y: 7.0)
+                .offset(y: 7.5)
             }
             .frame(height: dialHeight)
 
@@ -371,7 +385,7 @@ private struct ProtractorDialCanvas: View, Equatable {
                 )
                 context.stroke(
                     washArc,
-                    with: .color(theme.inkPrimary.opacity(theme.isDark ? 0.045 : 0.028)),
+                    with: .color(statusColor.opacity(theme.isDark ? 0.065 : 0.042)),
                     style: StrokeStyle(lineWidth: radius - innerRingR - 1.5, lineCap: .butt)
                 )
 
@@ -415,9 +429,7 @@ private struct ProtractorDialCanvas: View, Equatable {
                 }
 
                 if !stippleHalo.isEmpty {
-                    let haloInk = remainingFraction < 0.30
-                        ? statusColor.opacity(theme.isDark ? 0.40 : 0.32)
-                        : theme.inkPrimary.opacity(theme.isDark ? 0.42 : 0.34)
+                    let haloInk = statusColor.opacity(theme.isDark ? 0.44 : 0.36)
                     context.fill(stippleHalo, with: .color(haloInk))
                 }
             }

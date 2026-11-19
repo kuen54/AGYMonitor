@@ -270,7 +270,7 @@ struct HairlineRule: View {
                             p.move(to: CGPoint(x: w - inset, y: -2.0))
                             p.addLine(to: CGPoint(x: w - inset, y: 3.0))
                         }
-                        .stroke(theme.reticle.opacity(0.68), lineWidth: 0.85)
+                        .stroke(theme.accentSecondary.opacity(theme.isDark ? 0.48 : 0.42), lineWidth: 0.85)
                     }
                     .allowsHitTesting(false)
                 }
@@ -338,6 +338,33 @@ struct ArchivalGrainOverlay: View {
             Image(nsImage: nsImage)
                 .resizable(resizingMode: .tile)
                 .allowsHitTesting(false)
+        }
+    }
+}
+
+/// Process-wide reference-counted pointing-hand cursor coordinator backed by `CursorStackState`.
+/// Prevents macOS global `NSCursor.push()` / `NSCursor.pop()` imbalance when overlapping hover
+/// regions fire out of order or views unmount mid-hover.
+@MainActor
+final class PointingCursorCoordinator {
+    static let shared = PointingCursorCoordinator()
+
+    private var state = CursorStackState()
+
+    func setPointing(_ active: Bool, token: String) {
+        switch state.setActive(active, token: token) {
+        case .none:
+            break
+        case .pushPointingHand:
+            NSCursor.pointingHand.push()
+        case .popPointingHand:
+            NSCursor.pop()
+        }
+    }
+
+    func releaseAll() {
+        if state.releaseAll() == .popPointingHand {
+            NSCursor.pop()
         }
     }
 }
@@ -948,7 +975,7 @@ struct TelemetryTabBar: View {
                     HStack(spacing: 3.5) {
                         Text(indexLabel)
                             .font(.system(size: 8, weight: isSelected ? .semibold : .regular, design: .monospaced))
-                            .foregroundColor(isSelected ? theme.accent : theme.inkMuted.opacity(0.8))
+                            .foregroundColor(isSelected ? theme.accent : theme.accentSecondary.opacity(theme.isDark ? 0.55 : 0.50))
                         Text(tab.shortLabel(loc))
                             .font(.system(size: 9.5, weight: isSelected ? .semibold : .regular, design: .monospaced))
                             .tracking(0.4)

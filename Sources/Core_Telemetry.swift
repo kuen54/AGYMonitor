@@ -352,23 +352,27 @@ public enum SessionFilterLogic {
 public enum TelemetryThemePreset: String, CaseIterable, Codable, Sendable {
     case monolith
     case blueprint
-    case phosphor
+    case risograph
     case amber
+    case racing
+    case volt
 
     public var next: TelemetryThemePreset {
         switch self {
         case .monolith:  return .blueprint
-        case .blueprint: return .phosphor
-        case .phosphor:  return .amber
-        case .amber:     return .monolith
+        case .blueprint: return .risograph
+        case .risograph: return .amber
+        case .amber:     return .racing
+        case .racing:    return .volt
+        case .volt:      return .monolith
         }
     }
 
     public var usesMonochromeStrata: Bool {
         switch self {
-        case .monolith, .amber:
+        case .monolith:
             return true
-        case .blueprint, .phosphor:
+        case .blueprint, .risograph, .amber, .racing, .volt:
             return false
         }
     }
