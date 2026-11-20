@@ -53,7 +53,7 @@ Antigravity runs across multiple surfaces — the `agy` CLI in your terminal, An
 ### What you get
 
 - **Swiss Telemetry & 5 Instrument Visualizations (`⌘I` to toggle `Instrument` / `Classic`)** — scientific Instrument visualizations on every tab (`Borehole Strata` + `Topographic Ridge` for Cost, `Folded Token Stream` + `Density Matrix` for Tokens, `24h Polar Chronometer` + `Year Contour Field` for Time, clickable `Agent Telemetry Radar` for Sessions, and `Orbital Phase Dials` with burn-pace vectors for Plan), plus one-key Classic charts fallback
-- **6 Switchable Duotone Themes (`⌘T`)** — `Monolith` (Cobalt × Slate), `Polar` (Indigo × Orange), `Riso` (Pink × Cobalt), `Atelier` (Amber × Teal), `Heritage` (Pine × Gold), and `Telemetry` (Volt × Violet), weaving two coordinated chromatic voices across every tab in Light, Dark, and Notch modes
+- **7 Switchable Studio Themes (`⌘T`)** — `Monolith` (Cobalt × Slate), `Google` (Primary 4-Color Spectrum), `Polar` (Indigo × Orange), `Riso` (Pink × Cobalt), `Atelier` (Amber × Teal), `Heritage` (Pine × Gold), and `Telemetry` (Volt × Violet), weaving coordinated chromatic voices across every tab in Light, Dark, and Notch modes
 - **Cost & Tokens** — switch seamlessly between API-equivalent spend and token volume across Today / Week / Month, broken down by Antigravity model family (**Gemini Carbon**, **Gemini Argon**, **Gemini Neon**, **Gemini Hydrogen**, **Gemini Flash**, **Claude**, and **Other**)
 - **Time** — *when* you actually worked with Antigravity, computed from 10-minute gap-merged step timestamps:
   - **Week** — **24h Polar Chronometer** (7 concentric Mon–Sun rings + live `NOW` radar ray) or Classic `Mon–Sun × 0–24h` traces
@@ -172,7 +172,7 @@ setup_signing.sh              ← optional one-time self-signed certificate setu
 fix_swift.sh                  ← Command Line Tools SwiftBridging modulemap workaround
 .github/workflows/build.yml   ← CI: plist lint → py_compile & unittest → swift test → DMG build
 AGENTS.md                     ← developer & coding-agent architecture contract
-Info.plist                    ← LSUIElement=true; single source of app version (1.4.0)
+Info.plist                    ← LSUIElement=true; single source of app version (1.5.0)
 ```
 
 ### On pricing accuracy
@@ -202,7 +202,7 @@ Antigravity 同时运行在多个入口：终端里的 `agy` CLI、Antigravity 2
 ### 功能亮点
 
 - **Swiss Telemetry 与 5 大非常规仪器图表（`⌘I` 一键切换 `仪器风格` / `经典图表`）** — 5 个标签页默认提供仪器级可视化（Cost：**地质岩芯剖面 + 等高山脊**；Tokens：**折叠贝塞尔流向 + 吞吐脉冲矩阵**；Time：**24h 极坐标日晷 + 全年等高地形场**；Sessions：**可点击跳转的 Agent 态势雷达**；Plan：**270° 极坐标燃速罗盘与配速警告扇区**），也可随时切回经典柱图/热力图
-- **6 套双色组合主题（`⌘T` 循环切换）** — 内置 `Monolith`（钴蓝 × 石墨）、`Polar`（靛蓝 × 工程橙）、`Riso`（荧光粉 × 联邦蓝）、`Atelier`（琥珀 × 石油青）、`Heritage`（赛车绿 × 鎏金）与 `Telemetry`（酸绿 × 紫外），全 5 个 Tab 双色联动并自适应浅色/深色/刘海模式
+- **7 套可切换视觉主题（`⌘T` 循环切换）** — 内置 `Monolith`（钴蓝 × 石墨）、`Google`（经典四色光谱）、`Polar`（靛蓝 × 工程橙）、`Riso`（荧光粉 × 联邦蓝）、`Atelier`（琥珀 × 石油青）、`Heritage`（赛车绿 × 鎏金）与 `Telemetry`（酸绿 × 紫外），全 5 个 Tab 深度语义联动并自适应浅色/深色/刘海模式
 - **费用 & Tokens 双视图** — 支持切换今日/本周/本月汇总，按 Antigravity 模型家族拆分（**Gemini Carbon**、**Gemini Argon**、**Gemini Neon**、**Gemini Hydrogen**、**Gemini Flash**、**Claude** 与 **Other**）
 - **活跃时长（Time）** — 基于 10 分钟间隔合并算法还原你**何时**在使用 Antigravity：
   - **周视图** — **24h 极坐标日晷**（周一至周日 7 圈同心轨道 + 实时 `NOW` 扫频指针，或经典 `周一~周日 × 0–24h` 时间轴）

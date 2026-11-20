@@ -351,6 +351,7 @@ public enum SessionFilterLogic {
 
 public enum TelemetryThemePreset: String, CaseIterable, Codable, Sendable {
     case monolith
+    case google
     case blueprint
     case risograph
     case amber
@@ -359,7 +360,8 @@ public enum TelemetryThemePreset: String, CaseIterable, Codable, Sendable {
 
     public var next: TelemetryThemePreset {
         switch self {
-        case .monolith:  return .blueprint
+        case .monolith:  return .google
+        case .google:    return .blueprint
         case .blueprint: return .risograph
         case .risograph: return .amber
         case .amber:     return .racing
@@ -372,7 +374,7 @@ public enum TelemetryThemePreset: String, CaseIterable, Codable, Sendable {
         switch self {
         case .monolith:
             return true
-        case .blueprint, .risograph, .amber, .racing, .volt:
+        case .google, .blueprint, .risograph, .amber, .racing, .volt:
             return false
         }
     }

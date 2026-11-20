@@ -411,7 +411,7 @@ struct SessionGroupSection: View {
             HStack(spacing: 5) {
                 Text("+")
                     .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
-                    .foregroundColor(theme.accentSecondary.opacity(0.9))
+                    .foregroundColor((theme.isMultiColorSpectrum ? theme.accentQuaternary : theme.accentSecondary).opacity(0.9))
                 Text(group.label.uppercased())
                     .font(.system(size: 8, weight: .medium, design: .monospaced))
                     .tracking(0.95)

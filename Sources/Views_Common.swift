@@ -264,13 +264,27 @@ struct HairlineRule: View {
                     GeometryReader { geo in
                         let w = geo.size.width
                         let inset: CGFloat = 14
-                        Path { p in
-                            p.move(to: CGPoint(x: inset, y: -2.0))
-                            p.addLine(to: CGPoint(x: inset, y: 3.0))
-                            p.move(to: CGPoint(x: w - inset, y: -2.0))
-                            p.addLine(to: CGPoint(x: w - inset, y: 3.0))
+                        let alpha: Double = theme.isDark ? 0.52 : 0.46
+                        if theme.isMultiColorSpectrum {
+                            Path { p in
+                                p.move(to: CGPoint(x: inset, y: -2.0))
+                                p.addLine(to: CGPoint(x: inset, y: 3.0))
+                            }
+                            .stroke(theme.accentQuaternary.opacity(alpha), lineWidth: 0.9)
+                            Path { p in
+                                p.move(to: CGPoint(x: w - inset, y: -2.0))
+                                p.addLine(to: CGPoint(x: w - inset, y: 3.0))
+                            }
+                            .stroke(theme.accentTertiary.opacity(alpha), lineWidth: 0.9)
+                        } else {
+                            Path { p in
+                                p.move(to: CGPoint(x: inset, y: -2.0))
+                                p.addLine(to: CGPoint(x: inset, y: 3.0))
+                                p.move(to: CGPoint(x: w - inset, y: -2.0))
+                                p.addLine(to: CGPoint(x: w - inset, y: 3.0))
+                            }
+                            .stroke(theme.accentSecondary.opacity(theme.isDark ? 0.48 : 0.42), lineWidth: 0.85)
                         }
-                        .stroke(theme.accentSecondary.opacity(theme.isDark ? 0.48 : 0.42), lineWidth: 0.85)
                     }
                     .allowsHitTesting(false)
                 }
@@ -936,6 +950,41 @@ struct RefreshToolbarButton: View {
     }
 }
 
+// MARK: - Telemetry Motion Language (120fps Spring & Directional Tab Transitions)
+
+/// Shared spring curves and transitions for AGY // TELEMETRY tab switches and
+/// segmented controls. Respects Reduce Motion and static `ImageRenderer` snapshots.
+enum TelemetryMotion {
+    static let tabIndicator = Animation.spring(response: 0.26, dampingFraction: 0.84, blendDuration: 0)
+    static let tabContent   = Animation.spring(response: 0.28, dampingFraction: 0.88, blendDuration: 0)
+    static let panelHeight  = Animation.spring(response: 0.28, dampingFraction: 0.90, blendDuration: 0)
+    static let reduced      = Animation.easeOut(duration: 0.14)
+
+    static func tabContentTransition(direction: SlideDirection, reduceMotion: Bool) -> AnyTransition {
+        if reduceMotion {
+            return .opacity
+        }
+        let incomingOffset: CGFloat = direction == .forward ? 18 : -18
+        return .asymmetric(
+            insertion: .opacity
+                .combined(with: .offset(x: incomingOffset))
+                .combined(with: .scale(scale: 0.992, anchor: .top)),
+            removal: .opacity
+                .combined(with: .scale(scale: 0.992, anchor: .top))
+        )
+    }
+
+    static func headerAccessoryTransition(reduceMotion: Bool) -> AnyTransition {
+        if reduceMotion {
+            return .opacity
+        }
+        return .asymmetric(
+            insertion: .opacity.combined(with: .offset(y: 3)),
+            removal: .opacity.combined(with: .offset(y: -3))
+        )
+    }
+}
+
 // MARK: - Grid-Native Tab Bar & Segmented Strip
 
 extension DisplayTab {
@@ -959,8 +1008,15 @@ struct TelemetryTabBar: View {
     let loc: Localizer
 
     @Environment(\.agyTheme) private var theme
+    @Environment(\.telemetryStaticRender) private var isStaticRender
     @Namespace private var tabNamespace
     @State private var hovered: DisplayTab? = nil
+    @State private var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+
+    private var indicatorAnimation: Animation? {
+        guard !isStaticRender else { return nil }
+        return reduceMotion ? TelemetryMotion.reduced : TelemetryMotion.tabIndicator
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -971,11 +1027,15 @@ struct TelemetryTabBar: View {
                     let isSelected = (tab == selection)
                     let isHovered = (tab == hovered)
                     let indexLabel = String(format: "%02d", index + 1)
+                    let tabRuleColor = theme.tabAccent(index: index)
+                    let inactiveIndexColor = theme.isMultiColorSpectrum
+                        ? tabRuleColor.opacity(theme.isDark ? 0.78 : 0.72)
+                        : theme.accentSecondary.opacity(theme.isDark ? 0.55 : 0.50)
 
                     HStack(spacing: 3.5) {
                         Text(indexLabel)
                             .font(.system(size: 8, weight: isSelected ? .semibold : .regular, design: .monospaced))
-                            .foregroundColor(isSelected ? theme.accent : theme.accentSecondary.opacity(theme.isDark ? 0.55 : 0.50))
+                            .foregroundColor(isSelected ? tabRuleColor : inactiveIndexColor)
                         Text(tab.shortLabel(loc))
                             .font(.system(size: 9.5, weight: isSelected ? .semibold : .regular, design: .monospaced))
                             .tracking(0.4)
@@ -995,7 +1055,7 @@ struct TelemetryTabBar: View {
                                     .fill(theme.surfaceRaised.opacity(theme.isDark ? 0.50 : 0.72))
                                     .matchedGeometryEffect(id: "activeTabPlate", in: tabNamespace)
                                 Rectangle()
-                                    .fill(theme.accent)
+                                    .fill(tabRuleColor)
                                     .frame(height: 1.5)
                                     .matchedGeometryEffect(id: "activeTabRule", in: tabNamespace)
                             } else if isHovered {
@@ -1007,7 +1067,10 @@ struct TelemetryTabBar: View {
                     .contentShape(Rectangle())
                     .onHover { inside in hovered = inside ? tab : (hovered == tab ? nil : hovered) }
                     .onTapGesture {
-                        selection = tab
+                        guard selection != tab else { return }
+                        withAnimation(indicatorAnimation) {
+                            selection = tab
+                        }
                     }
 
                     if index < items.count - 1 {
@@ -1016,7 +1079,11 @@ struct TelemetryTabBar: View {
                 }
             }
             .fixedSize(horizontal: false, vertical: true)
-            .animation(.easeOut(duration: 0.12), value: selection)
+            .animation(indicatorAnimation, value: selection)
+            .onReceive(NSWorkspace.shared.notificationCenter.publisher(
+                for: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification)) { _ in
+                reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            }
 
             Rectangle().fill(theme.hairline).frame(height: 1)
         }
@@ -1054,8 +1121,15 @@ struct TelemetrySegmentedStrip<Value: Hashable>: View {
     let label: (Value) -> String
 
     @Environment(\.agyTheme) private var theme
+    @Environment(\.telemetryStaticRender) private var isStaticRender
     @Namespace private var stripNamespace
     @State private var hovered: Value? = nil
+    @State private var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+
+    private var indicatorAnimation: Animation? {
+        guard !isStaticRender else { return nil }
+        return reduceMotion ? TelemetryMotion.reduced : TelemetryMotion.tabIndicator
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1093,7 +1167,10 @@ struct TelemetrySegmentedStrip<Value: Hashable>: View {
                         .contentShape(Rectangle())
                         .onHover { inside in hovered = inside ? item : (hovered == item ? nil : hovered) }
                         .onTapGesture {
-                            selection = item
+                            guard selection != item else { return }
+                            withAnimation(indicatorAnimation) {
+                                selection = item
+                            }
                         }
 
                     if index < items.count - 1 {
@@ -1102,7 +1179,11 @@ struct TelemetrySegmentedStrip<Value: Hashable>: View {
                 }
             }
             .fixedSize(horizontal: false, vertical: true)
-            .animation(.easeOut(duration: 0.12), value: selection)
+            .animation(indicatorAnimation, value: selection)
+            .onReceive(NSWorkspace.shared.notificationCenter.publisher(
+                for: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification)) { _ in
+                reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            }
 
             HairlineRule(showCrosshairs: true)
         }

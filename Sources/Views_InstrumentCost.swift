@@ -20,7 +20,15 @@ struct CostInstrumentView: View {
 
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
+    @Environment(\.telemetryStaticRender) private var isStaticRender
+    @Namespace private var scopeNamespace
     @State private var hoveredScope: UsagePeriodScope? = nil
+    @State private var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+
+    private var scopeAnimation: Animation? {
+        guard !isStaticRender else { return nil }
+        return reduceMotion ? TelemetryMotion.reduced : TelemetryMotion.tabIndicator
+    }
 
     private var activeScope: UsagePeriodScope {
         selectedScope?.wrappedValue ?? .month
@@ -176,9 +184,11 @@ struct CostInstrumentView: View {
                         if isSelected {
                             Rectangle()
                                 .fill(theme.surfaceRaised.opacity(theme.isDark ? 0.35 : 0.55))
+                                .matchedGeometryEffect(id: "costScopePlate", in: scopeNamespace)
                             Rectangle()
                                 .fill(theme.accent)
                                 .frame(height: 1.5)
+                                .matchedGeometryEffect(id: "costScopeRule", in: scopeNamespace)
                         } else if isHovered {
                             Rectangle()
                                 .fill(theme.surfaceRaised.opacity(0.35))
@@ -190,7 +200,10 @@ struct CostInstrumentView: View {
                     hoveredScope = inside ? item.scope : (hoveredScope == item.scope ? nil : hoveredScope)
                 }
                 .onTapGesture {
-                    binding.wrappedValue = item.scope
+                    guard binding.wrappedValue != item.scope else { return }
+                    withAnimation(scopeAnimation) {
+                        binding.wrappedValue = item.scope
+                    }
                 }
 
                 if idx < scopes.count - 1 {
@@ -199,6 +212,11 @@ struct CostInstrumentView: View {
             }
         }
         .fixedSize(horizontal: false, vertical: true)
+        .animation(scopeAnimation, value: binding.wrappedValue)
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(
+            for: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification)) { _ in
+            reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        }
     }
 
     private func activeScopeSublabel(scope: UsagePeriodScope, cost: Double, monthTotal: Double) -> String {
@@ -479,7 +497,7 @@ struct TopographicRidgeChart: View {
             } else {
                 HStack(spacing: 3) {
                     Text("\(String(format: loc("avgFmt"), avgText))/D")
-                        .foregroundColor(theme.accentSecondary.opacity(theme.isDark ? 0.90 : 0.86))
+                        .foregroundColor((theme.isMultiColorSpectrum ? theme.accentQuaternary : theme.accentSecondary).opacity(theme.isDark ? 0.90 : 0.86))
                     Text("· \(String(format: loc("maxFmt"), maxText))")
                         .foregroundColor(theme.inkMuted)
                 }
@@ -582,8 +600,9 @@ private struct StaticTopographicTerrainCanvas: View, Equatable {
 
             let outerPoints = ridge.layers.first?.points ?? []
 
-            // 1. Dashed monthly average elevation rule + collision-free edge marginalia (Color 2)
+            // 1. Dashed monthly average elevation rule + collision-free edge marginalia
             if ridge.maxValue > 0 && avgValue > 0 {
+                let avgRuleColor = theme.isMultiColorSpectrum ? theme.accentQuaternary : theme.accentSecondary
                 let ratio = min(1.0, avgValue / ridge.maxValue)
                 let ay = baseY - CGFloat(ratio) * usableH
                 var dash = Path()
@@ -591,14 +610,14 @@ private struct StaticTopographicTerrainCanvas: View, Equatable {
                 dash.addLine(to: CGPoint(x: size.width, y: ay))
                 context.stroke(
                     dash,
-                    with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.54 : 0.48)),
+                    with: .color(avgRuleColor.opacity(theme.isDark ? 0.56 : 0.50)),
                     style: StrokeStyle(lineWidth: 0.75, dash: [2.5, 3.5])
                 )
                 let leftClear = sampleRidgeCrestNormY(outerPoints: outerPoints, at: 0.04)
                     <= sampleRidgeCrestNormY(outerPoints: outerPoints, at: 0.96)
                 let avgTag = Text("AVG")
                     .font(.system(size: 6.5, weight: .medium, design: .monospaced))
-                    .foregroundColor(theme.accentSecondary.opacity(theme.isDark ? 0.88 : 0.82))
+                    .foregroundColor(avgRuleColor.opacity(theme.isDark ? 0.90 : 0.84))
                 context.draw(
                     avgTag,
                     at: CGPoint(x: leftClear ? 2 : size.width - 2, y: ay - 5),
@@ -615,21 +634,29 @@ private struct StaticTopographicTerrainCanvas: View, Equatable {
                 silhouette.addLine(to: CGPoint(x: toPt(outerPoints[outerPoints.count - 1]).x, y: baseY))
                 silhouette.closeSubpath()
 
-                // 2a. Duotone tonal depth wash: Color 1 peaks shifting into Color 2 valleys
+                // 2a. Tonal depth wash: 4-color Google spectrum (Blue -> Red -> Yellow -> Green) or 2-color duotone
+                let washStops: [Gradient.Stop] = theme.isMultiColorSpectrum
+                    ? [
+                        .init(color: theme.accent.opacity(theme.isDark ? 0.16 : 0.095), location: 0.0),
+                        .init(color: theme.accentSecondary.opacity(theme.isDark ? 0.12 : 0.075), location: 0.36),
+                        .init(color: theme.accentTertiary.opacity(theme.isDark ? 0.11 : 0.07), location: 0.68),
+                        .init(color: theme.accentQuaternary.opacity(theme.isDark ? 0.08 : 0.05), location: 1.0),
+                    ]
+                    : [
+                        .init(color: theme.accent.opacity(theme.isDark ? 0.15 : 0.09), location: 0.0),
+                        .init(color: theme.accentSecondary.opacity(theme.isDark ? 0.10 : 0.065), location: 0.56),
+                        .init(color: theme.accentSecondary.opacity(0.012), location: 1.0),
+                    ]
                 context.fill(
                     silhouette,
                     with: .linearGradient(
-                        Gradient(stops: [
-                            .init(color: theme.accent.opacity(theme.isDark ? 0.15 : 0.09), location: 0.0),
-                            .init(color: theme.accentSecondary.opacity(theme.isDark ? 0.10 : 0.065), location: 0.56),
-                            .init(color: theme.accentSecondary.opacity(0.012), location: 1.0),
-                        ]),
+                        Gradient(stops: washStops),
                         startPoint: CGPoint(x: 0, y: topPad),
                         endPoint: CGPoint(x: 0, y: baseY)
                     )
                 )
 
-                // 2b. Horizontal plotter scanline relief clipped to silhouette (4 elevation bands: Color 2 valleys -> Color 1 peaks)
+                // 2b. Horizontal plotter scanline relief clipped to silhouette (4 elevation bands)
                 context.drawLayer { layer in
                     layer.clip(to: silhouette)
                     let scanStep: CGFloat = 3.6
@@ -655,12 +682,19 @@ private struct StaticTopographicTerrainCanvas: View, Equatable {
                         sy += scanStep
                         rowIdx += 1
                     }
-                    let bandColors: [Color] = [
-                        theme.accentSecondary.opacity(theme.isDark ? 0.14 : 0.11),
-                        theme.accentSecondary.opacity(theme.isDark ? 0.19 : 0.15),
-                        theme.inkPrimary.opacity(0.098),
-                        theme.accent.opacity(theme.isDark ? 0.22 : 0.16),
-                    ]
+                    let bandColors: [Color] = theme.isMultiColorSpectrum
+                        ? [
+                            theme.accentQuaternary.opacity(theme.isDark ? 0.22 : 0.16), // Green valleys
+                            theme.accentTertiary.opacity(theme.isDark ? 0.24 : 0.18),   // Yellow lower-mid
+                            theme.accentSecondary.opacity(theme.isDark ? 0.22 : 0.16),  // Red upper-mid
+                            theme.accent.opacity(theme.isDark ? 0.26 : 0.18),           // Blue summit
+                        ]
+                        : [
+                            theme.accentSecondary.opacity(theme.isDark ? 0.14 : 0.11),
+                            theme.accentSecondary.opacity(theme.isDark ? 0.19 : 0.15),
+                            theme.inkPrimary.opacity(0.098),
+                            theme.accent.opacity(theme.isDark ? 0.22 : 0.16),
+                        ]
                     for idx in 0..<4 where !bands[idx].isEmpty {
                         layer.stroke(
                             bands[idx],
@@ -670,13 +704,14 @@ private struct StaticTopographicTerrainCanvas: View, Equatable {
                     }
                 }
 
-                // 2c. Deterministic organic stipple particle cloud along ridge crest (batched into 3 Paths)
+                // 2c. Deterministic organic stipple particle cloud along ridge crest (batched Paths)
                 let stepX: CGFloat = 2.3
                 let stepY: CGFloat = 2.3
                 let cols = Int(size.width / stepX)
                 let rows = Int((baseY - topPad + 4) / stepY)
                 var peakDots = Path()
                 var denseDots = Path()
+                var midLowDots = Path()
                 var valleyDots = Path()
 
                 for ix in 0...cols {
@@ -712,44 +747,69 @@ private struct StaticTopographicTerrainCanvas: View, Equatable {
                         if roll < prob {
                             let dotSize: CGFloat = ((h >> 26) & 1 == 0) ? 1.0 : 1.3
                             let rect = CGRect(x: gx, y: gy, width: dotSize, height: dotSize)
-                            if distBelow >= -2 && distBelow < 10 && crestNorm >= 0.70 {
-                                peakDots.addRect(rect)
-                            } else if distBelow >= 0 && distBelow < 13 {
-                                denseDots.addRect(rect)
+                            if theme.isMultiColorSpectrum {
+                                let elev = Double(max(0, min(1, (baseY - gy) / usableH)))
+                                if elev >= 0.72 {
+                                    peakDots.addRect(rect)      // Blue summit
+                                } else if elev >= 0.48 {
+                                    denseDots.addRect(rect)     // Red upper ridge
+                                } else if elev >= 0.24 {
+                                    midLowDots.addRect(rect)    // Yellow slope
+                                } else {
+                                    valleyDots.addRect(rect)    // Green valley
+                                }
                             } else {
-                                valleyDots.addRect(rect)
+                                if distBelow >= -2 && distBelow < 10 && crestNorm >= 0.70 {
+                                    peakDots.addRect(rect)
+                                } else if distBelow >= 0 && distBelow < 13 {
+                                    denseDots.addRect(rect)
+                                } else {
+                                    valleyDots.addRect(rect)
+                                }
                             }
                         }
                     }
                 }
 
                 if !valleyDots.isEmpty {
+                    let c = theme.isMultiColorSpectrum ? theme.accentQuaternary : theme.accentSecondary
                     context.fill(
                         valleyDots,
-                        with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.50 : 0.44))
+                        with: .color(c.opacity(theme.isDark ? 0.56 : 0.48))
+                    )
+                }
+                if !midLowDots.isEmpty {
+                    context.fill(
+                        midLowDots,
+                        with: .color(theme.accentTertiary.opacity(theme.isDark ? 0.64 : 0.56))
                     )
                 }
                 if !denseDots.isEmpty {
+                    let c = theme.isMultiColorSpectrum ? theme.accentSecondary : theme.inkPrimary
                     context.fill(
                         denseDots,
-                        with: .color(theme.inkPrimary.opacity(theme.isDark ? 0.66 : 0.60))
+                        with: .color(c.opacity(theme.isDark ? 0.68 : 0.60))
                     )
                 }
                 if !peakDots.isEmpty {
                     context.fill(
                         peakDots,
-                        with: .color(theme.accent.opacity(theme.isDark ? 0.86 : 0.78))
+                        with: .color(theme.accent.opacity(theme.isDark ? 0.88 : 0.80))
                     )
                 }
 
-                // 2d. 7 silky internal elevation isolines (bottom-up: Color 2 valleys -> Color 1 peaks)
+                // 2d. 7 silky internal elevation isolines (Green -> Yellow -> Red -> Blue on Google; Color 2 -> Color 1 on duotone)
                 for layer in ridge.layers.dropFirst().reversed() {
                     guard layer.points.count >= 2 else { continue }
                     var iso = Path()
                     iso.move(to: toPt(layer.points[0]))
                     for pt in layer.points.dropFirst() { iso.addLine(to: toPt(pt)) }
                     let isoColor: Color
-                    if layer.factor < 0.72 {
+                    if theme.isMultiColorSpectrum {
+                        let base = theme.elevationColor(normalized: layer.factor)
+                        let alpha = (theme.isDark ? 0.44 : 0.40) + 0.30 * layer.factor
+                        isoColor = base.opacity(alpha)
+                    } else if layer.factor < 0.72 {
                         let norm = max(0, min(1, layer.factor / 0.72))
                         let alpha = 0.28 + 0.26 * norm
                         isoColor = theme.accentSecondary.opacity(alpha)
@@ -757,10 +817,10 @@ private struct StaticTopographicTerrainCanvas: View, Equatable {
                         let alpha = (theme.isDark ? 0.34 : 0.28) + 0.24 * layer.factor
                         isoColor = theme.accent.opacity(alpha)
                     }
-                    context.stroke(iso, with: .color(isoColor), lineWidth: 0.68)
+                    context.stroke(iso, with: .color(isoColor), lineWidth: 0.70)
                 }
 
-                // 2e. Primary ridge silhouette line (+ Color 1 peak crest glow & duotone vertical shift)
+                // 2e. Primary ridge silhouette line (+ Color 1 peak crest glow & vertical shift)
                 var crestPath = Path()
                 crestPath.move(to: firstPt)
                 for pt in outerPoints.dropFirst() { crestPath.addLine(to: toPt(pt)) }
@@ -780,14 +840,22 @@ private struct StaticTopographicTerrainCanvas: View, Equatable {
                 if theme.isDark {
                     context.stroke(crestPath, with: .color(theme.inkPrimary.opacity(0.22)), lineWidth: 2.0)
                 }
+                let crestStops: [Gradient.Stop] = theme.isMultiColorSpectrum
+                    ? [
+                        .init(color: theme.accent, location: 0.0),
+                        .init(color: theme.accentSecondary, location: 0.40),
+                        .init(color: theme.accentTertiary, location: 0.72),
+                        .init(color: theme.accentQuaternary, location: 1.0),
+                    ]
+                    : [
+                        .init(color: theme.accent, location: 0.0),
+                        .init(color: theme.inkPrimary.opacity(0.90), location: 0.58),
+                        .init(color: theme.accentSecondary.opacity(0.82), location: 1.0),
+                    ]
                 context.stroke(
                     crestPath,
                     with: .linearGradient(
-                        Gradient(stops: [
-                            .init(color: theme.accent, location: 0.0),
-                            .init(color: theme.inkPrimary.opacity(0.90), location: 0.58),
-                            .init(color: theme.accentSecondary.opacity(0.82), location: 1.0),
-                        ]),
+                        Gradient(stops: crestStops),
                         startPoint: CGPoint(x: 0, y: topPad),
                         endPoint: CGPoint(x: 0, y: baseY)
                     ),
@@ -1506,9 +1574,13 @@ struct BoreholeModelSection: View {
                 let anyFocused = (focusedModelId != nil)
                 let isBracketed = (m.id == bracketTargetId)
 
+                let stratumColor = theme.isMultiColorSpectrum ? theme.modelColor(m.modelClass) : theme.accentSecondary
                 let lineColor: Color = {
-                    if isFocused { return theme.accent }
+                    if isFocused { return theme.isMultiColorSpectrum ? stratumColor : theme.accent }
                     if anyFocused { return theme.hairline }
+                    if theme.isMultiColorSpectrum {
+                        return stratumColor.opacity(isBracketed ? 0.85 : (theme.isDark ? 0.58 : 0.52))
+                    }
                     return isBracketed
                         ? theme.accent.opacity(0.76)
                         : theme.accentSecondary.opacity(theme.isDark ? 0.44 : 0.38)
@@ -1522,6 +1594,14 @@ struct BoreholeModelSection: View {
                 context.stroke(path, with: .color(lineColor), lineWidth: isFocused ? 1.05 : 0.72)
 
                 let dotSize: CGFloat = isFocused ? 3.0 : 2.0
+                let dotColor: Color = {
+                    if theme.isMultiColorSpectrum {
+                        return stratumColor.opacity(anyFocused && !isFocused ? 0.28 : 0.92)
+                    }
+                    return (isFocused || (!anyFocused && isBracketed))
+                        ? theme.accent
+                        : theme.accentSecondary.opacity(anyFocused ? 0.28 : (theme.isDark ? 0.84 : 0.78))
+                }()
                 context.fill(
                     Path(CGRect(
                         x: size.width - dotSize,
@@ -1529,11 +1609,7 @@ struct BoreholeModelSection: View {
                         width: dotSize,
                         height: dotSize
                     )),
-                    with: .color(
-                        (isFocused || (!anyFocused && isBracketed))
-                            ? theme.accent
-                            : theme.accentSecondary.opacity(anyFocused ? 0.28 : (theme.isDark ? 0.84 : 0.78))
-                    )
+                    with: .color(dotColor)
                 )
             }
         }
@@ -1552,13 +1628,17 @@ struct BoreholeModelSection: View {
         let anyFocused = (focusedModelId != nil)
         let dimmed = anyFocused && !isFocused
 
+        let rowAccent = theme.isMultiColorSpectrum ? theme.modelColor(m.modelClass) : theme.accentSecondary
+
         return HStack(spacing: 5) {
             Text(String(format: "%02d", index + 1))
                 .font(.system(size: 7, weight: .regular, design: .monospaced))
                 .foregroundColor(
                     isFocused
-                        ? theme.accent
-                        : (isBracketed ? theme.accent.opacity(0.85) : theme.accentSecondary.opacity(0.72))
+                        ? (theme.isMultiColorSpectrum ? rowAccent : theme.accent)
+                        : (theme.isMultiColorSpectrum
+                            ? rowAccent.opacity(0.86)
+                            : (isBracketed ? theme.accent.opacity(0.85) : theme.accentSecondary.opacity(0.72)))
                 )
                 .frame(width: 14, alignment: .leading)
 
@@ -1566,8 +1646,10 @@ struct BoreholeModelSection: View {
                 .font(.system(size: 9, weight: (isFocused || isBracketed) ? .semibold : .medium, design: .monospaced))
                 .foregroundColor(
                     isFocused
-                        ? theme.accent
-                        : (isBracketed ? theme.inkPrimary : theme.accentSecondary.opacity(theme.isDark ? 0.92 : 0.88))
+                        ? (theme.isMultiColorSpectrum ? rowAccent : theme.accent)
+                        : (theme.isMultiColorSpectrum
+                            ? rowAccent
+                            : (isBracketed ? theme.inkPrimary : theme.accentSecondary.opacity(theme.isDark ? 0.92 : 0.88)))
                 )
 
             Text(m.name)

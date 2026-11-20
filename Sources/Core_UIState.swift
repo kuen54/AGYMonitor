@@ -201,3 +201,38 @@ public struct TransientBannerState: Equatable, Sendable {
         return true
     }
 }
+
+// MARK: - 5. Directional Tab Transition State Machine
+
+public enum SlideDirection: Int, Equatable, Sendable {
+    case forward = 1   // moving right (target index >= previous index)
+    case backward = -1 // moving left (target index < previous index)
+}
+
+/// Pure directional arbiter for tab / segmented-strip switches (`01 COST`..`05 PLAN`,
+/// `WEEK`/`MONTH`/`YEAR`). Computes deterministic slide direction from visual order
+/// so clicks, keyboard shortcuts (`⌘1`–`⌘5`), and badge jumps share identical motion.
+public struct TabTransitionState<ID: Hashable & Sendable>: Equatable, Sendable {
+    public private(set) var activeId: ID
+    public private(set) var direction: SlideDirection
+
+    public init(initial: ID, direction: SlideDirection = .forward) {
+        self.activeId = initial
+        self.direction = direction
+    }
+
+    /// Transitions to `next` using `orderedIds` to determine horizontal slide direction.
+    /// Returns the resolved `SlideDirection` if `next != activeId`, or `nil` for a no-op.
+    @discardableResult
+    public mutating func transition(to next: ID, in orderedIds: [ID]) -> SlideDirection? {
+        guard next != activeId else { return nil }
+        if let oldIndex = orderedIds.firstIndex(of: activeId),
+           let newIndex = orderedIds.firstIndex(of: next) {
+            direction = newIndex >= oldIndex ? .forward : .backward
+        } else {
+            direction = .forward
+        }
+        activeId = next
+        return direction
+    }
+}

@@ -58,14 +58,22 @@ struct PopoverView: View {
     var onClose: (() -> Void)? = nil
 
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.telemetryStaticRender) private var isStaticRender
     @State private var contentHeight: CGFloat
+    @State private var hasMeasuredInitialHeight = false
+    @State private var tabTransition: TabTransitionState<DisplayTab>
+    @State private var displayedTab: DisplayTab
+    @State private var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
 
     init(store: UsageStore, onQuit: @escaping () -> Void, onClose: (() -> Void)? = nil) {
         self.store = store
         self.onQuit = onQuit
         self.onClose = onClose
-        let initialH = PopoverHeightMemory.byTab[store.selectedTab] ?? 460
+        let initialTab = store.selectedTab
+        let initialH = PopoverHeightMemory.byTab[initialTab] ?? 460
         _contentHeight = State(initialValue: initialH)
+        _tabTransition = State(initialValue: TabTransitionState(initial: initialTab))
+        _displayedTab = State(initialValue: initialTab)
     }
 
     private var loc: Localizer { Localizer(language: store.language) }
@@ -74,10 +82,22 @@ struct PopoverView: View {
         AGYTheme(preset: store.themePreset, colorScheme: colorScheme, isNotch: isNotch)
     }
 
-    private struct ContentHeightKey: PreferenceKey {
-        static var defaultValue: CGFloat = 0
-        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-            value = max(value, nextValue())
+    private var tabContentAnimation: Animation? {
+        guard !isStaticRender else { return nil }
+        return reduceMotion ? TelemetryMotion.reduced : TelemetryMotion.tabContent
+    }
+
+    private var panelHeightAnimation: Animation? {
+        guard !isStaticRender else { return nil }
+        return reduceMotion ? TelemetryMotion.reduced : TelemetryMotion.panelHeight
+    }
+
+    /// Keyed per-tab height map so an outgoing tab still animating out in the ZStack
+    /// can never pollute or bounce the incoming tab's target panel height.
+    private struct ContentHeightsKey: PreferenceKey {
+        static var defaultValue: [DisplayTab: CGFloat] = [:]
+        static func reduce(value: inout [DisplayTab: CGFloat], nextValue: () -> [DisplayTab: CGFloat]) {
+            value.merge(nextValue(), uniquingKeysWith: { _, new in new })
         }
     }
 
@@ -96,6 +116,21 @@ struct PopoverView: View {
             : [.cost, .tokens, .time, .session]
     }
 
+    /// Stable identity for the right-aligned header accessory so identical steppers
+    /// across COST / TOK / TIME (Week/Month) stay rock-solid while distinct badges glide.
+    private var headerAccessoryTransitionId: String {
+        switch store.selectedTab {
+        case .cost, .tokens:
+            return "monthStepper"
+        case .time:
+            return store.timeRange == .year ? "yearStepper" : "monthStepper"
+        case .session:
+            return "liveCount"
+        case .subscription:
+            return "planBadge"
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -111,15 +146,36 @@ struct PopoverView: View {
             )
 
             ScrollView(showsIndicators: false) {
-                contentSection
-                    .background(GeometryReader { geo in
-                        Color.clear.preference(key: ContentHeightKey.self, value: geo.size.height)
-                    })
+                ZStack(alignment: .top) {
+                    contentSection(for: displayedTab)
+                        .id(displayedTab)
+                        .background(GeometryReader { geo in
+                            Color.clear.preference(
+                                key: ContentHeightsKey.self,
+                                value: [displayedTab: geo.size.height]
+                            )
+                        })
+                        .transition(
+                            TelemetryMotion.tabContentTransition(
+                                direction: tabTransition.direction,
+                                reduceMotion: reduceMotion
+                            )
+                        )
+                }
+                .frame(maxWidth: .infinity, alignment: .top)
             }
-            .onPreferenceChange(ContentHeightKey.self) { next in
-                if abs(next - contentHeight) > 0.5, next > 1 {
+            .clipped()
+            .onPreferenceChange(ContentHeightsKey.self) { heights in
+                guard let next = heights[displayedTab], next > 1 else { return }
+                PopoverHeightMemory.byTab[displayedTab] = next
+                guard abs(next - contentHeight) > 0.5 else { return }
+                if hasMeasuredInitialHeight {
+                    withAnimation(panelHeightAnimation) {
+                        contentHeight = next
+                    }
+                } else {
                     contentHeight = next
-                    PopoverHeightMemory.byTab[store.selectedTab] = next
+                    hasMeasuredInitialHeight = true
                 }
             }
             .frame(height: min(max(contentHeight, 1), maxContentHeight))
@@ -136,6 +192,20 @@ struct PopoverView: View {
                 ArchivalGrainOverlay()
             }
         )
+        .onChange(of: store.selectedTab) { nextTab in
+            tabTransition.transition(to: nextTab, in: visibleTabs)
+            withAnimation(tabContentAnimation) {
+                displayedTab = nextTab
+                if let remembered = PopoverHeightMemory.byTab[nextTab],
+                   abs(remembered - contentHeight) > 0.5 {
+                    contentHeight = remembered
+                }
+            }
+        }
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(
+            for: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification)) { _ in
+            reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        }
         .environment(\.localizer, loc)
         .environment(\.agyTheme, theme)
         .environment(\.telemetryPanelVisible, store.isPanelVisible)
@@ -161,8 +231,14 @@ struct PopoverView: View {
 
             Spacer(minLength: 4)
 
-            contextHeaderAccessory
-                .frame(height: 20, alignment: .trailing)
+            ZStack(alignment: .trailing) {
+                contextHeaderAccessory
+                    .id(headerAccessoryTransitionId)
+                    .transition(TelemetryMotion.headerAccessoryTransition(reduceMotion: reduceMotion))
+            }
+            .frame(height: 20, alignment: .trailing)
+            .clipped()
+            .animation(tabContentAnimation, value: headerAccessoryTransitionId)
         }
         .frame(height: 20)
     }
@@ -238,13 +314,14 @@ struct PopoverView: View {
                 .lineLimit(1)
         case .subscription:
             if let badge = formatPlanTierBadge(store.subscriptionQuota?.planTier) {
+                let badgeColor = theme.isMultiColorSpectrum ? theme.accent : theme.accentSecondary
                 HStack(spacing: 4) {
                     LogoShape()
-                        .fill(theme.accentSecondary)
+                        .fill(badgeColor)
                         .frame(width: 8, height: 8)
                     Text(badge)
                         .font(.system(size: 9.5, weight: .bold, design: .monospaced))
-                        .foregroundColor(theme.accentSecondary)
+                        .foregroundColor(badgeColor)
                         .lineLimit(1)
                 }
             }
@@ -254,8 +331,8 @@ struct PopoverView: View {
     // MARK: - Content Routing
 
     @ViewBuilder
-    private var contentSection: some View {
-        switch store.selectedTab {
+    private func contentSection(for tab: DisplayTab) -> some View {
+        switch tab {
         case .time:
             TimeTabView(store: store)
         case .session:
@@ -263,7 +340,7 @@ struct PopoverView: View {
         case .subscription:
             SubscriptionView(store: store)
         case .cost, .tokens:
-            UsageOverviewSection(store: store)
+            UsageOverviewSection(store: store, metricOverride: tab)
         }
     }
 

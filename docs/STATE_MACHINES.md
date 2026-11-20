@@ -76,12 +76,13 @@ This document serves as the single reference for **UX invariants**, **DX mainten
   - `MenuBarAnchorState` freezes status-item text & width while `NSPopover` is open so the anchor never drifts horizontally, flushing atomically on close.
   - `SessionLogic.stepDoneUnseen` tracks `busy/waiting → idle` transitions and decays unseen badges cleanly.
 
-### 7. Interactive UI State Machines (Sessions Deck, Cursor Stack, Model Focus, Transient Banners)
-- **Core**: `Sources/Core_UIState.swift` — `SessionDeckMachine`, `CursorStackState`, `ModelFocusState`, `TransientBannerState`
-- **Shell**: `Sources/Views_Session.swift`, `Sources/Views_InstrumentSession.swift`, `Sources/Views_InstrumentCost.swift`, `Sources/Views_Cards.swift`, `Sources/Views_Common.swift` (`PointingCursorCoordinator`), `Sources/SessionStore.swift`
+### 7. Interactive UI State Machines (Sessions Deck, Cursor Stack, Model Focus, Transient Banners, Tab Transitions)
+- **Core**: `Sources/Core_UIState.swift` — `SessionDeckMachine`, `CursorStackState`, `ModelFocusState`, `TransientBannerState`, `TabTransitionState`
+- **Shell**: `Sources/Views.swift`, `Sources/Views_Time.swift`, `Sources/Views_Session.swift`, `Sources/Views_InstrumentSession.swift`, `Sources/Views_InstrumentCost.swift`, `Sources/Views_Cards.swift`, `Sources/Views_Common.swift` (`PointingCursorCoordinator`), `Sources/SessionStore.swift`
 - **Tests**: `Tests/AGYCoreTests/UIStateTests.swift`
 - **Key Invariants**:
   - `SessionDeckMachine` reconciles `selectedSessionId` & `hoveredSessionId` on every filter switch or session-list update so pressing `Return` NEVER jumps to a hidden/filtered-out session.
   - `CursorStackState` + `PointingCursorCoordinator` reference-count hover tokens (`0 → 1` pushes `pointingHand`, `1 → 0` pops, `releaseAll()` resets on panel close), preventing global `NSCursor` stack corruption.
   - `ModelFocusState` arbitrates borehole core-column vs callout-row hover and reconciles removed model IDs so charts never get stuck dimmed.
   - `TransientBannerState` stamps each banner with a monotonic generation token so an expired timer from an older jump hint can NEVER clear a newer hint.
+  - `TabTransitionState` resolves deterministic `.forward`/`.backward` slide direction from visual tab order across clicks, `⌘1`–`⌘5` shortcuts, header badge jumps, and Time `Week`/`Month`/`Year` sub-tabs.

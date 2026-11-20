@@ -9,9 +9,14 @@ import AppKit
 
 struct UsageOverviewSection: View {
     @ObservedObject var store: UsageStore
+    var metricOverride: DisplayTab? = nil
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
     @State private var focusedModelId: String? = nil
+
+    private var activeMetric: DisplayTab {
+        metricOverride ?? store.selectedTab
+    }
 
     var body: some View {
         Group {
@@ -34,7 +39,7 @@ struct UsageOverviewSection: View {
                     }
                 }()
 
-                if store.visualMode == .instrument && store.selectedTab == .cost {
+                if store.visualMode == .instrument && activeMetric == .cost {
                     CostInstrumentView(
                         usage: activeUsage,
                         bundle: bundle,
@@ -43,7 +48,7 @@ struct UsageOverviewSection: View {
                         month: store.viewingMonth,
                         focusedModelId: $focusedModelId
                     )
-                } else if store.visualMode == .instrument && store.selectedTab == .tokens {
+                } else if store.visualMode == .instrument && activeMetric == .tokens {
                     TokensInstrumentView(
                         usage: activeUsage,
                         bundle: bundle,
@@ -55,13 +60,13 @@ struct UsageOverviewSection: View {
                 } else {
                 VStack(spacing: 0) {
                     HeroTelemetrySection(
-                        metric: store.selectedTab,
+                        metric: activeMetric,
                         scopeTitle: scopeTitle,
                         usage: activeUsage,
                         dailyBreakdown: bundle.dailyBreakdown,
                         isTodayScope: scope == .today,
                         focusedModelId: focusedModelId,
-                        showTokenTypeBar: !(store.visualMode == .instrument && store.selectedTab == .tokens)
+                        showTokenTypeBar: !(store.visualMode == .instrument && activeMetric == .tokens)
                     )
 
                     HairlineRule(showCrosshairs: true)
@@ -69,7 +74,7 @@ struct UsageOverviewSection: View {
                     PeriodScopeStrip(
                         selection: $store.selectedPeriodScope,
                         bundle: bundle,
-                        metric: store.selectedTab
+                        metric: activeMetric
                     )
 
                     HairlineRule(showCrosshairs: true)
@@ -91,7 +96,7 @@ struct UsageOverviewSection: View {
                         }
                     } else {
                         ModelLedgerSection(
-                            metric: store.selectedTab,
+                            metric: activeMetric,
                             usage: activeUsage,
                             focusedModelId: $focusedModelId
                         )
@@ -100,7 +105,7 @@ struct UsageOverviewSection: View {
                             HairlineRule(showCrosshairs: true)
                             DailyChart(
                                 data: daily,
-                                mode: store.selectedTab,
+                                mode: activeMetric,
                                 year: store.viewingYear,
                                 month: store.viewingMonth,
                                 focusedModelId: focusedModelId
@@ -108,7 +113,7 @@ struct UsageOverviewSection: View {
                         }
                     }
 
-                    if store.selectedTab == .cost {
+                    if activeMetric == .cost {
                         HairlineRule(showCrosshairs: false)
                         apiEquivFootnote
                     }
@@ -125,7 +130,7 @@ struct UsageOverviewSection: View {
         } else {
             switch store.effectiveHistoricalMonthPhase {
             case .loaded(let bundle), .loading(cached: .some(let bundle)), .failed(_, cached: .some(let bundle)):
-                if store.visualMode == .instrument && store.selectedTab == .cost {
+                if store.visualMode == .instrument && activeMetric == .cost {
                     CostInstrumentView(
                         usage: bundle.month,
                         bundle: nil,
@@ -135,7 +140,7 @@ struct UsageOverviewSection: View {
                         month: store.viewingMonth,
                         focusedModelId: $focusedModelId
                     )
-                } else if store.visualMode == .instrument && store.selectedTab == .tokens {
+                } else if store.visualMode == .instrument && activeMetric == .tokens {
                     TokensInstrumentView(
                         usage: bundle.month,
                         bundle: nil,
@@ -148,13 +153,13 @@ struct UsageOverviewSection: View {
                 } else {
                 VStack(spacing: 0) {
                     HeroTelemetrySection(
-                        metric: store.selectedTab,
+                        metric: activeMetric,
                         scopeTitle: loc("periodMonthShort"),
                         usage: bundle.month,
                         dailyBreakdown: bundle.dailyBreakdown,
                         isTodayScope: false,
                         focusedModelId: focusedModelId,
-                        showTokenTypeBar: !(store.visualMode == .instrument && store.selectedTab == .tokens)
+                        showTokenTypeBar: !(store.visualMode == .instrument && activeMetric == .tokens)
                     )
 
                     HairlineRule(showCrosshairs: true)
@@ -176,7 +181,7 @@ struct UsageOverviewSection: View {
                         }
                     } else {
                         ModelLedgerSection(
-                            metric: store.selectedTab,
+                            metric: activeMetric,
                             usage: bundle.month,
                             focusedModelId: $focusedModelId
                         )
@@ -185,7 +190,7 @@ struct UsageOverviewSection: View {
                             HairlineRule(showCrosshairs: true)
                             DailyChart(
                                 data: daily,
-                                mode: store.selectedTab,
+                                mode: activeMetric,
                                 year: store.viewingYear,
                                 month: store.viewingMonth,
                                 focusedModelId: focusedModelId
@@ -193,7 +198,7 @@ struct UsageOverviewSection: View {
                         }
                     }
 
-                    if store.selectedTab == .cost {
+                    if activeMetric == .cost {
                         HairlineRule(showCrosshairs: false)
                         apiEquivFootnote
                     }
@@ -354,7 +359,15 @@ struct PeriodScopeStrip: View {
 
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
+    @Environment(\.telemetryStaticRender) private var isStaticRender
+    @Namespace private var scopeNamespace
     @State private var hovered: UsagePeriodScope? = nil
+    @State private var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+
+    private var scopeAnimation: Animation? {
+        guard !isStaticRender else { return nil }
+        return reduceMotion ? TelemetryMotion.reduced : TelemetryMotion.tabIndicator
+    }
 
     private var cells: [(scope: UsagePeriodScope, title: String, value: String)] {
         [
@@ -381,11 +394,25 @@ struct PeriodScopeStrip: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 7)
-                .background(selected ? theme.invertedBg : (isHovered ? theme.surfaceRaised.opacity(0.65) : Color.clear))
+                .background(
+                    ZStack {
+                        if selected {
+                            Rectangle()
+                                .fill(theme.invertedBg)
+                                .matchedGeometryEffect(id: "classicScopePlate", in: scopeNamespace)
+                        } else if isHovered {
+                            Rectangle()
+                                .fill(theme.surfaceRaised.opacity(0.65))
+                        }
+                    }
+                )
                 .contentShape(Rectangle())
                 .onHover { inside in hovered = inside ? item.scope : (hovered == item.scope ? nil : hovered) }
                 .onTapGesture {
-                    selection = item.scope
+                    guard selection != item.scope else { return }
+                    withAnimation(scopeAnimation) {
+                        selection = item.scope
+                    }
                 }
 
                 if idx < cells.count - 1 {
@@ -394,6 +421,11 @@ struct PeriodScopeStrip: View {
             }
         }
         .fixedSize(horizontal: false, vertical: true)
+        .animation(scopeAnimation, value: selection)
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(
+            for: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification)) { _ in
+            reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        }
     }
 }
 
