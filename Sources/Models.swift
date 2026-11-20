@@ -308,6 +308,7 @@ extension TelemetryThemePreset {
     func label(_ loc: Localizer) -> String {
         switch self {
         case .monolith:  return loc("themeMonolith")
+        case .google:    return loc("themeGoogle")
         case .blueprint: return loc("themeBlueprint")
         case .risograph: return loc("themeRisograph")
         case .amber:     return loc("themeAmber")

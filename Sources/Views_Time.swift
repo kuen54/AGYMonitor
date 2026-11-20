@@ -9,6 +9,21 @@ struct TimeTabView: View {
     @ObservedObject var store: UsageStore
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
+    @Environment(\.telemetryStaticRender) private var isStaticRender
+    @State private var rangeTransition: TabTransitionState<TimeRange>
+    @State private var displayedRange: TimeRange
+    @State private var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+
+    init(store: UsageStore) {
+        self.store = store
+        _rangeTransition = State(initialValue: TabTransitionState(initial: store.timeRange))
+        _displayedRange = State(initialValue: store.timeRange)
+    }
+
+    private var rangeAnimation: Animation? {
+        guard !isStaticRender else { return nil }
+        return reduceMotion ? TelemetryMotion.reduced : TelemetryMotion.tabContent
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -18,34 +33,60 @@ struct TimeTabView: View {
                 label: { $0.label(loc) }
             )
 
-            switch store.timeRange {
-            case .week:
-                if let data = activeTimeData {
-                    if store.visualMode == .instrument {
-                        PolarChronometerWeekChart(store: store, timeData: data)
-                    } else {
-                        WeekTimeChart(store: store, timeData: data)
-                    }
-                } else {
-                    timeStateView
-                }
-            case .month:
-                if let data = activeTimeData {
-                    MonthTimeChart(
-                        timeData: data,
-                        year: store.viewingYear,
-                        month: store.viewingMonth,
-                        instrumentElevation: store.visualMode == .instrument
+            ZStack(alignment: .top) {
+                rangeContent(for: displayedRange)
+                    .id(displayedRange)
+                    .transition(
+                        TelemetryMotion.tabContentTransition(
+                            direction: rangeTransition.direction,
+                            reduceMotion: reduceMotion
+                        )
                     )
-                } else {
-                    timeStateView
-                }
-            case .year:
+            }
+            .frame(maxWidth: .infinity, alignment: .top)
+            .clipped()
+        }
+        .onChange(of: store.timeRange) { nextRange in
+            rangeTransition.transition(to: nextRange, in: TimeRange.allCases)
+            withAnimation(rangeAnimation) {
+                displayedRange = nextRange
+            }
+        }
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(
+            for: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification)) { _ in
+            reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        }
+    }
+
+    @ViewBuilder
+    private func rangeContent(for range: TimeRange) -> some View {
+        switch range {
+        case .week:
+            if let data = activeTimeData {
                 if store.visualMode == .instrument {
-                    TopographicYearContourChart(store: store)
+                    PolarChronometerWeekChart(store: store, timeData: data)
                 } else {
-                    YearHeatmap(store: store)
+                    WeekTimeChart(store: store, timeData: data)
                 }
+            } else {
+                timeStateView
+            }
+        case .month:
+            if let data = activeTimeData {
+                MonthTimeChart(
+                    timeData: data,
+                    year: store.viewingYear,
+                    month: store.viewingMonth,
+                    instrumentElevation: store.visualMode == .instrument
+                )
+            } else {
+                timeStateView
+            }
+        case .year:
+            if store.visualMode == .instrument {
+                TopographicYearContourChart(store: store)
+            } else {
+                YearHeatmap(store: store)
             }
         }
     }
@@ -1056,11 +1097,12 @@ private struct StaticMonthRowCanvas: View, Equatable {
             if !inMonthCells.isEmpty {
                 context.fill(inMonthCells, with: .color(theme.surface.opacity(theme.isDark ? 0.24 : 0.38)))
             }
+            let secondaryWash = theme.isMultiColorSpectrum ? theme.accentQuaternary : theme.accentSecondary
             if !otherSoftStipple.isEmpty {
-                context.fill(otherSoftStipple, with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.26 : 0.20)))
+                context.fill(otherSoftStipple, with: .color(secondaryWash.opacity(theme.isDark ? 0.28 : 0.22)))
             }
             if !otherDenseStipple.isEmpty {
-                context.fill(otherDenseStipple, with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.42 : 0.34)))
+                context.fill(otherDenseStipple, with: .color(secondaryWash.opacity(theme.isDark ? 0.44 : 0.36)))
             }
             if !peakSoftStipple.isEmpty {
                 context.fill(peakSoftStipple, with: .color(theme.accent.opacity(theme.isDark ? 0.30 : 0.24)))
@@ -1074,7 +1116,7 @@ private struct StaticMonthRowCanvas: View, Equatable {
             if !avgDashedLine.isEmpty {
                 context.stroke(
                     avgDashedLine,
-                    with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.62 : 0.54)),
+                    with: .color(secondaryWash.opacity(theme.isDark ? 0.62 : 0.54)),
                     style: StrokeStyle(lineWidth: 0.65, dash: [2.0, 2.0])
                 )
             }
@@ -1082,13 +1124,13 @@ private struct StaticMonthRowCanvas: View, Equatable {
                 context.stroke(cellBorders, with: .color(theme.hairline.opacity(0.58)), lineWidth: 0.65)
             }
 
-            // Today: clean 1.5px top rule (Color 1 if peak day, Color 2 otherwise)
+            // Today: clean 1.5px top rule (Color 1 if peak day, Green on Google / Color 2 on duotone otherwise)
             if let ti = todayIdx, ti < count, inMonthFlags[ti] {
                 let cellX = dayW * CGFloat(ti) + 1.0
                 let cellW = max(0, dayW - 2.0)
                 context.fill(
                     Path(CGRect(x: cellX, y: cellY, width: cellW, height: 1.5)),
-                    with: .color(ti == peakIdx ? theme.accent : theme.accentSecondary)
+                    with: .color(ti == peakIdx ? theme.accent : secondaryWash)
                 )
             }
 
@@ -1141,7 +1183,7 @@ private struct StaticMonthRowCanvas: View, Equatable {
                 let cellX = dayW * CGFloat(i) + 1.0
                 let isPeak = (i == peakIdx)
                 let isToday = (i == todayIdx)
-                let numColor: Color = isPeak ? theme.accent : (isToday ? theme.accentSecondary : theme.inkMuted)
+                let numColor: Color = isPeak ? theme.accent : (isToday ? secondaryWash : theme.inkMuted)
                 let label = Text(dayNumbers[i])
                     .font(.system(size: 7, weight: (isPeak || isToday) ? .medium : .regular, design: .monospaced))
                     .foregroundColor(numColor)
@@ -1243,6 +1285,20 @@ private struct MonthRowPulseOverlayCanvas: View {
                             peakTicks.move(to: CGPoint(x: ix + iw - 0.4, y: tickTop))
                             peakTicks.addLine(to: CGPoint(x: ix + iw - 0.4, y: tickBot))
                         }
+                    } else if theme.isMultiColorSpectrum {
+                        // On Google theme, color each active interval by its model color (Blue/Green/Yellow/Red)
+                        // matching the Week Polar Chronometer instead of flooding the whole month in Red!
+                        let mColor = theme.modelColor(interval.model)
+                        let alpha: Double = anyHovered ? 0.28 : 0.90
+                        context.fill(Path(barRect), with: .color(mColor.opacity(alpha)))
+                        var tick = Path()
+                        tick.move(to: CGPoint(x: ix + 0.4, y: tickTop))
+                        tick.addLine(to: CGPoint(x: ix + 0.4, y: tickBot))
+                        if iw >= 3.2 {
+                            tick.move(to: CGPoint(x: ix + iw - 0.4, y: tickTop))
+                            tick.addLine(to: CGPoint(x: ix + iw - 0.4, y: tickBot))
+                        }
+                        context.stroke(tick, with: .color(mColor.opacity(min(0.96, alpha + 0.08))), lineWidth: 0.75)
                     } else {
                         secondaryBars.addRect(barRect)
                         secondaryTicks.move(to: CGPoint(x: ix + 0.4, y: tickTop))

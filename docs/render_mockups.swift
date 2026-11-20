@@ -399,11 +399,12 @@ struct DemoPopover: View {
                 .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
                 .foregroundColor(theme.inkSecondary)
         case .subscription:
+            let badgeColor = theme.isMultiColorSpectrum ? theme.accent : theme.accentSecondary
             HStack(spacing: 4) {
-                DemoAGYLogoShape().fill(theme.accentSecondary).frame(width: 8, height: 8)
+                DemoAGYLogoShape().fill(badgeColor).frame(width: 8, height: 8)
                 Text("GOOGLE AI ULTRA")
                     .font(.system(size: 9.5, weight: .bold, design: .monospaced))
-                    .foregroundColor(theme.accentSecondary)
+                    .foregroundColor(badgeColor)
                     .lineLimit(1)
             }
         }
@@ -565,6 +566,20 @@ struct RenderApp {
             return
         }
 
+        if let googleIdx = args.firstIndex(of: "--google-audit"), googleIdx + 1 < args.count {
+            let dir = args[googleIdx + 1]
+            try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            for dark in [false, true] {
+                let tag = dark ? "dark" : "light"
+                render("google-\(tag)-time-week", DemoPopover(store: makeStore(tab: .time, range: .week, preset: .google), loc: loc, dark: dark), to: dir)
+                render("google-\(tag)-time-month", DemoPopover(store: makeStore(tab: .time, range: .month, preset: .google), loc: loc, dark: dark), to: dir)
+                render("google-\(tag)-time-year", DemoPopover(store: makeStore(tab: .time, range: .year, preset: .google), loc: loc, dark: dark), to: dir)
+                render("google-\(tag)-session", DemoPopover(store: makeStore(tab: .session, preset: .google), loc: loc, dark: dark), to: dir)
+                render("google-\(tag)-plan", DemoPopover(store: makeStore(tab: .subscription, preset: .google, geminiUsed: 11, claudeUsed: 0), loc: loc, dark: dark), to: dir)
+            }
+            return
+        }
+
         if let verifyIdx = args.firstIndex(of: "--duotone-verify"), verifyIdx + 1 < args.count {
             let dir = args[verifyIdx + 1]
             try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
@@ -576,8 +591,8 @@ struct RenderApp {
                 render("\(p)-dark-plan", DemoPopover(store: makeStore(tab: .subscription, preset: preset, geminiUsed: 11, claudeUsed: 0), loc: loc, dark: true), to: dir)
                 render("\(p)-dark-time-year", DemoPopover(store: makeStore(tab: .time, range: .year, preset: preset), loc: loc, dark: true), to: dir)
             }
-            // Light mode for blueprint, risograph, racing, amber, volt across Cost, Tokens, Plan (89% / 100%), and Time Year
-            let lightPresets: [TelemetryThemePreset] = [.blueprint, .risograph, .amber, .racing, .volt]
+            // Light mode for google, blueprint, risograph, racing, amber, volt across Cost, Tokens, Plan (89% / 100%), and Time Year
+            let lightPresets: [TelemetryThemePreset] = [.google, .blueprint, .risograph, .amber, .racing, .volt]
             for preset in lightPresets {
                 let p = preset.rawValue
                 render("\(p)-light-cost", DemoPopover(store: makeStore(tab: .cost, preset: preset), loc: loc, dark: false), to: dir)

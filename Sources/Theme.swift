@@ -46,10 +46,10 @@ enum StrataPattern: Equatable {
     case muted
 }
 
-// MARK: - AGY // TELEMETRY Two-Color Duotone Design System
+// MARK: - AGY // TELEMETRY Two-Color Duotone & Studio Design System
 
-/// Swiss Precision Telemetry palette supporting 6 curated two-color (duotone)
-/// studio instruments across Light (Archival Paper) and Dark / Notch modes.
+/// Swiss Precision Telemetry palette supporting 7 curated studio instruments
+/// (Monolith, Google Primary 4, plus 5 chromatic duotones) across Light, Dark, and Notch modes.
 struct AGYTheme: Equatable {
     struct CacheKey: Hashable {
         let preset: TelemetryThemePreset
@@ -82,6 +82,9 @@ struct AGYTheme: Equatable {
     let accentSoft: Color
     let accentSecondary: Color
     let accentSecondarySoft: Color
+    let accentTertiary: Color
+    let accentQuaternary: Color
+    let isMultiColorSpectrum: Bool
     let invertedBg: Color
     let invertedInk: Color
 
@@ -127,7 +130,38 @@ struct AGYTheme: Equatable {
             self.invertedBg = Color(red: 0.937, green: 0.945, blue: 0.965)
             self.invertedInk = Color(red: 0.024, green: 0.027, blue: 0.035)
 
-        // 2. Blueprint — Polar Indigo × Signal Orange (Architectural Cyanotype + Drafting Pencil)
+        // 2. Google — Primary 4 Spectrum (Google Blue × Red × Yellow × Green)
+        case (.google, false):
+            self.canvas = Color(red: 0.973, green: 0.976, blue: 0.980)         // #F8F9FA Google Studio Chalk
+            self.surface = Color(red: 0.945, green: 0.953, blue: 0.957)        // #F1F3F4 Google Surface 100
+            self.surfaceRaised = Color(red: 1.000, green: 1.000, blue: 1.000)  // #FFFFFF Crisp White
+            self.hairline = Color(red: 0.125, green: 0.129, blue: 0.141).opacity(0.11)
+            self.hairlineStrong = Color(red: 0.125, green: 0.129, blue: 0.141).opacity(0.24)
+            self.reticle = Color(red: 0.918, green: 0.263, blue: 0.208).opacity(0.42) // Google Red ticks
+            self.inkPrimary = Color(red: 0.125, green: 0.129, blue: 0.141)     // #202124 Google Grey 900
+            self.inkSecondary = Color(red: 0.373, green: 0.388, blue: 0.408)   // #5F6368 Google Grey 700
+            self.inkMuted = Color(red: 0.502, green: 0.525, blue: 0.545)       // #80868B Google Grey 600
+            self.accent = Color(red: 0.102, green: 0.451, blue: 0.910)         // #1A73E8 Google Blue 600
+            self.accentSecondary = Color(red: 0.918, green: 0.263, blue: 0.208) // #EA4335 Google Red 500
+            self.invertedBg = Color(red: 0.125, green: 0.129, blue: 0.141)     // #202124
+            self.invertedInk = Color(red: 0.973, green: 0.976, blue: 0.980)    // #F8F9FA
+
+        case (.google, true):
+            self.canvas = isNotch ? Color.black : Color(red: 0.067, green: 0.075, blue: 0.094) // #111318 Google Carbon Dark
+            self.surface = isNotch ? Color.black : Color(red: 0.094, green: 0.106, blue: 0.133) // #181B22
+            self.surfaceRaised = Color(red: 0.259, green: 0.522, blue: 0.957).opacity(0.105)
+            self.hairline = Color(red: 0.910, green: 0.918, blue: 0.929).opacity(0.12)
+            self.hairlineStrong = Color(red: 0.910, green: 0.918, blue: 0.929).opacity(0.26)
+            self.reticle = Color(red: 0.984, green: 0.737, blue: 0.016).opacity(0.52) // Google Yellow ticks
+            self.inkPrimary = Color(red: 0.910, green: 0.918, blue: 0.929)     // #E8EAED Google Grey 200
+            self.inkSecondary = Color(red: 0.604, green: 0.627, blue: 0.651)   // #9AA0A6 Google Grey 500
+            self.inkMuted = Color(red: 0.373, green: 0.388, blue: 0.408)       // #5F6368 Google Grey 700
+            self.accent = Color(red: 0.259, green: 0.522, blue: 0.957)         // #4285F4 Canonical Google Blue
+            self.accentSecondary = Color(red: 0.918, green: 0.263, blue: 0.208) // #EA4335 Canonical Google Red
+            self.invertedBg = Color(red: 0.259, green: 0.522, blue: 0.957)     // #4285F4
+            self.invertedInk = Color(red: 1.000, green: 1.000, blue: 1.000)    // #FFFFFF
+
+        // 3. Blueprint — Polar Indigo × Signal Orange (Architectural Cyanotype + Drafting Pencil)
         case (.blueprint, false):
             self.canvas = Color(red: 0.902, green: 0.925, blue: 0.969)         // #E6ECF7 Cyanotype Paper
             self.surface = Color(red: 0.863, green: 0.894, blue: 0.957)        // #DCE4F4
@@ -285,15 +319,82 @@ struct AGYTheme: Equatable {
 
         self.accentSoft = self.accent.opacity(dark ? 0.16 : 0.10)
         self.accentSecondarySoft = self.accentSecondary.opacity(dark ? 0.16 : 0.10)
-        self.signalAmber = dark
-            ? Color(red: 0.961, green: 0.651, blue: 0.137)
-            : Color(red: 0.855, green: 0.520, blue: 0.020)
-        self.signalRed = dark
-            ? Color(red: 1.000, green: 0.302, blue: 0.310)
-            : Color(red: 0.870, green: 0.215, blue: 0.225)
-        self.signalGreen = dark
-            ? Color(red: 0.184, green: 0.831, blue: 0.478)
-            : Color(red: 0.085, green: 0.640, blue: 0.340)
+        if preset == .google {
+            self.isMultiColorSpectrum = true
+            self.accentTertiary = dark
+                ? Color(red: 0.984, green: 0.737, blue: 0.016) // #FBBC04 Canonical Google Yellow
+                : Color(red: 0.922, green: 0.620, blue: 0.000) // #EB9E00 Crisp Light-Paper Google Yellow
+            self.accentQuaternary = dark
+                ? Color(red: 0.204, green: 0.659, blue: 0.325) // #34A853 Canonical Google Green
+                : Color(red: 0.094, green: 0.502, blue: 0.220) // #188038 Google Green 700
+            self.signalAmber = self.accentTertiary
+            self.signalRed = dark
+                ? Color(red: 0.918, green: 0.263, blue: 0.208) // #EA4335 Google Red
+                : Color(red: 0.851, green: 0.188, blue: 0.145) // #D93025 Google Red 600
+            self.signalGreen = self.accentQuaternary
+        } else {
+            self.isMultiColorSpectrum = false
+            self.accentTertiary = self.accentSecondary
+            self.accentQuaternary = self.accent
+            self.signalAmber = dark
+                ? Color(red: 0.961, green: 0.651, blue: 0.137)
+                : Color(red: 0.855, green: 0.520, blue: 0.020)
+            self.signalRed = dark
+                ? Color(red: 1.000, green: 0.302, blue: 0.310)
+                : Color(red: 0.870, green: 0.215, blue: 0.225)
+            self.signalGreen = dark
+                ? Color(red: 0.184, green: 0.831, blue: 0.478)
+                : Color(red: 0.085, green: 0.640, blue: 0.340)
+        }
+    }
+
+    // MARK: Multi-Color Spectrum Helpers (Google 4-Color vs Duotone)
+
+    /// Cycles the 4 canonical spectrum accents (Blue · Red · Yellow · Green) on multi-color themes;
+    /// falls back to the primary/secondary duotone pair on 2-color themes.
+    func spectrumAccent(index: Int) -> Color {
+        guard isMultiColorSpectrum else {
+            return (index == 0) ? accent : accentSecondary
+        }
+        switch ((index % 4) + 4) % 4 {
+        case 0: return accent            // Google Blue
+        case 1: return accentSecondary   // Google Red
+        case 2: return accentTertiary    // Google Yellow
+        default: return accentQuaternary // Google Green
+        }
+    }
+
+    /// Maps normalized elevation / intensity (`0...1`) into a 4-stage spectrum
+    /// (Green valleys -> Yellow slopes -> Red ridges -> Blue summit) on multi-color themes,
+    /// or a 2-stage duotone transition on 2-color themes.
+    func elevationColor(normalized: Double) -> Color {
+        guard isMultiColorSpectrum else {
+            return normalized < 0.55 ? accentSecondary : accent
+        }
+        switch normalized {
+        case ..<0.28:       return accentQuaternary // Green base
+        case 0.28..<0.54:   return accentTertiary   // Yellow mid-low
+        case 0.54..<0.78:   return accentSecondary  // Red mid-high
+        default:            return accent           // Blue summit
+        }
+    }
+
+    /// Destination channel color for the Folded Token Stream (02 TOK).
+    func tokenChannelColor(_ channel: TokenChannel) -> Color {
+        guard isMultiColorSpectrum else { return accentSecondary }
+        switch channel {
+        case .cacheRead:  return accentQuaternary // Google Green (cache efficiency)
+        case .input:      return accentTertiary   // Google Yellow (prompt fuel)
+        case .output:     return accentSecondary  // Google Red (model output)
+        case .cacheWrite: return accent           // Google Blue
+        }
+    }
+
+    /// Tab bar accent color: 4-color cadence on Google (01 Blue · 02 Red · 03 Yellow · 04 Green · 05 Blue),
+    /// classic single active accent on all other presets.
+    func tabAccent(index: Int) -> Color {
+        guard isMultiColorSpectrum else { return accent }
+        return spectrumAccent(index: index)
     }
 
     // MARK: Model Color & Pattern Engine
@@ -313,6 +414,33 @@ struct AGYTheme: Equatable {
             case .flash:    return inkPrimary.opacity(0.36)
             case .claude:   return inkPrimary.opacity(0.72)
             case .other:    return inkMuted.opacity(0.48)
+            }
+        case .google:
+            // Canonical Google 4-color identity across the model strata:
+            // Blue (.carbon / .hydrogen), Red (.claude), Yellow (.neon), Green (.argon / .flash).
+            switch mc {
+            case .carbon:
+                return accent // #1A73E8 light / #4285F4 dark
+            case .claude:
+                return accentSecondary // #EA4335 Google Red
+            case .neon:
+                return isDark
+                    ? Color(red: 0.984, green: 0.737, blue: 0.016) // #FBBC04 Google Yellow
+                    : Color(red: 0.949, green: 0.600, blue: 0.000) // #F29900 Google Yellow 600
+            case .argon:
+                return isDark
+                    ? Color(red: 0.204, green: 0.659, blue: 0.325) // #34A853 Google Green
+                    : Color(red: 0.094, green: 0.502, blue: 0.220) // #188038 Google Green 700
+            case .hydrogen:
+                return isDark
+                    ? Color(red: 0.541, green: 0.706, blue: 0.973) // #8AB4F8 Google Blue 300
+                    : Color(red: 0.259, green: 0.522, blue: 0.957) // #4285F4 Google Blue 500
+            case .flash:
+                return isDark
+                    ? Color(red: 0.506, green: 0.788, blue: 0.584) // #81C995 Google Green 300
+                    : Color(red: 0.204, green: 0.659, blue: 0.325) // #34A853 Google Green 500
+            case .other:
+                return inkMuted.opacity(0.68)
             }
         case .blueprint, .risograph, .amber, .racing, .volt:
             // Two-color duotone ramp: primary Gemini models in Color 1 (accent),
@@ -369,6 +497,24 @@ struct AGYTheme: Equatable {
                 Color(red: 0.14, green: 0.27, blue: 0.62),
                 Color(red: 0.25, green: 0.46, blue: 0.98),
                 Color(red: 0.50, green: 0.68, blue: 1.00),
+            ]
+            return ramp[level - 1]
+
+        // Google 4-color spectrum: Green -> Yellow -> Red -> Blue (Light) / Green -> Red -> Blue -> Yellow (Dark)
+        case (.google, false):
+            let ramp: [Color] = [
+                Color(red: 0.808, green: 0.918, blue: 0.839), // #CEEAD6 Google Green 100
+                Color(red: 0.984, green: 0.737, blue: 0.016), // #FBBC04 Google Yellow 500
+                Color(red: 0.918, green: 0.263, blue: 0.208), // #EA4335 Google Red 500
+                Color(red: 0.102, green: 0.451, blue: 0.910), // #1A73E8 Google Blue 600
+            ]
+            return ramp[level - 1]
+        case (.google, true):
+            let ramp: [Color] = [
+                Color(red: 0.106, green: 0.302, blue: 0.180), // #1B4D2E Deep Google Green
+                Color(red: 0.702, green: 0.196, blue: 0.149), // #B33226 Rich Google Red
+                Color(red: 0.259, green: 0.522, blue: 0.957), // #4285F4 Canonical Google Blue
+                Color(red: 0.984, green: 0.737, blue: 0.016), // #FBBC04 Luminous Google Yellow
             ]
             return ramp[level - 1]
 

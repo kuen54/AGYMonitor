@@ -111,4 +111,32 @@ struct UIStateTests {
         #expect(banner.expire(generation: 2) == true)
         #expect(banner.messageKey == nil)
     }
+
+    @Test("TabTransitionState resolves forward/backward slide directions and ignores redundant transitions")
+    func tabTransitionDirectionArbiter() {
+        let tabs = ["cost", "tokens", "time", "session", "plan"]
+        var nav = TabTransitionState(initial: "cost")
+
+        // Same-tab transition is a no-op
+        #expect(nav.transition(to: "cost", in: tabs) == nil)
+        #expect(nav.activeId == "cost")
+
+        // Moving right -> forward
+        #expect(nav.transition(to: "time", in: tabs) == .forward)
+        #expect(nav.activeId == "time")
+        #expect(nav.direction == .forward)
+
+        // Moving further right -> forward
+        #expect(nav.transition(to: "plan", in: tabs) == .forward)
+        #expect(nav.direction == .forward)
+
+        // Moving left -> backward
+        #expect(nav.transition(to: "tokens", in: tabs) == .backward)
+        #expect(nav.activeId == "tokens")
+        #expect(nav.direction == .backward)
+
+        // Unknown tab fallback defaults safely to forward
+        #expect(nav.transition(to: "unknown", in: tabs) == .forward)
+        #expect(nav.activeId == "unknown")
+    }
 }

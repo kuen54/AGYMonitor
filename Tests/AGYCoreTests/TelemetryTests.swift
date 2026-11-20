@@ -206,22 +206,24 @@ struct TelemetryTests {
     func themePresetCycleAndStrata() {
         #expect(TelemetryThemePreset.allCases == [
             .monolith,
+            .google,
             .blueprint,
             .risograph,
             .amber,
             .racing,
             .volt,
         ])
-        #expect(TelemetryThemePreset.allCases.count == 6)
+        #expect(TelemetryThemePreset.allCases.count == 7)
 
-        #expect(TelemetryThemePreset.monolith.next == .blueprint)
+        #expect(TelemetryThemePreset.monolith.next == .google)
+        #expect(TelemetryThemePreset.google.next == .blueprint)
         #expect(TelemetryThemePreset.blueprint.next == .risograph)
         #expect(TelemetryThemePreset.risograph.next == .amber)
         #expect(TelemetryThemePreset.amber.next == .racing)
         #expect(TelemetryThemePreset.racing.next == .volt)
         #expect(TelemetryThemePreset.volt.next == .monolith)
 
-        // Full cycle from .monolith visits all 6 distinct presets and wraps back to .monolith
+        // Full cycle from .monolith visits all 7 distinct presets and wraps back to .monolith
         var cursor: TelemetryThemePreset = .monolith
         var visited: [TelemetryThemePreset] = []
         for _ in 0..<TelemetryThemePreset.allCases.count {
@@ -232,6 +234,7 @@ struct TelemetryTests {
         #expect(cursor == .monolith)
 
         #expect(TelemetryThemePreset.monolith.usesMonochromeStrata == true)
+        #expect(TelemetryThemePreset.google.usesMonochromeStrata == false)
         #expect(TelemetryThemePreset.blueprint.usesMonochromeStrata == false)
         #expect(TelemetryThemePreset.risograph.usesMonochromeStrata == false)
         #expect(TelemetryThemePreset.amber.usesMonochromeStrata == false)

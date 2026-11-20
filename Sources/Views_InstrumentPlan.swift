@@ -87,7 +87,15 @@ struct OrbitalPlanDeck: View {
                     windowDurationSeconds: QuotaPaceLogic.sevenDayWindowSeconds,
                     now: now
                 )
-                let familyAccent = entry.useSecondaryAccent ? theme.accentSecondary : theme.accent
+                let familyAccent: Color = {
+                    if theme.isMultiColorSpectrum {
+                        // Strict vertical column consistency + healthy semantics:
+                        // Left column (Gemini 5H + 7D) = Google Blue; Right column (Claude 5H + 7D) = Google Green.
+                        // Yellow & Red stay strictly reserved for pace warnings & low-quota alerts.
+                        return entry.useSecondaryAccent ? theme.accentQuaternary : theme.accent
+                    }
+                    return entry.useSecondaryAccent ? theme.accentSecondary : theme.accent
+                }()
                 let alertColor: Color? = {
                     switch remaining {
                     case 30...:   return nil
@@ -187,7 +195,10 @@ private struct OrbitalQuotaDial: View {
     private var remainingFraction: Double { max(0.0, min(1.0, Double(remaining) / 100.0)) }
 
     private var dialAccent: Color {
-        useSecondaryAccent ? theme.accentSecondary : theme.accent
+        if useSecondaryAccent {
+            return theme.isMultiColorSpectrum ? theme.accentQuaternary : theme.accentSecondary
+        }
+        return theme.accent
     }
 
     private var statusColor: Color {

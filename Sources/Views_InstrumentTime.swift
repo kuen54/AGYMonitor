@@ -516,7 +516,7 @@ private struct PolarDialBezelLayer: View, Equatable {
             )
             context.stroke(
                 cardinalSpokes,
-                with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.24 : 0.20)),
+                with: .color((theme.isMultiColorSpectrum ? theme.accent : theme.accentSecondary).opacity(theme.isDark ? 0.22 : 0.18)),
                 lineWidth: 0.65
             )
 
@@ -539,8 +539,24 @@ private struct PolarDialBezelLayer: View, Equatable {
                 let p0 = CGPoint(x: cx + cos(ang) * tIn, y: cy + sin(ang) * tIn)
                 let p1 = CGPoint(x: cx + cos(ang) * tOut, y: cy + sin(ang) * tOut)
                 if isCardinal {
-                    cardinalTicks.move(to: p0)
-                    cardinalTicks.addLine(to: p1)
+                    if theme.isMultiColorSpectrum {
+                        // Subtle 4-color Google horological cardinal ticks: 00 Blue, 06 Green, 12 Yellow, 18 Red
+                        let cardinalColor: Color = {
+                            switch h {
+                            case 0:  return theme.accent
+                            case 6:  return theme.accentQuaternary
+                            case 12: return theme.accentTertiary
+                            default: return theme.accentSecondary
+                            }
+                        }()
+                        var tick = Path()
+                        tick.move(to: p0)
+                        tick.addLine(to: p1)
+                        context.stroke(tick, with: .color(cardinalColor.opacity(0.86)), lineWidth: 1.05)
+                    } else {
+                        cardinalTicks.move(to: p0)
+                        cardinalTicks.addLine(to: p1)
+                    }
                 } else if isOctant {
                     octantTicks.move(to: p0)
                     octantTicks.addLine(to: p1)
@@ -551,7 +567,9 @@ private struct PolarDialBezelLayer: View, Equatable {
             }
             context.stroke(minorTicks, with: .color(theme.hairlineStrong.opacity(0.82)), lineWidth: 0.6)
             context.stroke(octantTicks, with: .color(theme.inkSecondary.opacity(0.76)), lineWidth: 0.75)
-            context.stroke(cardinalTicks, with: .color(theme.accentSecondary.opacity(0.75)), lineWidth: 0.95)
+            if !cardinalTicks.isEmpty {
+                context.stroke(cardinalTicks, with: .color(theme.accentSecondary.opacity(0.75)), lineWidth: 0.95)
+            }
 
             // 4. Subtle outer stippled compass dots (72 steps = every 5 deg, batched into 1 Path)
             var compassDots = Path()
@@ -577,13 +595,22 @@ private struct PolarDialBezelLayer: View, Equatable {
             for mark in hourMarkings {
                 let ang = InstrumentMath.polarAngle(secondsOfDay: mark.hour * 3600)
                 let pos = CGPoint(x: cx + cos(ang) * labelR, y: cy + sin(ang) * labelR)
+                let primaryColor: Color = {
+                    guard theme.isMultiColorSpectrum else { return theme.accentSecondary.opacity(0.75) }
+                    switch mark.hour {
+                    case 0:  return theme.accent.opacity(0.88)
+                    case 6:  return theme.accentQuaternary.opacity(0.88)
+                    case 12: return theme.accentTertiary.opacity(0.88)
+                    default: return theme.accentSecondary.opacity(0.85)
+                    }
+                }()
                 let tView = Text(mark.text)
                     .font(.system(
                         size: mark.primary ? 7.5 : 6.5,
                         weight: mark.primary ? .medium : .regular,
                         design: .monospaced
                     ))
-                    .foregroundColor(mark.primary ? theme.accentSecondary.opacity(0.75) : theme.inkMuted.opacity(0.80))
+                    .foregroundColor(mark.primary ? primaryColor : theme.inkMuted.opacity(0.80))
                 context.draw(tView, at: pos)
             }
         }
@@ -942,6 +969,7 @@ private struct PolarNowSweepAndHubLayer: View {
                 if showsToday {
                     let trailRad = 0.30
                     var sweep = Path()
+                    let sweepColor = theme.isMultiColorSpectrum ? theme.accentQuaternary : theme.accentSecondary
                     sweep.move(to: center)
                     sweep.addArc(
                         center: center,
@@ -951,7 +979,7 @@ private struct PolarNowSweepAndHubLayer: View {
                         clockwise: false
                     )
                     sweep.closeSubpath()
-                    context.fill(sweep, with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.11 : 0.07)))
+                    context.fill(sweep, with: .color(sweepColor.opacity(theme.isDark ? 0.11 : 0.07)))
 
                     var sweepDenseDots = Path()
                     var sweepSoftDots = Path()
@@ -990,43 +1018,44 @@ private struct PolarNowSweepAndHubLayer: View {
                         }
                     }
                     if !sweepSoftDots.isEmpty {
-                        context.fill(sweepSoftDots, with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.34 : 0.26)))
+                        context.fill(sweepSoftDots, with: .color(sweepColor.opacity(theme.isDark ? 0.34 : 0.26)))
                     }
                     if !sweepDenseDots.isEmpty {
-                        context.fill(sweepDenseDots, with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.66 : 0.54)))
+                        context.fill(sweepDenseDots, with: .color(sweepColor.opacity(theme.isDark ? 0.66 : 0.54)))
                     }
 
                     var ray = Path()
                     ray.move(to: CGPoint(x: cx + cos(nowAngle) * innerHubR, y: cy + sin(nowAngle) * innerHubR))
                     ray.addLine(to: CGPoint(x: cx + cos(nowAngle) * bezelR, y: cy + sin(nowAngle) * bezelR))
                     if theme.isDark {
-                        context.stroke(ray, with: .color(theme.accentSecondary.opacity(0.28)), lineWidth: 3.0)
+                        context.stroke(ray, with: .color(sweepColor.opacity(0.28)), lineWidth: 3.0)
                     }
-                    context.stroke(ray, with: .color(theme.accentSecondary), lineWidth: 1.1)
+                    context.stroke(ray, with: .color(sweepColor), lineWidth: 1.1)
 
                     let tipX = cx + cos(nowAngle) * bezelR
                     let tipY = cy + sin(nowAngle) * bezelR
                     context.fill(
                         Path(CGRect(x: tipX - 1.75, y: tipY - 1.75, width: 3.5, height: 3.5)),
-                        with: .color(theme.accentSecondary)
+                        with: .color(sweepColor)
                     )
                 }
 
-                // Center core hub ring + live HH:MM readout (Color 2 contrasting against Color 1 peak/hover)
+                // Center core hub ring + live HH:MM readout
+                let hubAccent = theme.isMultiColorSpectrum ? theme.accentQuaternary : theme.accentSecondary
                 let hubRect = CGRect(x: cx - innerHubR, y: cy - innerHubR, width: innerHubR * 2, height: innerHubR * 2)
                 context.fill(Path(ellipseIn: hubRect), with: .color(theme.canvas))
                 context.stroke(
                     Path(ellipseIn: hubRect),
-                    with: .color(showsToday ? theme.accentSecondary.opacity(0.75) : theme.hairlineStrong.opacity(0.85)),
+                    with: .color(showsToday ? hubAccent.opacity(0.75) : theme.hairlineStrong.opacity(0.85)),
                     lineWidth: showsToday ? 0.85 : 0.75
                 )
 
                 let clockLabel = Text(TimeLogic.formatClock(nowSec))
                     .font(.system(size: 8.5, weight: .medium, design: .monospaced))
-                    .foregroundColor(showsToday ? theme.accentSecondary : theme.inkPrimary)
+                    .foregroundColor(showsToday ? hubAccent : theme.inkPrimary)
                 let subLabel = Text("24H")
                     .font(.system(size: 6.5, weight: .regular, design: .monospaced))
-                    .foregroundColor(showsToday ? theme.accentSecondary.opacity(0.65) : theme.inkMuted)
+                    .foregroundColor(showsToday ? hubAccent.opacity(0.65) : theme.inkMuted)
                 context.draw(clockLabel, at: CGPoint(x: cx, y: cy - 3.2))
                 context.draw(subLabel, at: CGPoint(x: cx, y: cy + 5.8))
             }
@@ -1284,7 +1313,7 @@ private struct YearContourInteractiveStage: View {
                     Text(names[entry.month - 1])
                         .font(.system(size: 7, weight: .regular, design: .monospaced))
                         .tracking(0.4)
-                        .foregroundColor(theme.accentSecondary.opacity(0.76))
+                        .foregroundColor(theme.isMultiColorSpectrum ? theme.inkSecondary : theme.accentSecondary.opacity(0.76))
                         .offset(x: geo.size.width * CGFloat(entry.col) / 53.0)
                 }
             }
@@ -1298,10 +1327,17 @@ private struct YearContourInteractiveStage: View {
                 .font(.system(size: 7, weight: .regular, design: .monospaced))
                 .foregroundColor(theme.inkMuted)
             HStack(spacing: 2.5) {
-                Rectangle().fill(theme.accentSecondary.opacity(0.38)).frame(width: 8, height: 0.75)
-                Rectangle().fill(theme.accentSecondary.opacity(0.78)).frame(width: 8, height: 0.95)
-                Rectangle().fill(theme.accent.opacity(0.68)).frame(width: 8, height: 1.15)
-                Rectangle().fill(theme.accent).frame(width: 8, height: 1.5)
+                if theme.isMultiColorSpectrum {
+                    Rectangle().fill(theme.accentQuaternary).frame(width: 8, height: 1.0)
+                    Rectangle().fill(theme.accentTertiary).frame(width: 8, height: 1.1)
+                    Rectangle().fill(theme.accentSecondary).frame(width: 8, height: 1.25)
+                    Rectangle().fill(theme.accent).frame(width: 8, height: 1.5)
+                } else {
+                    Rectangle().fill(theme.accentSecondary.opacity(0.38)).frame(width: 8, height: 0.75)
+                    Rectangle().fill(theme.accentSecondary.opacity(0.78)).frame(width: 8, height: 0.95)
+                    Rectangle().fill(theme.accent.opacity(0.68)).frame(width: 8, height: 1.15)
+                    Rectangle().fill(theme.accent).frame(width: 8, height: 1.5)
+                }
             }
             Text(loc("timeMore").uppercased())
                 .font(.system(size: 7, weight: .regular, design: .monospaced))
@@ -1343,14 +1379,15 @@ private struct StaticYearContourCanvas: View, Equatable {
                 monthTicks.move(to: CGPoint(x: mx, y: size.height - 3.5))
                 monthTicks.addLine(to: CGPoint(x: mx, y: size.height))
             }
+            let meridianBase = theme.isMultiColorSpectrum ? theme.inkMuted : theme.accentSecondary
             context.stroke(
                 meridians,
-                with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.20 : 0.16)),
+                with: .color(meridianBase.opacity(theme.isDark ? 0.20 : 0.16)),
                 lineWidth: 0.65
             )
             context.stroke(
                 monthTicks,
-                with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.52 : 0.45)),
+                with: .color(meridianBase.opacity(theme.isDark ? 0.52 : 0.45)),
                 lineWidth: 0.75
             )
 
@@ -1463,27 +1500,29 @@ private struct StaticYearContourCanvas: View, Equatable {
                 }
 
                 if !midStipple.isEmpty {
+                    let c = theme.isMultiColorSpectrum ? theme.accentQuaternary : theme.accentSecondary
                     context.fill(
                         midStipple,
-                        with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.34 : 0.28))
+                        with: .color(c.opacity(theme.isDark ? 0.42 : 0.34))
                     )
                 }
                 if !summitStipple.isEmpty {
+                    let c = theme.isMultiColorSpectrum ? theme.accentTertiary : theme.accent
                     context.fill(
                         summitStipple,
-                        with: .color(theme.accent.opacity(theme.isDark ? 0.40 : 0.32))
+                        with: .color(c.opacity(theme.isDark ? 0.50 : 0.42))
                     )
                 }
                 if !coreStipple.isEmpty {
                     context.fill(
                         coreStipple,
-                        with: .color(theme.accent.opacity(theme.isDark ? 0.56 : 0.46))
+                        with: .color(theme.accent.opacity(theme.isDark ? 0.60 : 0.50))
                     )
                 }
             }
 
             // 3. Render 12 silky Marching Squares isobar contours stepping from
-            //    theme.accentSecondary (normLevel < 0.55) up to theme.accent (normLevel >= 0.55)
+            //    Green -> Yellow -> Red -> Blue (Google) or Color 2 -> Color 1 (duotone)
             for lvl in field.levels {
                 guard !lvl.segments.isEmpty else { continue }
                 var path = Path()
@@ -1506,6 +1545,11 @@ private struct StaticYearContourCanvas: View, Equatable {
                         context.stroke(path, with: .color(theme.accent.opacity(0.11)), lineWidth: 2.3)
                     }
                     context.stroke(path, with: .color(theme.accent.opacity(0.84)), lineWidth: 0.95)
+                } else if theme.isMultiColorSpectrum {
+                    let baseColor = theme.elevationColor(normalized: normLevel)
+                    let alpha = (theme.isDark ? 0.42 : 0.38) + normLevel * 0.42
+                    let lw: CGFloat = 0.58 + CGFloat(normLevel) * 0.36
+                    context.stroke(path, with: .color(baseColor.opacity(alpha)), lineWidth: lw)
                 } else if normLevel < 0.55 {
                     let localT = normLevel / 0.55
                     let color = theme.accentSecondary.opacity(0.24 + localT * 0.54)

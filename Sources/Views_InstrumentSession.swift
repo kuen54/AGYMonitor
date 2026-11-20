@@ -418,19 +418,21 @@ private struct RadarStaticCanvas: View, Equatable {
                 }
             }
 
+            let radarRingColor = theme.isMultiColorSpectrum ? theme.accent : theme.accentSecondary
+            let radarTickColor = theme.isMultiColorSpectrum ? theme.accentQuaternary : theme.accentSecondary
             if !ringMistHalo.isEmpty {
-                context.fill(ringMistHalo, with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.12 : 0.09)))
+                context.fill(ringMistHalo, with: .color(radarRingColor.opacity(theme.isDark ? 0.12 : 0.09)))
             }
             if !ringMistCore.isEmpty {
-                context.fill(ringMistCore, with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.20 : 0.15)))
+                context.fill(ringMistCore, with: .color(radarRingColor.opacity(theme.isDark ? 0.20 : 0.15)))
             }
             context.stroke(
                 rangeCircles,
-                with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.28 : 0.24)),
+                with: .color(radarRingColor.opacity(theme.isDark ? 0.28 : 0.24)),
                 style: StrokeStyle(lineWidth: 0.65, dash: [2, 3])
             )
             if !azimuthTicks.isEmpty {
-                context.stroke(azimuthTicks, with: .color(theme.accentSecondary.opacity(theme.isDark ? 0.46 : 0.38)), lineWidth: 0.6)
+                context.stroke(azimuthTicks, with: .color(radarTickColor.opacity(theme.isDark ? 0.48 : 0.40)), lineWidth: 0.6)
             }
 
             var axes = Path()
@@ -445,14 +447,19 @@ private struct RadarStaticCanvas: View, Equatable {
             centerCross.addLine(to: CGPoint(x: center.x + 3.5, y: center.y))
             centerCross.move(to: CGPoint(x: center.x, y: center.y - 3.5))
             centerCross.addLine(to: CGPoint(x: center.x, y: center.y + 3.5))
-            context.stroke(centerCross, with: .color(theme.reticle.opacity(0.50)), lineWidth: 0.75)
+            context.stroke(centerCross, with: .color((theme.isMultiColorSpectrum ? theme.accent : theme.reticle).opacity(0.50)), lineWidth: 0.75)
 
             // 3b. Optical calibration compass cardinal labels (000° / 090° / 180° / 270°)
-            let compassColor = theme.accentSecondary.opacity(theme.isDark ? 0.62 : 0.58)
-            let northLabel = Text("000°").font(.system(size: 6, weight: .regular, design: .monospaced)).tracking(0.3).foregroundColor(compassColor)
-            let southLabel = Text("180°").font(.system(size: 6, weight: .regular, design: .monospaced)).tracking(0.3).foregroundColor(compassColor)
-            let eastLabel  = Text("090°").font(.system(size: 6, weight: .regular, design: .monospaced)).tracking(0.3).foregroundColor(compassColor)
-            let westLabel  = Text("270°").font(.system(size: 6, weight: .regular, design: .monospaced)).tracking(0.3).foregroundColor(compassColor)
+            //     4-color Google cardinal compass on Google theme; Color 2 on duotone themes.
+            let compassAlpha: Double = theme.isDark ? 0.72 : 0.68
+            let northColor = theme.isMultiColorSpectrum ? theme.accent.opacity(compassAlpha) : theme.accentSecondary.opacity(theme.isDark ? 0.62 : 0.58)
+            let eastColor  = theme.isMultiColorSpectrum ? theme.accentSecondary.opacity(compassAlpha) : theme.accentSecondary.opacity(theme.isDark ? 0.62 : 0.58)
+            let southColor = theme.isMultiColorSpectrum ? theme.accentTertiary.opacity(compassAlpha) : theme.accentSecondary.opacity(theme.isDark ? 0.62 : 0.58)
+            let westColor  = theme.isMultiColorSpectrum ? theme.accentQuaternary.opacity(compassAlpha) : theme.accentSecondary.opacity(theme.isDark ? 0.62 : 0.58)
+            let northLabel = Text("000°").font(.system(size: 6, weight: .medium, design: .monospaced)).tracking(0.3).foregroundColor(northColor)
+            let southLabel = Text("180°").font(.system(size: 6, weight: .medium, design: .monospaced)).tracking(0.3).foregroundColor(southColor)
+            let eastLabel  = Text("090°").font(.system(size: 6, weight: .medium, design: .monospaced)).tracking(0.3).foregroundColor(eastColor)
+            let westLabel  = Text("270°").font(.system(size: 6, weight: .medium, design: .monospaced)).tracking(0.3).foregroundColor(westColor)
 
             let northPos = CGPoint(x: center.x, y: 8.5)
             let southPos = CGPoint(x: center.x, y: ch - 8.5)
@@ -876,7 +883,8 @@ private struct RadarStaticCanvas: View, Equatable {
                             with: .color(g)
                         )
                     } else {
-                        let standby = theme.accentSecondary.opacity((theme.isDark ? 0.78 : 0.72) * alphaMul)
+                        let standbyBase = theme.isMultiColorSpectrum ? theme.inkSecondary : theme.accentSecondary
+                        let standby = standbyBase.opacity((theme.isDark ? 0.78 : 0.72) * alphaMul)
                         var cross = Path()
                         cross.move(to: CGPoint(x: np.x - 3.2, y: np.y))
                         cross.addLine(to: CGPoint(x: np.x + 3.2, y: np.y))

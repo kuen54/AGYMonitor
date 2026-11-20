@@ -21,7 +21,11 @@ private struct QuotaTrackRow: View {
 
     private var statusColor: Color {
         switch remaining {
-        case 30...:   return useSecondaryAccent ? theme.accentSecondary : theme.accent
+        case 30...:
+            if useSecondaryAccent {
+                return theme.isMultiColorSpectrum ? theme.accentQuaternary : theme.accentSecondary
+            }
+            return theme.accent
         case 10..<30: return theme.signalAmber
         default:      return theme.signalRed
         }
@@ -121,9 +125,12 @@ struct FamilySectionHeader: View {
     var body: some View {
         HStack(spacing: 5) {
             if let tag = indexTag {
+                let tagColor: Color = useSecondaryAccent
+                    ? (theme.isMultiColorSpectrum ? theme.accentQuaternary : theme.accentSecondary)
+                    : theme.accent
                 Text(tag)
                     .font(.system(size: 8, weight: .semibold, design: .monospaced))
-                    .foregroundColor((useSecondaryAccent ? theme.accentSecondary : theme.accent).opacity(0.9))
+                    .foregroundColor(tagColor.opacity(0.9))
             }
             Text(title)
                 .font(.system(size: 8.5, weight: .medium, design: .monospaced))
@@ -249,6 +256,12 @@ struct AICreditsSection: View {
                             ? max(0, min(1, CGFloat(pool.value) / CGFloat(maxPool)))
                             : 0
                         let isLargest = (idx == largestIdx)
+                        let poolFillColor: Color = {
+                            if theme.isMultiColorSpectrum {
+                                return isLargest ? theme.accent : theme.accentQuaternary.opacity(0.72)
+                            }
+                            return isLargest ? theme.accent : theme.accentSecondary.opacity(0.65)
+                        }()
 
                         VStack(alignment: .leading, spacing: 5) {
                             Text(pool.label.uppercased())
@@ -263,7 +276,7 @@ struct AICreditsSection: View {
                                 .minimumScaleFactor(0.8)
                             CreditHorizonHairline(
                                 ratio: ratio,
-                                fillColor: isLargest ? theme.accent : theme.accentSecondary.opacity(0.65),
+                                fillColor: poolFillColor,
                                 trackColor: theme.hairline.opacity(theme.isDark ? 0.80 : 0.85)
                             )
                             .equatable()
