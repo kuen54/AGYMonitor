@@ -181,7 +181,78 @@ struct MonitorStateTests {
         // Stop tears down coalesce, timer, and FS watcher; late callbacks become no-ops
         let stopEffects = SessionMonitorLifecycleMachine.reduce(&state, event: .stop)
         #expect(!state.isStarted)
+        #expect(state.runGeneration == 1)
         #expect(stopEffects == [.cancelFSCoalesce, .setPollTimer(nil), .stopFSWatcher])
         #expect(SessionMonitorLifecycleMachine.reduce(&state, event: .fsCoalesceFired(now: t0.addingTimeInterval(50))).isEmpty)
+
+        // setActive(true) before start() is preserved instead of dropped
+        var cold = SessionMonitorLifecycleState()
+        #expect(SessionMonitorLifecycleMachine.reduce(&cold, event: .setActive(true, now: t0)).isEmpty)
+        #expect(cold.isActive)
+        _ = SessionMonitorLifecycleMachine.reduce(&cold, event: .start(now: t0))
+        _ = SessionMonitorLifecycleMachine.reduce(&cold, event: .scanCompleted(liveCount: 1))
+        #expect(cold.pollInterval == 2.0)
+    }
+
+    @Test("BrainWatcherLifecycleMachine cancels pending debounce on manual refresh, reconciles new surfaces, and cleans up on terminate")
+    func brainWatcherLifecycleInvariants() {
+        var state = BrainWatcherLifecycleState()
+        let t0 = Date(timeIntervalSince1970: 20_000)
+
+        let startEff = BrainWatcherLifecycleMachine.reduce(&state, event: .start(candidatePaths: ["/cli/brain"], now: t0))
+        #expect(startEff == [.startPeriodicTimer, .startFSWatcher(paths: ["/cli/brain"])])
+        _ = BrainWatcherLifecycleMachine.reduce(&state, event: .fsWatcherResult(watchedPaths: ["/cli/brain"], at: t0))
+        #expect(state.isWatcherHealthy)
+
+        // FSEvent schedules debounce with generation 1
+        let fsEff = BrainWatcherLifecycleMachine.reduce(&state, event: .fsEventReceived(now: t0.addingTimeInterval(10)))
+        #expect(fsEff == [.scheduleDebounce(generation: 1, delay: 3.0)])
+
+        // Manual refresh at t0+11 cancels pending debounce AND invalidates generation 1!
+        let refEff = BrainWatcherLifecycleMachine.reduce(&state, event: .refreshTriggered(at: t0.addingTimeInterval(11)))
+        #expect(refEff == [.cancelDebounce])
+        // Stale debounce generation 1 firing MUST be a strict no-op (120s floor protected!)
+        #expect(BrainWatcherLifecycleMachine.reduce(&state, event: .debounceFired(generation: 1)).isEmpty)
+
+        // Newly created Desktop/IDE surface reconciles and restarts FSEventStream
+        let recEff = BrainWatcherLifecycleMachine.reduce(
+            &state,
+            event: .reconcileWatchPaths(candidatePaths: ["/cli/brain", "/ide/brain"], now: t0.addingTimeInterval(20))
+        )
+        #expect(recEff == [.startFSWatcher(paths: ["/cli/brain", "/ide/brain"])])
+
+        // Rapid wake coalesces by generation
+        let w1 = BrainWatcherLifecycleMachine.reduce(&state, event: .wakeReceived)
+        let w2 = BrainWatcherLifecycleMachine.reduce(&state, event: .wakeReceived)
+        #expect(w1 == [.scheduleWakeRefresh(generation: 1, delay: 5.0)])
+        #expect(w2 == [.scheduleWakeRefresh(generation: 2, delay: 5.0)])
+        #expect(BrainWatcherLifecycleMachine.reduce(&state, event: .wakeTimerFired(generation: 1, candidatePaths: [], now: t0)).isEmpty)
+
+        // Terminate stops periodic timer, wake, debounce, and FS watcher
+        let termEff = BrainWatcherLifecycleMachine.reduce(&state, event: .terminate)
+        #expect(termEff == [.cancelDebounce, .cancelWakeRefresh, .stopPeriodicTimer, .stopFSWatcher])
+        #expect(BrainWatcherLifecycleMachine.reduce(&state, event: .wakeTimerFired(generation: 2, candidatePaths: [], now: t0)).isEmpty)
+    }
+
+    @Test("DoneUnseenState tracks finish transitions, clears on markSeen, and resets on stop")
+    func doneUnseenStateLifecycle() {
+        var du = DoneUnseenState()
+        let busy = SessionInfo(pid: 1, sessionId: "s1", cwd: "/tmp", status: .busy, startedAt: nil, entrypoint: "cli")
+        let idle = SessionInfo(pid: 1, sessionId: "s1", cwd: "/tmp", status: .idle, startedAt: nil, entrypoint: "cli")
+
+        du.step(sessions: [busy], now: 100)
+        #expect(!du.anyUnseen)
+        du.step(sessions: [idle], now: 120)
+        #expect(du.ids == ["s1"])
+        let cleared = du.markSeen("s1")
+        #expect(cleared)
+        #expect(!du.anyUnseen)
+
+        du.step(sessions: [busy], now: 130)
+        du.step(sessions: [idle], now: 140)
+        #expect(du.anyUnseen)
+        du.reset()
+        #expect(!du.anyUnseen)
+        #expect(du.prevStatuses.isEmpty)
     }
 }

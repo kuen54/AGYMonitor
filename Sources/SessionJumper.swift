@@ -25,6 +25,8 @@ enum JumpReason: String, Equatable {
 
 final class SessionJumper {
     private let queue = DispatchQueue(label: "com.kuen54.AGYMonitor.jump", qos: .userInitiated)
+    private let gateLock = NSLock()
+    private var requestGate = JumpRequestGate()
 
     func jump(
         session: SessionInfo,
@@ -32,13 +34,28 @@ final class SessionJumper {
         knownTitle: String? = nil,
         completion: ((JumpOutcome) -> Void)? = nil
     ) {
+        gateLock.lock()
+        let generation = requestGate.beginRequest()
+        gateLock.unlock()
+
         queue.async { [weak self] in
             guard let self = self else { return }
+            guard self.isLatestRequest(generation) else { return }
             let outcome = self.perform(session: session, target: target, knownTitle: knownTitle)
+            guard self.isLatestRequest(generation) else { return }
             if let completion = completion {
-                DispatchQueue.main.async { completion(outcome) }
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self, self.isLatestRequest(generation) else { return }
+                    completion(outcome)
+                }
             }
         }
+    }
+
+    private func isLatestRequest(_ generation: Int) -> Bool {
+        gateLock.lock()
+        defer { gateLock.unlock() }
+        return requestGate.isLatest(generation)
     }
 
     // MARK: - Dispatch by surface / terminal
@@ -176,10 +193,14 @@ final class SessionJumper {
         let script = kind == .iterm2
             ? SessionLogic.itermFocusScript(devTTY: dev)
             : SessionLogic.appleTerminalFocusScript(devTTY: dev)
-        guard let (status, out) = run("/usr/bin/osascript", ["-e", script], timeout: 30.0) else {
+        guard let res = ProcessRunner.runDetailed("/usr/bin/osascript", ["-e", script], timeout: 30.0) else {
             return activateApp(target, reason: .unsupported)
         }
-        if status == 0 {
+        if res.timedOut {
+            return activateApp(target, reason: .ambiguous)
+        }
+        let out = res.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        if res.status == 0 {
             if out == "ok" { return .focusedPane }
             return activateApp(target, reason: .ambiguous)
         }
@@ -196,18 +217,11 @@ final class SessionJumper {
         guard let dev = SessionLogic.devTTY(target.tty), let cli = which("wezterm") else {
             return activateApp(target, reason: target.tty == nil ? .noTarget : .unsupported)
         }
-        guard let (_, listJSON) = run(cli, ["cli", "list", "--format", "json"]),
-              let data = listJSON.data(using: .utf8),
-              let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+        guard let (_, listJSON) = run(cli, ["cli", "list", "--format", "json"]) else {
             return activateApp(target, reason: .ambiguous)
         }
-        let bare = dev.replacingOccurrences(of: "/dev/", with: "")
-        let match = rows.first { row in
-            guard let t = row["tty_name"] as? String else { return false }
-            return t == dev || t == bare || t.hasSuffix(bare)
-        }
-        if let paneId = match?["pane_id"] {
-            _ = run(cli, ["cli", "activate-pane", "--pane-id", "\(paneId)"])
+        if let paneId = SessionLogic.matchWeztermPaneId(devTTY: dev, jsonString: listJSON) {
+            _ = run(cli, ["cli", "activate-pane", "--pane-id", paneId])
             _ = activateAppPid(target)
             return .focusedPane
         }

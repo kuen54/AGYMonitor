@@ -57,6 +57,7 @@ public enum AppPresentationEvent: Equatable, Sendable {
     case popoverClosed
     case notchOpenChanged(Bool)
     case hotkeyPreferenceChanged(Bool)
+    case hotkeyRegistrationFailed
     case reopenRequested
     case globalHotkeyTriggered
     case statusItemLeftClicked
@@ -159,6 +160,10 @@ public enum AppPresentationMachine {
                 state.isHotkeyRegistered = false
                 return [.unregisterHotkey]
             }
+            return []
+
+        case .hotkeyRegistrationFailed:
+            state.isHotkeyRegistered = false
             return []
 
         case .reopenRequested:

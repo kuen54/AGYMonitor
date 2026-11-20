@@ -327,6 +327,8 @@ struct SubscriptionView: View {
     @ObservedObject var store: UsageStore
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
+    @Environment(\.telemetryPanelVisible) private var isPanelVisible
+    @Environment(\.telemetryStaticRender) private var isStaticRender
 
     private func nonEmpty(_ s: String?) -> String? {
         guard let trimmed = s?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else {
@@ -360,6 +362,27 @@ struct SubscriptionView: View {
                 )
             case .loading:
                 TelemetrySkeleton()
+            }
+        }
+        .overlay {
+            // Reconcile expired HTTP 429 cooldowns while the Plan tab is visible so
+            // the Retry button re-enables immediately once `retryAt` passes (0Hz when idle).
+            if let retryAt = store.quotaRetryAt, isPanelVisible, !isStaticRender {
+                TimelineView(.periodic(from: Date(timeIntervalSinceReferenceDate: 0), by: 15.0)) { ctx in
+                    Color.clear
+                        .onChange(of: ctx.date) { now in
+                            if now >= retryAt {
+                                store.reconcileQuotaCooldown(now: now)
+                            }
+                        }
+                        .onAppear {
+                            let now = Date()
+                            if now >= retryAt {
+                                store.reconcileQuotaCooldown(now: now)
+                            }
+                        }
+                }
+                .allowsHitTesting(false)
             }
         }
     }

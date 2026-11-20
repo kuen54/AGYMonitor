@@ -64,22 +64,22 @@ final class UsageArchive {
     func mergeDaily(_ daily: [DailyUsage]?) {
         lock.lock()
         let changed = UsageArchiveLogic.mergeDaily(daily, into: &data)
+        enqueuePersistLocked(changedDays: changed)
         lock.unlock()
-        persist(changedDays: changed)
     }
 
     func mergeTime(_ time: TimeData?) {
         lock.lock()
         let changed = UsageArchiveLogic.mergeTime(time, into: &data)
+        enqueuePersistLocked(changedDays: changed)
         lock.unlock()
-        persist(changedDays: changed)
     }
 
     func mergeYearSeconds(_ days: [String: Int]) {
         lock.lock()
         let changed = UsageArchiveLogic.mergeYearSeconds(days, into: &data)
+        enqueuePersistLocked(changedDays: changed)
         lock.unlock()
-        persist(changedDays: changed)
     }
 
     /// Merge an entire scan's daily + time payload in one shot (the sweep),
@@ -88,8 +88,8 @@ final class UsageArchive {
         lock.lock()
         var changed = UsageArchiveLogic.mergeDaily(daily, into: &data)
         changed.formUnion(UsageArchiveLogic.mergeTime(time, into: &data))
+        enqueuePersistLocked(changedDays: changed)
         lock.unlock()
-        persist(changedDays: changed)
     }
 
     /// Atomically merge a scan's daily + time into the archive AND read back the
@@ -101,8 +101,8 @@ final class UsageArchive {
         changed.formUnion(UsageArchiveLogic.mergeTime(time, into: &data))
         let d = UsageArchiveLogic.dailyBreakdown(data, yearMonth: yearMonth)
         let t = UsageArchiveLogic.timeDays(data, yearMonth: yearMonth)
+        enqueuePersistLocked(changedDays: changed)
         lock.unlock()
-        persist(changedDays: changed)
         return (d, t)
     }
 
@@ -126,10 +126,11 @@ final class UsageArchive {
     // MARK: Destructive
 
     /// Wipe the archive (all shard files + memory).
+    /// Enqueues disk deletion BEFORE releasing `lock` so no earlier `merge` can
+    /// enqueue a stale shard write behind `clear()` and resurrect deleted files.
     func clear() {
         lock.lock()
         data = UsageArchiveData()
-        lock.unlock()
         ioQueue.async { [shardDir] in
             if let files = try? FileManager.default.contentsOfDirectory(
                 at: shardDir, includingPropertiesForKeys: nil) {
@@ -138,18 +139,17 @@ final class UsageArchive {
                 }
             }
         }
+        lock.unlock()
     }
 
-    // MARK: Persistence (incremental — only changed months)
+    // MARK: Persistence (incremental — only changed months, FIFO-ordered with `lock`)
 
-    private func persist(changedDays: Set<String>) {
+    private func enqueuePersistLocked(changedDays: Set<String>) {
         guard !changedDays.isEmpty else { return }
         let months = Set(changedDays.map { String($0.prefix(7)) })  // "yyyy-MM"
-        lock.lock()
         let shards: [(month: String, data: UsageArchiveData)] = months.map { m in
             (m, UsageArchiveData(days: data.days.filter { $0.key.hasPrefix(m) }))
         }
-        lock.unlock()
         ioQueue.async { [shardDir] in
             for shard in shards {
                 let url = shardDir.appendingPathComponent("\(shard.month).json")

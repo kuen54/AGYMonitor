@@ -14,24 +14,37 @@ private enum YearContourFieldCache {
         let dayCount: Int
         let totalSeconds: Int
         let maxSeconds: Int
+        let digest: Int
     }
 
     private static let lock = NSLock()
-    private static var entries: [Key: ContourFieldResult] = [:]
-    private static var order: [Key] = []
-    private static let maxEntries = 8
+    private static var lru = BoundedLRUState<Key, ContourFieldResult>(maxEntries: 8)
+
+    static func dataDigest(days: [String: Int]) -> Int {
+        var acc: UInt64 = 14695981039346656037
+        for k in days.keys.sorted() {
+            let v = days[k] ?? 0
+            for b in k.utf8 {
+                acc = (acc ^ UInt64(b)) &* 1099511628211
+            }
+            acc = (acc ^ UInt64(bitPattern: Int64(v))) &* 1099511628211
+        }
+        return Int(truncatingIfNeeded: acc)
+    }
 
     static func field(days: [String: Int], year: Int, totalSeconds: Int) -> ContourFieldResult {
         var maxSec = 0
         for sec in days.values where sec > maxSec { maxSec = sec }
-        let key = Key(year: year, dayCount: days.count, totalSeconds: totalSeconds, maxSeconds: maxSec)
+        let key = Key(
+            year: year,
+            dayCount: days.count,
+            totalSeconds: totalSeconds,
+            maxSeconds: maxSec,
+            digest: dataDigest(days: days)
+        )
 
         lock.lock()
-        if let hit = entries[key] {
-            if let idx = order.firstIndex(of: key) {
-                order.remove(at: idx)
-                order.append(key)
-            }
+        if let hit = lru.get(key) {
             lock.unlock()
             return hit
         }
@@ -40,13 +53,7 @@ private enum YearContourFieldCache {
         let computed = InstrumentMath.buildYearContourField(days: days, year: year, levelCount: 12)
 
         lock.lock()
-        entries[key] = computed
-        order.removeAll { $0 == key }
-        order.append(key)
-        while order.count > maxEntries {
-            let evicted = order.removeFirst()
-            entries.removeValue(forKey: evicted)
-        }
+        lru.set(computed, for: key)
         lock.unlock()
 
         return computed
@@ -59,12 +66,11 @@ private enum PolarWeekArcsCache {
         let dayKeys: [String]
         let totalSeconds: Int
         let intervalCount: Int
+        let digest: Int
     }
 
     private static let lock = NSLock()
-    private static var entries: [Key: [PolarArc]] = [:]
-    private static var order: [Key] = []
-    private static let maxEntries = 8
+    private static var lru = BoundedLRUState<Key, [PolarArc]>(maxEntries: 8)
 
     static func arcs(
         dayKeys: [String],
@@ -73,21 +79,30 @@ private enum PolarWeekArcsCache {
     ) -> [PolarArc] {
         var totalSec = 0
         var intervalCount = 0
+        var acc: UInt64 = 14695981039346656037
         for key in dayKeys {
             if let d = days[key] {
                 totalSec += d.totalSeconds
                 intervalCount += d.intervals.count
+                for iv in d.intervals {
+                    acc = (acc ^ UInt64(bitPattern: Int64(iv.startSec))) &* 1099511628211
+                    acc = (acc ^ UInt64(bitPattern: Int64(iv.endSec))) &* 1099511628211
+                    if let m = iv.model {
+                        for b in m.utf8 { acc = (acc ^ UInt64(b)) &* 1099511628211 }
+                    }
+                }
             }
         }
         let key = Key(
             monthPrefix: monthPrefix,
             dayKeys: dayKeys,
             totalSeconds: totalSec,
-            intervalCount: intervalCount
+            intervalCount: intervalCount,
+            digest: Int(truncatingIfNeeded: acc)
         )
 
         lock.lock()
-        if let hit = entries[key] {
+        if let hit = lru.get(key) {
             lock.unlock()
             return hit
         }
@@ -101,13 +116,7 @@ private enum PolarWeekArcsCache {
         )
 
         lock.lock()
-        entries[key] = built
-        order.removeAll { $0 == key }
-        order.append(key)
-        while order.count > maxEntries {
-            let evicted = order.removeFirst()
-            entries.removeValue(forKey: evicted)
-        }
+        lru.set(built, for: key)
         lock.unlock()
 
         return built
@@ -124,8 +133,7 @@ struct PolarChronometerWeekChart: View {
     @Environment(\.agyTheme) private var theme
     @Environment(\.telemetryStaticRender) private var isStaticRender
     @Environment(\.telemetryPanelVisible) private var isPanelVisible
-
-    @State private var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    @Environment(\.telemetryReduceMotion) private var reduceMotion
 
     private var monthPrefix: String {
         String(format: "%04d-%02d-", store.viewingYear, store.viewingMonth)
@@ -204,10 +212,6 @@ struct PolarChronometerWeekChart: View {
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 6)
-        }
-        .onReceive(NSWorkspace.shared.notificationCenter.publisher(
-            for: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification)) { _ in
-            reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         }
     }
 }
@@ -368,9 +372,14 @@ private struct PolarChronometerInteractiveDeck: View {
                 theme: theme
             )
 
-            // Layer 3: Isolated NOW stippled radar sweep + center hub (cached per minute, 0Hz when closed)
-            if isPanelVisible && showsToday && !reduceMotion && !isStaticRender {
-                TimelineView(.periodic(from: Date(), by: 30.0)) { ctx in
+            // Layer 3: Isolated NOW stippled radar sweep + center hub (constant epoch so 120Hz hover never resets timer)
+            if TelemetryAnimationGate.shouldAnimate(
+                active: showsToday,
+                panelVisible: isPanelVisible,
+                reduceMotion: reduceMotion,
+                staticRender: isStaticRender
+            ) {
+                TimelineView(.periodic(from: Date(timeIntervalSinceReferenceDate: 0), by: 30.0)) { ctx in
                     PolarNowSweepAndHubLayer(
                         now: ctx.date,
                         showsToday: true,
@@ -409,10 +418,23 @@ private struct PolarChronometerInteractiveDeck: View {
                 if hoveredArc != hit {
                     hoveredArc = hit
                 }
+                if hit != nil && hoveredDayKey != nil {
+                    hoveredDayKey = nil
+                }
             case .ended:
                 if hoveredArc != nil {
                     hoveredArc = nil
                 }
+            }
+        }
+        .onChange(of: dayKeys) { _ in
+            hoveredArc = nil
+            hoveredDayKey = nil
+        }
+        .onChange(of: isPanelVisible) { visible in
+            if !visible {
+                hoveredArc = nil
+                hoveredDayKey = nil
             }
         }
     }
@@ -932,8 +954,35 @@ private struct PolarDialActivityLayer: View {
     }
 }
 
-/// Isolated NOW radar stippled sweep + live HH:MM center hub cached per minute in TelemetryArtworkCache
-/// so 120Hz hover across chronometer arcs NEVER re-runs the radial stipple loop.
+/// Dedicated 2-entry LRU cache for `PolarNowSweepAndHubLayer` so minute-by-minute
+/// NOW sweep renders never evict heavy static artwork from the global 24-entry cache.
+@MainActor
+private final class PolarSweepArtworkCache {
+    static let shared = PolarSweepArtworkCache()
+    private var lru = BoundedLRUState<AnyHashable, NSImage>(maxEntries: 2)
+
+    func image<K: Hashable, V: View>(
+        for key: K,
+        size: CGSize,
+        @ViewBuilder content: () -> V
+    ) -> NSImage? {
+        guard size.width >= 2, size.height >= 2 else { return nil }
+        let box = AnyHashable(key)
+        if let hit = lru.get(box) { return hit }
+        let renderer = ImageRenderer(
+            content: content()
+                .frame(width: size.width, height: size.height)
+                .environment(\.telemetryStaticRender, true)
+        )
+        renderer.scale = 2.0
+        guard let img = renderer.nsImage else { return nil }
+        lru.set(img, for: box)
+        return img
+    }
+}
+
+/// Isolated NOW radar stippled sweep + live HH:MM center hub cached per minute in its own
+/// 2-entry LRU so 120Hz hover never re-runs the radial stipple loop AND global cache stays warm.
 private struct PolarNowSweepAndHubLayer: View {
     let now: Date
     let showsToday: Bool
@@ -942,9 +991,12 @@ private struct PolarNowSweepAndHubLayer: View {
     let innerHubR: CGFloat
     let theme: AGYTheme
 
+    @Environment(\.telemetryStaticRender) private var isStaticRender
+
     private struct SweepArtworkKey: Hashable {
         let nowMinute: Int
         let showsToday: Bool
+        let dialPx: Int
         let theme: AGYTheme.CacheKey
     }
 
@@ -954,13 +1006,31 @@ private struct PolarNowSweepAndHubLayer: View {
         let nowMinute = (comps.hour ?? 0) * 60 + (comps.minute ?? 0)
         let nowSec = nowMinute * 60
         let nowAngle = InstrumentMath.polarAngle(secondsOfDay: nowSec)
+        let sweepView = sweepCanvas(nowAngle: nowAngle, nowSec: nowSec)
 
-        CachedTelemetryArtwork(
-            key: SweepArtworkKey(nowMinute: nowMinute, showsToday: showsToday, theme: theme.cacheKey),
-            width: dialSize,
-            height: dialSize
+        if isStaticRender {
+            sweepView.frame(width: dialSize, height: dialSize)
+        } else if let img = PolarSweepArtworkCache.shared.image(
+            for: SweepArtworkKey(
+                nowMinute: nowMinute,
+                showsToday: showsToday,
+                dialPx: Int((dialSize * 2.0).rounded()),
+                theme: theme.cacheKey
+            ),
+            size: CGSize(width: dialSize, height: dialSize),
+            content: { sweepView }
         ) {
-            Canvas { context, size in
+            Image(nsImage: img)
+                .resizable()
+                .frame(width: dialSize, height: dialSize)
+                .allowsHitTesting(false)
+        } else {
+            sweepView.frame(width: dialSize, height: dialSize)
+        }
+    }
+
+    private func sweepCanvas(nowAngle: Double, nowSec: Int) -> some View {
+        Canvas { context, size in
                 let cx = size.width * 0.5
                 let cy = size.height * 0.5
                 let center = CGPoint(x: cx, y: cy)
@@ -1059,8 +1129,7 @@ private struct PolarNowSweepAndHubLayer: View {
                 context.draw(clockLabel, at: CGPoint(x: cx, y: cy - 3.2))
                 context.draw(subLabel, at: CGPoint(x: cx, y: cy + 5.8))
             }
-        }
-        .allowsHitTesting(false)
+            .allowsHitTesting(false)
     }
 
     private static func sweepHash(_ r: Int, _ a: Int) -> UInt32 {
@@ -1172,6 +1241,7 @@ private struct YearContourInteractiveStage: View {
     let loc: Localizer
     let theme: AGYTheme
 
+    @Environment(\.telemetryPanelVisible) private var isPanelVisible
     @State private var hoveredDayKey: String? = nil
     @State private var hoverNormPos: Point2D? = nil
 
@@ -1183,6 +1253,7 @@ private struct YearContourInteractiveStage: View {
         let totalSeconds: Int
         let activeDays: Int
         let maxHoursCenti: Int
+        let dataDigest: Int
         let noDataLabel: String
         let theme: AGYTheme.CacheKey
     }
@@ -1194,6 +1265,7 @@ private struct YearContourInteractiveStage: View {
             totalSeconds: totalSeconds,
             activeDays: activeDays,
             maxHoursCenti: Int((field.maxHours * 100.0).rounded()),
+            dataDigest: YearContourFieldCache.dataDigest(days: days),
             noDataLabel: loc("noData").uppercased(),
             theme: theme.cacheKey
         )
@@ -1303,6 +1375,16 @@ private struct YearContourInteractiveStage: View {
         .padding(.horizontal, 14)
         .padding(.top, 10)
         .padding(.bottom, 8)
+        .onChange(of: year) { _ in
+            hoveredDayKey = nil
+            hoverNormPos = nil
+        }
+        .onChange(of: isPanelVisible) { visible in
+            if !visible {
+                hoveredDayKey = nil
+                hoverNormPos = nil
+            }
+        }
     }
 
     private var monthAxisRow: some View {

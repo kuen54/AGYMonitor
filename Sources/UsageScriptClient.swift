@@ -47,18 +47,45 @@ struct UsageScriptClient {
         process.standardError = FileHandle.nullDevice
         do {
             try process.run()
+            let pid = process.processIdentifier
+            let stateLock = NSLock()
+            var finished = false
+            var killItem: DispatchWorkItem?
+
             let timeoutItem = DispatchWorkItem {
-                guard process.isRunning else { return }
-                process.terminate()
-                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 10) {
-                    if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+                stateLock.lock()
+                let done = finished
+                stateLock.unlock()
+                guard !done, pid > 0 else { return }
+                kill(pid, SIGTERM)
+                let escalate = DispatchWorkItem {
+                    stateLock.lock()
+                    let isDone = finished
+                    stateLock.unlock()
+                    if !isDone && pid > 0 { kill(pid, SIGKILL) }
+                }
+                stateLock.lock()
+                if !finished {
+                    killItem = escalate
+                    stateLock.unlock()
+                    DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 10, execute: escalate)
+                } else {
+                    stateLock.unlock()
                 }
             }
             DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 120, execute: timeoutItem)
             // Read pipe BEFORE waitUntilExit to avoid deadlock when output > 64KB
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             process.waitUntilExit()
+
+            stateLock.lock()
+            finished = true
+            let pendingKill = killItem
+            killItem = nil
+            stateLock.unlock()
+
             timeoutItem.cancel()
+            pendingKill?.cancel()
             guard process.terminationStatus == 0 else { return nil }
             return try JSONSerialization.jsonObject(with: data) as? [String: Any]
         } catch {

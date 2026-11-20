@@ -168,4 +168,50 @@ struct UsageStateTests {
         #expect(gate.activeYearMonth == nil)
         #expect(!gate.isCurrent(generation: 2, yearMonth: "2026-09", currentYearMonth: "2026-09"))
     }
+
+    @Test("SnapshotFreshnessPolicy rejects partial mid-month snapshots and clamps year bounds")
+    func snapshotFreshnessAndYearClamping() throws {
+        let oct15 = try #require(AppDate.parseISO8601("2026-10-15T12:00:00Z"))
+        let nov02 = try #require(AppDate.parseISO8601("2026-11-02T09:00:00Z"))
+
+        // Snapshot saved Oct 15 is incomplete when viewing October in November!
+        #expect(!SnapshotFreshnessPolicy.isCompleteHistoricalSnapshot(year: 2026, month: 10, lastUpdated: oct15))
+        // Snapshot saved Nov 2 (after Oct ended) is complete!
+        #expect(SnapshotFreshnessPolicy.isCompleteHistoricalSnapshot(year: 2026, month: 10, lastUpdated: nov02))
+
+        #expect(SnapshotFreshnessPolicy.clampedYear(2035, now: nov02) == 2026)
+        #expect(SnapshotFreshnessPolicy.clampedYear(1900, now: nov02) == 1970)
+        #expect(SnapshotFreshnessPolicy.clampedYear(2025, now: nov02) == 2025)
+    }
+
+    @Test("YearLoadGate switching to cached year cancels activeYear so bouncing back starts a fresh load")
+    func yearLoadGateBounceFix() {
+        var gate = YearLoadGate()
+        // 2026 (cached) -> 2025 (uncached, gen 1) -> 2026 (cached, cancels activeYear) -> 2025 (uncached, gen 3)
+        #expect(gate.beginLoad(year: 2025, force: false, hasCachedValue: false) == 1)
+        #expect(gate.beginLoad(year: 2026, force: false, hasCachedValue: true) == nil)
+        #expect(gate.activeYear == nil)
+        let g3 = gate.beginLoad(year: 2025, force: false, hasCachedValue: false)
+        #expect(g3 == 3)
+        #expect(gate.activeYear == 2025)
+    }
+
+    @Test("ArchiveSweepGate reset invalidates in-flight sweep so clearArchive cannot be resurrected")
+    func archiveSweepGateResetRejectsStaleCompletion() {
+        var gate = ArchiveSweepGate(minInterval: 3600)
+        let t0 = Date(timeIntervalSince1970: 500_000)
+
+        let gen = gate.beginSweep(force: false, enabled: true, now: t0)
+        #expect(gen == 1)
+
+        // User clicks Clear Archive while sweep is in flight
+        gate.reset()
+        #expect(!gate.isInFlight)
+        #expect(gate.lastSucceededAt == nil)
+
+        // Stale sweep gen 1 finishing MUST return false and NOT record lastSucceededAt!
+        let staleApplied = gate.finish(generation: 1, succeeded: true, now: t0.addingTimeInterval(5))
+        #expect(!staleApplied)
+        #expect(gate.lastSucceededAt == nil)
+    }
 }

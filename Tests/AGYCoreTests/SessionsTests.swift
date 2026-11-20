@@ -196,4 +196,24 @@ struct SessionsTests {
         #expect(ideTarget.terminal == .antigravity)
         #expect(ideTarget.appBundlePath == "/Applications/Antigravity IDE.app")
     }
+
+    @Test("JumpRequestGate supersedes older requests and matchWeztermPaneId matches TTY JSON cleanly")
+    func jumpRequestGateAndWeztermMatcher() {
+        var gate = JumpRequestGate()
+        let g1 = gate.beginRequest()
+        #expect(gate.isLatest(g1))
+        let g2 = gate.beginRequest()
+        #expect(!gate.isLatest(g1))
+        #expect(gate.isLatest(g2))
+
+        let json = """
+        [
+          {"pane_id": 7, "tty_name": "/dev/ttys004"},
+          {"pane_id": 12, "tty_name": "ttys009"}
+        ]
+        """
+        #expect(SessionLogic.matchWeztermPaneId(devTTY: "/dev/ttys004", jsonString: json) == "7")
+        #expect(SessionLogic.matchWeztermPaneId(devTTY: "/dev/ttys009", jsonString: json) == "12")
+        #expect(SessionLogic.matchWeztermPaneId(devTTY: "/dev/ttys099", jsonString: json) == nil)
+    }
 }

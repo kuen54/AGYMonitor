@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 
 /// App version, single-sourced from Info.plist (CFBundleShortVersionString).
-fileprivate let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.5.0"
+fileprivate let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.5.1"
 
 /// UI-facing subset of QuotaFetchResult (shared with AGYCore `CoreQuotaError`).
 typealias QuotaError = CoreQuotaError
@@ -335,11 +335,14 @@ final class SubscriptionQuotaService {
     private let loadCodeAssistURL = URL(string: "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist")!
 
     private let ttl: TimeInterval = 60
-    private var cached: (quota: OAuthUsage, at: Date)?
+    private var cached: (quota: OAuthUsage, at: Date, liveError: CoreQuotaError?, retryAt: Date?)?
     private var cooldown = QuotaCooldownState()
     private let lock = NSLock()
 
+    /// Fast serial gate queue — never blocks on subprocesses or disk/network I/O.
     private let workQueue = DispatchQueue(label: "com.kuen54.AGYMonitor.quota.work", qos: .utility)
+    /// Off-gate concurrent queue for local Keychain/SQLite/CLI probes & SWR revalidation.
+    private let probeQueue = DispatchQueue(label: "com.kuen54.AGYMonitor.quota.probe", qos: .utility, attributes: .concurrent)
     private var fetchGate = QuotaFetchGate()
     private var activeCompletions: [(QuotaFetchResult) -> Void] = []
     private var queuedForcedCompletions: [(QuotaFetchResult) -> Void] = []
@@ -350,17 +353,18 @@ final class SubscriptionQuotaService {
     var hasOAuthToken: Bool {
         tokenPresenceLock.lock()
         let action = tokenPresence.evaluate(now: Date())
+        let gen = tokenPresence.generation
         tokenPresenceLock.unlock()
 
         switch action {
         case .returnCached(let value):
             return value
         case .returnCachedAndRevalidate(let value):
-            workQueue.async { [weak self] in
+            probeQueue.async { [weak self] in
                 guard let self = self else { return }
                 let refreshed = AGYStateStore.probePresenceFast()
                 self.tokenPresenceLock.lock()
-                self.tokenPresence.recordResult(refreshed, at: Date())
+                self.tokenPresence.recordRevalidatedResult(refreshed, generation: gen, at: Date())
                 self.tokenPresenceLock.unlock()
             }
             return value
@@ -412,7 +416,13 @@ final class SubscriptionQuotaService {
             switch decision {
             case .serveCache:
                 if let c = cachedTuple {
-                    DispatchQueue.main.async { completion(.success(c.quota)) }
+                    let result: QuotaFetchResult
+                    if let err = c.liveError {
+                        result = .fallbackWithNotice(c.quota, error: err, retryAt: c.retryAt)
+                    } else {
+                        result = .success(c.quota)
+                    }
+                    DispatchQueue.main.async { completion(result) }
                 }
             case .serveCooldown(let until):
                 if let c = cachedTuple {
@@ -424,8 +434,10 @@ final class SubscriptionQuotaService {
                 }
             case .startNetworkFetch(let effectiveForce):
                 self.activeCompletions.append(completion)
-                self.performAGYFetch(forceRefresh: effectiveForce) { result in
-                    self.finishFetch(result)
+                self.probeQueue.async { [weak self] in
+                    self?.performAGYFetch(forceRefresh: effectiveForce) { result in
+                        self?.finishFetch(result)
+                    }
                 }
             case .coalesceIntoInFlight:
                 if forceRefresh && !self.fetchGate.currentForce {
@@ -462,8 +474,10 @@ final class SubscriptionQuotaService {
                     DispatchQueue.main.async { extra.forEach { $0(fallbackResult) } }
                 } else {
                     self.activeCompletions = extra
-                    self.performAGYFetch(forceRefresh: true) { followUpResult in
-                        self.finishFetch(followUpResult)
+                    self.probeQueue.async { [weak self] in
+                        self?.performAGYFetch(forceRefresh: true) { followUpResult in
+                            self?.finishFetch(followUpResult)
+                        }
                     }
                 }
             } else if !self.queuedForcedCompletions.isEmpty {
@@ -494,7 +508,7 @@ final class SubscriptionQuotaService {
         if let token = liveAuth.token {
             fetchLiveCloudCodeQuota(bearerToken: token) { [weak self] liveOutcome in
                 guard let self = self else { return }
-                self.workQueue.async {
+                self.probeQueue.async {
                     switch liveOutcome {
                     case .live(let liveBuckets, let liveTier):
                         let snapshot = Self.buildQuotaSnapshot(
@@ -613,7 +627,7 @@ final class SubscriptionQuotaService {
             allowCLIProbe: allowCLIProbe,
             now: now
         ) {
-            storeOfflineFallback(snapshot)
+            storeOfflineFallback(snapshot, liveError: liveError, retryAt: retryAt)
             if let liveError = liveError {
                 completion(.fallbackWithNotice(snapshot, error: liveError, retryAt: retryAt))
             } else {
@@ -638,14 +652,18 @@ final class SubscriptionQuotaService {
 
     private func storeLiveSuccess(_ quota: OAuthUsage) {
         lock.lock()
-        cached = (quota, Date())
+        cached = (quota, Date(), nil, nil)
         cooldown.recordLiveSuccess()
         lock.unlock()
     }
 
-    private func storeOfflineFallback(_ quota: OAuthUsage) {
+    private func storeOfflineFallback(
+        _ quota: OAuthUsage,
+        liveError: CoreQuotaError?,
+        retryAt: Date?
+    ) {
         lock.lock()
-        cached = (quota, Date())
+        cached = (quota, Date(), liveError, retryAt)
         cooldown.recordOfflineFallback()
         lock.unlock()
     }

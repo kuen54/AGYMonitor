@@ -139,4 +139,125 @@ struct UIStateTests {
         #expect(nav.transition(to: "unknown", in: tabs) == .forward)
         #expect(nav.activeId == "unknown")
     }
+
+    @Test("SessionKeyRouter accepts macOS [.numericPad, .function] arrows and ignores hidden/inactive panels")
+    func sessionKeyRouterMacOSArrowsAndGating() {
+        // Real macOS arrow keys carry BOTH .numericPad AND .function simultaneously
+        #expect(SessionKeyRouter.route(
+            keyCode: SessionKeyRouter.keyCodeDownArrow,
+            modifiers: [.numericPad, .function],
+            isPanelVisible: true,
+            isSessionTabActive: true
+        ) == .moveSelection(delta: 1))
+
+        #expect(SessionKeyRouter.route(
+            keyCode: SessionKeyRouter.keyCodeUpArrow,
+            modifiers: [.numericPad, .function],
+            isPanelVisible: true,
+            isSessionTabActive: true
+        ) == .moveSelection(delta: -1))
+
+        // Return activates only when panel is visible AND Sessions tab is active
+        #expect(SessionKeyRouter.route(
+            keyCode: SessionKeyRouter.keyCodeReturn,
+            modifiers: [],
+            isPanelVisible: true,
+            isSessionTabActive: true
+        ) == .activateSelected)
+
+        #expect(SessionKeyRouter.route(
+            keyCode: SessionKeyRouter.keyCodeReturn,
+            modifiers: [],
+            isPanelVisible: false,
+            isSessionTabActive: true
+        ) == .ignore)
+
+        #expect(SessionKeyRouter.route(
+            keyCode: SessionKeyRouter.keyCodeReturn,
+            modifiers: [],
+            isPanelVisible: true,
+            isSessionTabActive: false
+        ) == .ignore)
+
+        // Command+Down is ignored (not a plain arrow key)
+        #expect(SessionKeyRouter.route(
+            keyCode: SessionKeyRouter.keyCodeDownArrow,
+            modifiers: [.command, .numericPad, .function],
+            isPanelVisible: true,
+            isSessionTabActive: true
+        ) == .ignore)
+    }
+
+    @Test("TokenFlowFocus enforces mutual exclusivity between model and channel hover and reconciles removed models")
+    func tokenFlowFocusExclusivity() {
+        var focus: TokenFlowFocus<String> = .none
+        focus.setModel("carbon")
+        #expect(focus.modelId == "carbon" && focus.channel == nil)
+
+        // Hovering a channel immediately clears model focus (impossible to hold both!)
+        focus.setChannel("cacheRead")
+        #expect(focus.channel == "cacheRead" && focus.modelId == nil)
+
+        // Exiting model while channel is active does NOT clear channel
+        focus.setModel(nil)
+        #expect(focus.channel == "cacheRead")
+
+        // Model reconciliation clears vanished models
+        focus.setModel("argon")
+        focus.reconcile(validModelIds: ["carbon", "flash"])
+        #expect(focus == .none)
+    }
+
+    @Test("ChartInspectionState clears stale hover atomically on scope change")
+    func chartInspectionScopeReset() {
+        var insp = ChartInspectionState<String, Int>(scope: "2026-01")
+        insp.setTarget(31)
+        #expect(insp.target == 31)
+
+        // Stepping to Feb clears day 31 so "02/31 NO DATA" can never appear
+        #expect(insp.syncScope("2026-02") == true)
+        #expect(insp.target == nil)
+        #expect(insp.syncScope("2026-02") == false)
+    }
+
+    @Test("PanelHeightState transitions .unmeasured -> .measured even when first measure matches initial height")
+    func panelHeightLatchAndCompositeMemory() {
+        var hs = PanelHeightState<String>(initialKey: "cost-instrument", defaultHeight: 460.0)
+        #expect(hs.phase == .unmeasured)
+
+        // First measurement matches defaultHeight within 0.5pt -> returns nil (no resize), BUT marks .measured!
+        #expect(hs.recordMeasurement(for: "cost-instrument", height: 460.2) == nil)
+        #expect(hs.phase == .measured)
+
+        // Next legitimate resize MUST animate (latch bug fixed!)
+        let upd = hs.recordMeasurement(for: "cost-instrument", height: 520.0)
+        #expect(upd == PanelHeightUpdate(height: 520.0, animate: true))
+
+        // Outgoing tab measurement does NOT clobber active tab height
+        #expect(hs.switchKey(to: "tokens-instrument") == nil)
+        #expect(hs.recordMeasurement(for: "cost-instrument", height: 480.0) == nil)
+        #expect(hs.currentHeight == 520.0)
+    }
+
+    @Test("BoundedLRUState promotes hits to MRU and evicts true LRU entry")
+    func boundedLRUEvictionOrder() {
+        var lru = BoundedLRUState<String, Int>(maxEntries: 2)
+        lru.set(1, for: "a")
+        lru.set(2, for: "b")
+        // Hit "a" promotes it to MRU, so "b" is now LRU
+        #expect(lru.get("a") == 1)
+        lru.set(3, for: "c")
+        #expect(lru.get("b") == nil)
+        #expect(lru.get("a") == 1)
+        #expect(lru.get("c") == 3)
+    }
+
+    @Test("TelemetryAnimationGate enforces 0Hz when hidden, reduced-motion, static, or inactive")
+    func animationGateMatrix() {
+        #expect(TelemetryAnimationGate.shouldAnimate(active: true, panelVisible: true, reduceMotion: false, staticRender: false))
+        #expect(!TelemetryAnimationGate.shouldAnimate(active: false, panelVisible: true, reduceMotion: false, staticRender: false))
+        #expect(!TelemetryAnimationGate.shouldAnimate(active: true, panelVisible: false, reduceMotion: false, staticRender: false))
+        #expect(!TelemetryAnimationGate.shouldAnimate(active: true, panelVisible: true, reduceMotion: true, staticRender: false))
+        #expect(!TelemetryAnimationGate.shouldAnimate(active: true, panelVisible: true, reduceMotion: false, staticRender: true))
+    }
 }

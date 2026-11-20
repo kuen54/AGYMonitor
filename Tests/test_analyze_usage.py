@@ -101,7 +101,7 @@ class TestPython39CompatibilityAndMeta(unittest.TestCase):
     def test_python39_syntax_and_version(self) -> None:
         src = SCRIPT_PATH.read_text(encoding="utf-8")
         tree = ast.parse(src, filename=str(SCRIPT_PATH))
-        self.assertEqual(au.__version__, "1.5.0")
+        self.assertEqual(au.__version__, "1.5.1")
         self.assertEqual(
             au.MODEL_CLASSES,
             ("carbon", "argon", "neon", "hydrogen", "flash", "claude", "other"),
@@ -1126,6 +1126,24 @@ class TestActiveTimeIntervalsAndCache(unittest.TestCase):
         self.assertEqual(p_upd["diagnostics"]["cache_pruned_files"], 1)
         self.assertEqual(p_upd["totals_by_model"]["carbon"]["input_tokens"], 6000)
         self.assertNotIn("flash", p_upd["totals_by_model"])
+
+        # Seed an unrelated root entry AND a malformed entry into scan-cache.json:
+        # 1) _load_scan_cache() drops ONLY the malformed entry (keeps valid ones).
+        # 2) Scanning `--data-dir` prunes ONLY under scanned roots (preserves foreign root).
+        raw_cache = json.loads(au.SCAN_CACHE_PATH.read_text(encoding="utf-8"))
+        foreign_path = "/Users/fake/.gemini/antigravity-cli/brain/other/.system_generated/logs/transcript.jsonl"
+        sample_valid = next(iter(raw_cache["files"].values()))
+        raw_cache["files"][foreign_path] = dict(sample_valid)
+        raw_cache["files"]["/tmp/corrupt.jsonl"] = {"mtime_ns": "bad"}
+        au.SCAN_CACHE_PATH.write_text(json.dumps(raw_cache), encoding="utf-8")
+
+        loaded = au._load_scan_cache()
+        self.assertIn(foreign_path, loaded)
+        self.assertNotIn("/tmp/corrupt.jsonl", loaded)
+
+        au.scan_sessions(start_dt, end_dt, use_cache=True, data_dirs=[self.gemini_dir])
+        after = au._load_scan_cache()
+        self.assertIn(foreign_path, after)
 
     def test_cli_json_no_sessions_and_time_year(self) -> None:
         _write_transcript(

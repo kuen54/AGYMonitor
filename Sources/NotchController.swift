@@ -148,21 +148,17 @@ final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
 // MARK: - NotchInstance (everything that is per-display)
 
 final class NotchInstance {
+    let displayId: CGDirectDisplayID
     let vm = NotchViewModel()
     let panel: NotchPanel
-    let screen: NotchScreen
-    var state: NotchState
+    var screen: NotchScreen
     var openWork: DispatchWorkItem?
     var closeWork: DispatchWorkItem?
-    var lastPointerSample: NotchPointerSample? = nil
 
-    init(panel: NotchPanel, screen: NotchScreen, isFullscreen: Bool = false) {
+    init(displayId: CGDirectDisplayID, panel: NotchPanel, screen: NotchScreen) {
+        self.displayId = displayId
         self.panel = panel
         self.screen = screen
-        self.state = NotchState(
-            phase: isFullscreen ? .hidden : .closedPill,
-            isFullscreen: isFullscreen
-        )
     }
 }
 
@@ -178,7 +174,7 @@ final class NotchController: NSObject {
     private let hoverShoulder: CGFloat = 84
     private let revealEdge: CGFloat = 8
 
-    private var isStarted = false
+    private var coordinator = NotchCoordinatorState()
     private var instances: [CGDirectDisplayID: NotchInstance] = [:]
 
     private var globalMonitor: Any?
@@ -204,8 +200,7 @@ final class NotchController: NSObject {
     // MARK: Lifecycle
 
     func start() {
-        guard !isStarted else { return }
-        isStarted = true
+        guard NotchCoordinatorMachine.start(&coordinator) else { return }
         NotificationCenter.default.addObserver(
             self, selector: #selector(screenParametersChanged),
             name: NSApplication.didChangeScreenParametersNotification, object: nil)
@@ -217,29 +212,36 @@ final class NotchController: NSObject {
             name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
         installMouseMonitor()
         installSessionWingObserver()
-        rebuild()
+        reconcileScreens()
     }
 
     func stop() {
-        guard isStarted || !instances.isEmpty || globalMonitor != nil || localMonitor != nil else { return }
-        isStarted = false
+        let removedIds = NotchCoordinatorMachine.stop(&coordinator)
+        guard !removedIds.isEmpty || !instances.isEmpty || globalMonitor != nil || localMonitor != nil else { return }
         NotificationCenter.default.removeObserver(self)
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         rebuildWork?.cancel(); rebuildWork = nil
         wingTimer?.cancel(); wingTimer = nil
+        wingState = NotchLiveWingState()
         sessionWingObserver?.cancel(); sessionWingObserver = nil
         removeMouseMonitor()
         teardownAll()
     }
 
     @objc private func screenParametersChanged() {
+        guard let gen = NotchCoordinatorMachine.scheduleRebuild(&coordinator) else { return }
         rebuildWork?.cancel()
-        let work = DispatchWorkItem { [weak self] in self?.rebuild() }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self,
+                  NotchCoordinatorMachine.isCurrentRebuild(self.coordinator, generation: gen) else { return }
+            self.reconcileScreens()
+        }
         rebuildWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + NotchTiming.rebuildDebounce, execute: work)
     }
 
     @objc private func activeSpaceChanged() {
+        guard coordinator.isStarted else { return }
         let mouse = NSEvent.mouseLocation
         for inst in instances.values {
             let isFS = inst.screen.screen.displayUUID
@@ -249,24 +251,62 @@ final class NotchController: NSObject {
         }
     }
 
-    private func rebuild() {
-        teardownAll()
+    private func reconcileScreens() {
+        guard coordinator.isStarted else { return }
         let resolved = resolveNotchScreens(syntheticWidth: syntheticWidth)
-        guard !resolved.isEmpty else { return }
-
+        let mainDisplayId = NSScreen.main?.displayID
+        var byId: [CGDirectDisplayID: NotchScreen] = [:]
+        var descriptors: [NotchDisplayDescriptor] = []
         for ns in resolved {
             guard let id = ns.screen.displayID else { continue }
-            let frame = panelFrame(for: ns)
-            let panel = NotchPanel(contentRect: frame)
+            byId[id] = ns
             let isFS = ns.screen.displayUUID
                 .map { FullscreenDetector.shared.isFullscreen(displayUUID: $0) } ?? false
-            let inst = NotchInstance(panel: panel, screen: ns, isFullscreen: isFS)
+            descriptors.append(NotchDisplayDescriptor(
+                displayId: id,
+                isBuiltin: ns.screen.isBuiltin,
+                isMain: id == mainDisplayId,
+                isFullscreen: isFS
+            ))
+        }
+
+        let plan = NotchCoordinatorMachine.reconcileScreens(&coordinator, descriptors: descriptors)
+
+        for id in plan.removed {
+            if let inst = instances.removeValue(forKey: id) {
+                teardownInstance(inst)
+            }
+        }
+
+        // Preserve live open/modal state on surviving displays; only refresh frame & notch metrics.
+        for id in plan.kept {
+            guard let inst = instances[id], let ns = byId[id] else { continue }
+            inst.screen = ns
+            let frame = panelFrame(for: ns)
+            if inst.panel.frame != frame {
+                inst.panel.setFrame(frame, display: true)
+            }
+            if inst.vm.closedNotchSize != ns.closedNotchSize {
+                inst.vm.closedNotchSize = ns.closedNotchSize
+            }
+            if inst.vm.isSynthetic != ns.isSynthetic {
+                inst.vm.isSynthetic = ns.isSynthetic
+            }
+            if var st = coordinator.displays[id] {
+                st.lastPointerSample = nil
+                coordinator.displays[id] = st
+            }
+        }
+
+        for desc in plan.added {
+            guard let ns = byId[desc.displayId] else { continue }
+            let frame = panelFrame(for: ns)
+            let panel = NotchPanel(contentRect: frame)
+            let inst = NotchInstance(displayId: desc.displayId, panel: panel, screen: ns)
             inst.vm.closedNotchSize = ns.closedNotchSize
             inst.vm.isSynthetic = ns.isSynthetic
-            inst.vm.isOpen = inst.state.isOpen
+            inst.vm.isOpen = coordinator.displays[desc.displayId]?.isOpen ?? false
             inst.vm.activeWing = wingState.activeWing
-            inst.vm.anyBusy = store.sessionStore.anyBusy
-            inst.vm.anyWaiting = store.sessionStore.anyWaiting
             inst.vm.onAcquireModalLock = { [weak self, weak inst] lock in
                 guard let self = self, let inst = inst else { return }
                 self.dispatch(inst, event: .modalLockAcquired(lock))
@@ -283,8 +323,13 @@ final class NotchController: NSObject {
                 guard let self = self, let inst = inst else { return }
                 self.dispatch(inst, event: .explicitClose)
             }
-            inst.vm.onContentSizeChanged = { [weak self] in
-                self?.applyPanelState()
+            inst.vm.onGeometryChanged = { [weak self, weak inst] in
+                guard let self = self, let inst = inst else { return }
+                if var st = self.coordinator.displays[inst.displayId] {
+                    st.lastPointerSample = nil
+                    self.coordinator.displays[inst.displayId] = st
+                }
+                self.applyPanelState()
             }
 
             let host = FirstMouseHostingView(rootView: NotchRootView(store: store, sessionStore: store.sessionStore, vm: inst.vm, onQuit: onQuit))
@@ -298,19 +343,29 @@ final class NotchController: NSObject {
             panel.orderFrontRegardless()
             panel.enableFullscreenFloat()
 
-            instances[id] = inst
+            instances[desc.displayId] = inst
         }
+
+        syncSessionMonitorActive()
         applyPanelState()
+    }
+
+    private func teardownInstance(_ inst: NotchInstance) {
+        inst.vm.onGeometryChanged = nil
+        inst.vm.onAcquireModalLock = nil
+        inst.vm.onReleaseModalLock = nil
+        inst.vm.onTapWing = nil
+        inst.vm.onRequestClose = nil
+        inst.openWork?.cancel(); inst.openWork = nil
+        inst.closeWork?.cancel(); inst.closeWork = nil
+        inst.panel.disableFullscreenFloat()
+        inst.panel.orderOut(nil)
+        inst.panel.close()
     }
 
     private func teardownAll() {
         for inst in instances.values {
-            inst.vm.onContentSizeChanged = nil
-            inst.openWork?.cancel()
-            inst.closeWork?.cancel()
-            inst.panel.disableFullscreenFloat()
-            inst.panel.orderOut(nil)
-            inst.panel.close()
+            teardownInstance(inst)
         }
         instances.removeAll()
         syncSessionMonitorActive()
@@ -339,10 +394,15 @@ final class NotchController: NSObject {
     /// Mouse hit-test counting a rect's TOP edge as inside (`minY < y <= maxY`).
     private func hit(_ p: NSPoint, _ r: NSRect) -> Bool { NSMouseInRect(p, r, false) }
 
+    private func state(for inst: NotchInstance) -> NotchState {
+        coordinator.displays[inst.displayId] ?? NotchState()
+    }
+
     private func pointerSample(for inst: NotchInstance,
                                mouse: NSPoint = NSEvent.mouseLocation) -> NotchPointerSample {
+        let currentState = state(for: inst)
         let onScreen = hit(mouse, inst.screen.screen.frame)
-        let inClickableWing = !inst.state.isOpen
+        let inClickableWing = !currentState.isOpen
             && inst.vm.activeWing != nil
             && onScreen
             && hit(mouse, closedWingRect(inst))
@@ -359,10 +419,29 @@ final class NotchController: NSObject {
     private func dispatch(_ inst: NotchInstance, event: NotchEvent,
                           pointer: NotchPointerSample? = nil,
                           mouse: NSPoint = NSEvent.mouseLocation) {
-        let effects = NotchMachine.reduce(&inst.state, event: event)
-        if inst.vm.isOpen != inst.state.isOpen {
-            inst.vm.isOpen = inst.state.isOpen
+        guard coordinator.isStarted, var currentState = coordinator.displays[inst.displayId] else { return }
+        let wasOpen = currentState.isOpen
+        let effects = NotchMachine.reduce(&currentState, event: event)
+        coordinator.displays[inst.displayId] = currentState
+        if effects.isEmpty { return }
+
+        if inst.vm.isOpen != currentState.isOpen {
+            inst.vm.isOpen = currentState.isOpen
         }
+
+        // Single-open exclusivity across displays: opening Display B closes Display A.
+        if !wasOpen && currentState.isOpen {
+            let others = NotchCoordinatorMachine.displaysToCloseForExclusivity(
+                coordinator,
+                openingDisplayId: inst.displayId
+            )
+            for otherId in others {
+                if let otherInst = instances[otherId] {
+                    dispatch(otherInst, event: .explicitClose, mouse: mouse)
+                }
+            }
+        }
+
         let sample = pointer ?? pointerSample(for: inst, mouse: mouse)
         for effect in effects {
             switch effect {
@@ -389,7 +468,7 @@ final class NotchController: NSObject {
     }
 
     private func syncSessionMonitorActive() {
-        let anyOpen = instances.values.contains { $0.state.isOpen }
+        let anyOpen = coordinator.anyOpen
         if let onOpenStateChanged = onOpenStateChanged {
             onOpenStateChanged(anyOpen)
         } else {
@@ -410,15 +489,30 @@ final class NotchController: NSObject {
 
     private func primaryInstance() -> NotchInstance? {
         let mouse = NSEvent.mouseLocation
-        if let under = instances.values.first(where: { hit(mouse, $0.screen.screen.frame) }) { return under }
-        if let builtin = instances.values.first(where: { $0.screen.screen.isBuiltin }) { return builtin }
-        if let mainID = NSScreen.main?.displayID, let onMain = instances[mainID] { return onMain }
-        return instances.values.first
+        let mainId = NSScreen.main?.displayID
+        var mouseDisplayId: UInt32? = nil
+        let descriptors: [NotchDisplayDescriptor] = instances.values.map { inst in
+            if hit(mouse, inst.screen.screen.frame) {
+                mouseDisplayId = inst.displayId
+            }
+            return NotchDisplayDescriptor(
+                displayId: inst.displayId,
+                isBuiltin: inst.screen.screen.isBuiltin,
+                isMain: inst.displayId == mainId,
+                isFullscreen: state(for: inst).isFullscreen
+            )
+        }
+        guard let chosenId = NotchCoordinatorMachine.selectPrimaryDisplay(
+            descriptors: descriptors,
+            mouseDisplayId: mouseDisplayId
+        ) else { return nil }
+        return instances[chosenId]
     }
 
     // MARK: Mouse monitor
 
     private func installMouseMonitor() {
+        removeMouseMonitor()
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved]) {
             [weak self] _ in self?.handleMouseMoved()
         }
@@ -433,13 +527,10 @@ final class NotchController: NSObject {
     }
 
     private func handleMouseMoved() {
+        guard coordinator.isStarted else { return }
         let mouse = NSEvent.mouseLocation
         for inst in instances.values {
             let sample = pointerSample(for: inst, mouse: mouse)
-            if sample == inst.lastPointerSample {
-                continue
-            }
-            inst.lastPointerSample = sample
             dispatch(inst, event: .pointerMoved(sample), pointer: sample, mouse: mouse)
         }
     }
@@ -447,7 +538,7 @@ final class NotchController: NSObject {
     private func scheduleOpen(_ inst: NotchInstance) {
         guard inst.openWork == nil else { return }
         let work = DispatchWorkItem { [weak self, weak inst] in
-            guard let self = self, let inst = inst else { return }
+            guard let self = self, let inst = inst, self.coordinator.isStarted else { return }
             inst.openWork = nil
             let sample = self.pointerSample(for: inst)
             self.dispatch(inst, event: .openDwellFired(sample), pointer: sample)
@@ -461,7 +552,7 @@ final class NotchController: NSObject {
     private func scheduleClose(_ inst: NotchInstance) {
         guard inst.closeWork == nil else { return }
         let work = DispatchWorkItem { [weak self, weak inst] in
-            guard let self = self, let inst = inst else { return }
+            guard let self = self, let inst = inst, self.coordinator.isStarted else { return }
             inst.closeWork = nil
             let sample = self.pointerSample(for: inst)
             self.dispatch(inst, event: .closeGraceFired(sample), pointer: sample)
@@ -484,7 +575,7 @@ final class NotchController: NSObject {
     /// races with openDwell expanding the whole panel.
     private func hoverRect(_ inst: NotchInstance) -> NSRect {
         let base = hoverRect(inst.screen)
-        guard inst.vm.activeWing != nil, !inst.state.isOpen else { return base }
+        guard inst.vm.activeWing != nil, !state(for: inst).isOpen else { return base }
         let wingMinX = min(base.minX, closedWingRect(inst).minX)
         let rightLimit = inst.screen.screen.frame.midX + inst.screen.closedNotchSize.width / 2 + 8
         let trimmedWidth = max(40, rightLimit - wingMinX)
@@ -493,19 +584,19 @@ final class NotchController: NSObject {
 
     private func closedWingRect(_ inst: NotchInstance) -> NSRect {
         let f = inst.screen.screen.frame
-        let size = inst.vm.contentSize
+        let size = inst.vm.geometry.contentSize(isOpen: false)
         guard size.width > 1, size.height > 1 else { return hoverRect(inst.screen) }
-        let centerX = f.midX + inst.vm.compactGapOffset
-        return NSRect(x: centerX - size.width / 2, y: f.maxY - size.height,
-                      width: size.width, height: size.height)
+        let centerX = f.midX + CGFloat(inst.vm.geometry.compactGapOffset)
+        return NSRect(x: centerX - CGFloat(size.width) / 2, y: f.maxY - CGFloat(size.height),
+                      width: CGFloat(size.width), height: CGFloat(size.height))
     }
 
     private func contentRect(_ inst: NotchInstance) -> NSRect {
         let f = inst.screen.screen.frame
-        let size = inst.vm.contentSize
+        let size = inst.vm.geometry.contentSize(isOpen: true)
         guard size.width > 1, size.height > 1 else { return hoverRect(inst.screen) }
-        return NSRect(x: f.midX - size.width / 2, y: f.maxY - size.height,
-                      width: size.width, height: size.height)
+        return NSRect(x: f.midX - CGFloat(size.width) / 2, y: f.maxY - CGFloat(size.height),
+                      width: CGFloat(size.width), height: CGFloat(size.height))
     }
 
     // MARK: Live Wing State Machine Sync
@@ -524,6 +615,7 @@ final class NotchController: NSObject {
     }
 
     private func syncLiveWing(sessions: [SessionInfo], doneUnseen: Set<String>, labels: [String: String]) {
+        guard coordinator.isStarted else { return }
         let snapshots = sessions.map { s in
             let ws = labels[s.cwd] ?? SessionLogic.basename(s.cwd)
             let badge = SessionSurfaceBadge.from(entrypoint: s.entrypoint, surface: s.surface)?.rawValue
@@ -542,6 +634,7 @@ final class NotchController: NSObject {
     }
 
     private func handleTapWing(sessionId: String) {
+        guard coordinator.isStarted else { return }
         if let match = store.sessionStore.sessions.first(where: { $0.sessionId == sessionId }) {
             store.sessionStore.jump(match)
         }
@@ -556,7 +649,7 @@ final class NotchController: NSObject {
             case .scheduleDoneRetract(let delay):
                 wingTimer?.cancel()
                 let work = DispatchWorkItem { [weak self] in
-                    guard let self = self else { return }
+                    guard let self = self, self.coordinator.isStarted else { return }
                     self.wingTimer = nil
                     let follow = NotchLiveWingMachine.reduce(&self.wingState, event: .doneTimerFired(now: Date()))
                     self.applyWingEffects(follow)
@@ -572,16 +665,16 @@ final class NotchController: NSObject {
     }
 
     private func pushWingStateToViewModels() {
-        let busy = store.sessionStore.anyBusy
-        let waiting = store.sessionStore.anyWaiting
         var changed = false
         for inst in instances.values {
             if inst.vm.activeWing != wingState.activeWing {
                 inst.vm.activeWing = wingState.activeWing
+                if var st = coordinator.displays[inst.displayId] {
+                    st.lastPointerSample = nil
+                    coordinator.displays[inst.displayId] = st
+                }
                 changed = true
             }
-            if inst.vm.anyBusy != busy { inst.vm.anyBusy = busy }
-            if inst.vm.anyWaiting != waiting { inst.vm.anyWaiting = waiting }
         }
         if changed { applyPanelState() }
     }
@@ -589,6 +682,7 @@ final class NotchController: NSObject {
     // MARK: Visibility + passthrough
 
     private func applyPanelState() {
+        guard coordinator.isStarted else { return }
         let mouse = NSEvent.mouseLocation
         for inst in instances.values {
             applyPresentation(inst, pointer: pointerSample(for: inst, mouse: mouse))
@@ -596,7 +690,7 @@ final class NotchController: NSObject {
     }
 
     private func applyPresentation(_ inst: NotchInstance, pointer: NotchPointerSample) {
-        let pres = NotchMachine.panelPresentation(for: inst.state, pointer: pointer)
+        let pres = NotchMachine.panelPresentation(for: state(for: inst), pointer: pointer)
         setVisible(inst, pres.visible)
         if inst.panel.ignoresMouseEvents != pres.ignoresMouseEvents {
             inst.panel.ignoresMouseEvents = pres.ignoresMouseEvents
@@ -607,9 +701,14 @@ final class NotchController: NSObject {
         if inst.vm.isPanelShown != visible {
             inst.vm.isPanelShown = visible
         }
+        let transition = NotchCoordinatorMachine.updateVisibility(
+            &coordinator,
+            displayId: inst.displayId,
+            visible: visible
+        )
+        guard transition.changed else { return }
         let target: CGFloat = visible ? 1 : 0
-        guard abs(inst.panel.alphaValue - target) > 0.001 else { return }
-        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+        if !transition.shouldAnimate || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             inst.panel.alphaValue = target
         } else {
             NSAnimationContext.runAnimationGroup { ctx in

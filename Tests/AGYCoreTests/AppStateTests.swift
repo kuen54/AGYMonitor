@@ -93,4 +93,17 @@ struct AppStateTests {
         #expect(!state.isHotkeyRegistered)
         #expect(!state.isNotchControllerRunning)
     }
+
+    @Test("hotkeyRegistrationFailed keeps isHotkeyRegistered truthful so future toggles retry cleanly")
+    func hotkeyFailureSync() {
+        var state = AppPresentationState(surface: .menubar)
+        #expect(AppPresentationMachine.reduce(&state, event: .hotkeyPreferenceChanged(true)) == [.registerHotkey])
+        #expect(state.isHotkeyRegistered)
+
+        #expect(AppPresentationMachine.reduce(&state, event: .hotkeyRegistrationFailed).isEmpty)
+        #expect(!state.isHotkeyRegistered)
+
+        // Re-enabling retries registration instead of silently thinking it's already registered
+        #expect(AppPresentationMachine.reduce(&state, event: .hotkeyPreferenceChanged(true)) == [.registerHotkey])
+    }
 }

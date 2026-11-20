@@ -236,3 +236,252 @@ public struct TabTransitionState<ID: Hashable & Sendable>: Equatable, Sendable {
         return direction
     }
 }
+
+// MARK: - 6. Sessions Keyboard Router (Fixes macOS [.numericPad, .function] Arrow Bug)
+
+public struct SessionKeyModifiers: OptionSet, Equatable, Sendable {
+    public let rawValue: UInt
+
+    public init(rawValue: UInt) { self.rawValue = rawValue }
+
+    public static let command    = SessionKeyModifiers(rawValue: 1 << 0)
+    public static let option     = SessionKeyModifiers(rawValue: 1 << 1)
+    public static let control    = SessionKeyModifiers(rawValue: 1 << 2)
+    public static let shift      = SessionKeyModifiers(rawValue: 1 << 3)
+    public static let numericPad = SessionKeyModifiers(rawValue: 1 << 4)
+    public static let function   = SessionKeyModifiers(rawValue: 1 << 5)
+
+    /// AppKit sets BOTH `.numericPad` and `.function` simultaneously on macOS arrow keys.
+    public static let arrowKeyBenign: SessionKeyModifiers = [.numericPad, .function]
+}
+
+public enum SessionKeyAction: Equatable, Sendable {
+    case moveSelection(delta: Int)
+    case activateSelected
+    case ignore
+}
+
+/// Pure keyboard-event router for `SessionTabView`.
+/// Gates strictly on `isPanelVisible && isSessionTabActive` so an outgoing tab during
+/// slide-out transitions or a hidden `NSPopover` can never hijack `Return` or arrow keys.
+public enum SessionKeyRouter {
+    public static let keyCodeReturn: UInt16 = 36
+    public static let keyCodeEnter: UInt16 = 76
+    public static let keyCodeDownArrow: UInt16 = 125
+    public static let keyCodeUpArrow: UInt16 = 126
+
+    public static func route(
+        keyCode: UInt16,
+        modifiers: SessionKeyModifiers,
+        isPanelVisible: Bool,
+        isSessionTabActive: Bool
+    ) -> SessionKeyAction {
+        guard isPanelVisible, isSessionTabActive else { return .ignore }
+        guard modifiers.subtracting(.arrowKeyBenign).isEmpty else { return .ignore }
+        switch keyCode {
+        case keyCodeDownArrow:
+            return .moveSelection(delta: 1)
+        case keyCodeUpArrow:
+            return .moveSelection(delta: -1)
+        case keyCodeReturn, keyCodeEnter:
+            return .activateSelected
+        default:
+            return .ignore
+        }
+    }
+}
+
+// MARK: - 7. Mutually Exclusive Dual-Axis Token Flow Focus State
+
+/// Prevents the illegal simultaneous `(focusedModelId, hoveredChannel)` state in
+/// `FoldedTokenFlowChart` so header, left column, canvas, and right column ALWAYS agree.
+public enum TokenFlowFocus<Channel: Hashable & Sendable>: Equatable, Sendable {
+    case none
+    case model(String)
+    case channel(Channel)
+
+    public var modelId: String? {
+        if case .model(let id) = self { return id }
+        return nil
+    }
+
+    public var channel: Channel? {
+        if case .channel(let ch) = self { return ch }
+        return nil
+    }
+
+    public mutating func setModel(_ id: String?) {
+        if let id = id {
+            self = .model(id)
+        } else if case .model = self {
+            self = .none
+        }
+    }
+
+    public mutating func setChannel(_ ch: Channel?) {
+        if let ch = ch {
+            self = .channel(ch)
+        } else if case .channel = self {
+            self = .none
+        }
+    }
+
+    public mutating func reconcile(validModelIds: Set<String>) {
+        if case .model(let id) = self, !validModelIds.contains(id) {
+            self = .none
+        }
+    }
+
+    public mutating func reset() {
+        self = .none
+    }
+}
+
+// MARK: - 8. Scope-Bound Chart Hover / Inspection State
+
+/// Generic scope-bound hover/inspection reducer for time/cost/token charts.
+/// Whenever the chart's logical `scope` changes (e.g. `⌘[`/`⌘]` month/week/year stepping
+/// or `⌘I` visual-mode switch), `target` resets atomically so stale readouts like
+/// `"02/31 NO DATA"` or ghost week arcs can never persist across scopes.
+public struct ChartInspectionState<Scope: Equatable & Sendable, Target: Equatable & Sendable>: Equatable, Sendable {
+    public private(set) var scope: Scope
+    public private(set) var target: Target?
+
+    public init(scope: Scope, target: Target? = nil) {
+        self.scope = scope
+        self.target = target
+    }
+
+    @discardableResult
+    public mutating func syncScope(_ nextScope: Scope) -> Bool {
+        guard nextScope != scope else { return false }
+        scope = nextScope
+        target = nil
+        return true
+    }
+
+    public mutating func setTarget(_ next: Target?) {
+        target = next
+    }
+
+    public mutating func reset() {
+        target = nil
+    }
+}
+
+// MARK: - 9. Keyed Panel Height Measurement State Machine
+
+public enum PanelHeightPhase: Equatable, Sendable {
+    case unmeasured
+    case measured
+}
+
+public struct PanelHeightUpdate: Equatable, Sendable {
+    public let height: Double
+    public let animate: Bool
+
+    public init(height: Double, animate: Bool) {
+        self.height = height
+        self.animate = animate
+    }
+}
+
+/// Replaces ad-hoc `PopoverHeightMemory` + `contentHeight` + `hasMeasuredInitialHeight`.
+/// Keyed by composite layout state (tab + visualMode + timeRange + isCurrentMonth) and
+/// ALWAYS transitions `.unmeasured -> .measured` on the first valid measurement `> 1pt`
+/// even when the first measurement matches the initial/remembered height within `0.5pt`.
+public struct PanelHeightState<Key: Hashable & Sendable>: Equatable, Sendable {
+    public private(set) var activeKey: Key
+    public private(set) var currentHeight: Double
+    public private(set) var phase: PanelHeightPhase
+    public private(set) var memory: [Key: Double]
+
+    public init(
+        initialKey: Key,
+        defaultHeight: Double = 460.0,
+        memory: [Key: Double] = [:]
+    ) {
+        self.activeKey = initialKey
+        self.memory = memory
+        self.currentHeight = memory[initialKey] ?? defaultHeight
+        self.phase = .unmeasured
+    }
+
+    public mutating func recordMeasurement(for key: Key, height: Double) -> PanelHeightUpdate? {
+        guard height > 1.0 else { return nil }
+        memory[key] = height
+        guard key == activeKey else { return nil }
+        let wasMeasured = (phase == .measured)
+        phase = .measured
+        guard abs(height - currentHeight) > 0.5 else { return nil }
+        currentHeight = height
+        return PanelHeightUpdate(height: height, animate: wasMeasured)
+    }
+
+    public mutating func switchKey(to nextKey: Key) -> PanelHeightUpdate? {
+        activeKey = nextKey
+        guard let remembered = memory[nextKey], abs(remembered - currentHeight) > 0.5 else {
+            return nil
+        }
+        currentHeight = remembered
+        return PanelHeightUpdate(height: remembered, animate: phase == .measured)
+    }
+}
+
+// MARK: - 10. Generic Pure Bounded LRU Cache
+
+/// Unified pure value-type LRU cache replacing 5 duplicated ad-hoc `entries + order`
+/// caches across Views/Instruments (and fixing the FIFO hit bug in `PolarWeekArcsCache`).
+public struct BoundedLRUState<Key: Hashable, Value> {
+    public let maxEntries: Int
+    private var entries: [Key: Value] = [:]
+    private var order: [Key] = []
+
+    public init(maxEntries: Int) {
+        self.maxEntries = max(1, maxEntries)
+    }
+
+    public var count: Int { entries.count }
+
+    /// Look up `key` and promote it to most-recently-used on hit.
+    public mutating func get(_ key: Key) -> Value? {
+        guard let hit = entries[key] else { return nil }
+        if let idx = order.firstIndex(of: key), idx != order.count - 1 {
+            order.remove(at: idx)
+            order.append(key)
+        }
+        return hit
+    }
+
+    /// Insert or update `key`, promoting it to MRU and evicting LRU entries past `maxEntries`.
+    public mutating func set(_ value: Value, for key: Key) {
+        entries[key] = value
+        if let idx = order.firstIndex(of: key) {
+            order.remove(at: idx)
+        }
+        order.append(key)
+        while order.count > maxEntries {
+            let evicted = order.removeFirst()
+            entries.removeValue(forKey: evicted)
+        }
+    }
+
+    public mutating func removeAll() {
+        entries.removeAll()
+        order.removeAll()
+    }
+}
+
+// MARK: - 11. Unified Telemetry Animation Gate
+
+/// Single canonical 0 Hz idle / Reduce Motion / static-render animation gate.
+public enum TelemetryAnimationGate {
+    public static func shouldAnimate(
+        active: Bool = true,
+        panelVisible: Bool,
+        reduceMotion: Bool,
+        staticRender: Bool
+    ) -> Bool {
+        active && panelVisible && !reduceMotion && !staticRender
+    }
+}

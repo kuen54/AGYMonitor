@@ -11,26 +11,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var store = UsageStore()
     private var refreshTimer: Timer?
     private var cancellable: AnyCancellable?
-    // FSEvents watcher on Antigravity brain directories (~/.gemini/{antigravity-cli,
-    // antigravity,antigravity-ide}/brain) — push-based refresh so new usage shows up
-    // within seconds instead of up to 30 min. The 30-min timer stays as a fallback
-    // (cross-midnight repaint with zero file changes still needs it; the fingerprint
-    // includes dayKey so that timer tick really scans).
+    // Brain FSEvents watcher + 30-min periodic timer + sleep/wake + 120s debounce floor,
+    // governed by pure `BrainWatcherLifecycleMachine` (Core_MonitorState.swift).
+    private var brainWatcher = BrainWatcherLifecycleState()
     private var fsEventStream: FSEventStreamRef?
-    private var lastBrainWatchAttempt: Date?
-    // Debounce (main thread only — FSEvents callbacks are delivered on the main
-    // queue via FSEventStreamSetDispatchQueue): each burst of events reschedules
-    // this work item so the refresh fires only after a quiet period.
     private var fsRefreshDebounce: DispatchWorkItem?
-    // Main thread only. Enforces a minimum gap across ALL refresh sources (FSEvents,
-    // ⌘R, timer, wake, popover open).
-    private var fsThrottle = FSEventsThrottleState()
+    private var wakeRefreshWork: DispatchWorkItem?
     // Menu-bar content is a SwiftUI hosting view inside the status button (so the
     // Antigravity mark can levitate/pulse while a session is busy and carry the attention dot —
     // the same behavior as the notch and popover header). `menuBarAnchor` coordinates
     // value/width freezing while the popover is open and flushing on close.
     private let menuBarModel = MenuBarModel(text: "…")
-    private var menuBarHostingView: NSView?
     private var menuBarAnchor = MenuBarAnchorState(initialText: "…", initialWidth: 40, isMenuBarVisible: true)
 
     // App presentation state machine: single source of truth for display surface
@@ -42,16 +33,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var hotkeyCancellable: AnyCancellable?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Initialize presentation state synchronously from persisted preferences so zero
+        // launch-window surface misrouting can occur before Combine sinks fire.
+        let initialSurface: AppDisplaySurface = (store.displayMode == .notch) ? .notch : .menubar
+        presentation = AppPresentationState(
+            surface: initialSurface,
+            hotkeyEnabled: store.globalHotkeyEnabled
+        )
+        menuBarModel.isVisible = presentation.isMenuBarLogoActive
+
         // Status bar item. Length is managed manually (updateMenuBarWidth) to track the
         // SwiftUI content's measured width — variableLength can't size to a hosted view.
         statusItem = NSStatusBar.system.statusItem(withLength: CGFloat(menuBarAnchor.appliedWidth))
         statusItem.autosaveName = AGYLocator.appName
-        // Initial visibility set synchronously to avoid a launch-time flash of the
-        // icon in notch mode; the displayMode sink below remains the single owner.
-        statusItem.isVisible = (store.displayMode == .menubar)
-        menuBarAnchor.setMenuBarVisible(store.displayMode == .menubar)
+        statusItem.isVisible = presentation.isStatusItemVisible
+        menuBarAnchor.setMenuBarVisible(presentation.isStatusItemVisible)
         store.onRefreshTriggered = { [weak self] date in
-            self?.fsThrottle.noteRefreshTriggered(at: date)
+            self?.dispatchBrainWatcher(.refreshTriggered(at: date))
         }
         if let button = statusItem.button {
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
@@ -74,7 +72,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 hosting.topAnchor.constraint(equalTo: button.topAnchor),
                 hosting.bottomAnchor.constraint(equalTo: button.bottomAnchor),
             ])
-            menuBarHostingView = hosting
         }
 
         // Popover with SwiftUI content
@@ -123,14 +120,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         // popover is on screen (popoverDidShow/Close).
         store.startSessionMonitoring()
 
-        // Auto-refresh every 30 minutes
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 30 * 60, repeats: true) { [weak self] _ in
-            self?.retryBrainWatcherIfNeeded()
-            self?.store.refresh()
-        }
-
-        // FSEvents: refresh shortly after transcript JSONL files change
-        startBrainWatcher()
+        // Brain FSEvents watcher + 30-min periodic fallback + sleep/wake refresh
+        dispatchBrainWatcher(.start(candidatePaths: candidateBrainWatchPaths(), now: Date()))
 
         // Refresh on system wake
         NSWorkspace.shared.notificationCenter.addObserver(
@@ -210,7 +201,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 if let button = statusItem.button, !popover.isShown {
                     popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
                     popover.contentViewController?.view.window?.makeKey()
-                    retryBrainWatcherIfNeeded()
+                    dispatchBrainWatcher(.reconcileWatchPaths(candidatePaths: candidateBrainWatchPaths(), now: Date()))
                     store.refresh()
                 }
             case .closePopover:
@@ -225,12 +216,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 notchController?.toggle()
             case .syncPanelVisibility(let visible):
                 if !visible {
-                    Task { @MainActor in PointingCursorCoordinator.shared.releaseAll() }
+                    MainActor.assumeIsolated {
+                        PointingCursorCoordinator.shared.releaseAll()
+                    }
+                } else {
+                    dispatchBrainWatcher(.reconcileWatchPaths(candidatePaths: candidateBrainWatchPaths(), now: Date()))
                 }
                 store.setSessionMonitorActive(visible)
             case .registerHotkey:
-                hotKeyManager.register { [weak self] in
+                let ok = hotKeyManager.register { [weak self] in
                     self?.dispatchPresentation(.globalHotkeyTriggered)
+                }
+                if !ok {
+                    dispatchPresentation(.hotkeyRegistrationFailed)
                 }
             case .unregisterHotkey:
                 hotKeyManager.unregister()
@@ -243,7 +241,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     /// popover left); popoverDidClose restores appliedWidth.
     private func updateMenuBarWidth(_ w: CGFloat) {
         menuBarAnchor.updateMeasuredWidth(Double(w))
-        guard presentation.isStatusItemVisible, !popover.isShown else { return }
+        guard presentation.isStatusItemVisible, !menuBarAnchor.isPopoverShown, !popover.isShown else { return }
         statusItem.length = CGFloat(menuBarAnchor.appliedWidth)
     }
 
@@ -278,22 +276,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         dispatchPresentation(.popoverShown)
     }
 
-    // MARK: - FSEvents watcher (Antigravity brain directories)
+    // MARK: - Brain Watcher & Refresh Scheduler (backed by BrainWatcherLifecycleMachine)
 
-    private func retryBrainWatcherIfNeeded() {
-        if SessionPollCadence.shouldRetryFSWatcher(
-            started: true,
-            fsHealthy: fsEventStream != nil,
-            now: Date(),
-            lastAttemptAt: lastBrainWatchAttempt
-        ) {
-            startBrainWatcher()
-        }
-    }
-
-    private func startBrainWatcher() {
-        guard fsEventStream == nil else { return }
-        lastBrainWatchAttempt = Date()
+    private func candidateBrainWatchPaths() -> [String] {
         let home = NSHomeDirectory()
         let geminiRoot = AGYLocator.geminiRoot(home: home)
         let candidateBrains = AGYLocator.brainDirs(home: home)
@@ -321,7 +306,75 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 watchPaths.append(geminiRoot)
             }
         }
-        guard !watchPaths.isEmpty else { return }
+        return Array(Set(watchPaths)).sorted()
+    }
+
+    private func dispatchBrainWatcher(_ event: BrainWatcherLifecycleEvent) {
+        let effects = BrainWatcherLifecycleMachine.reduce(&brainWatcher, event: event)
+        for effect in effects {
+            switch effect {
+            case .startPeriodicTimer:
+                refreshTimer?.invalidate()
+                refreshTimer = Timer.scheduledTimer(withTimeInterval: 30 * 60, repeats: true) { [weak self] _ in
+                    guard let self = self else { return }
+                    self.dispatchBrainWatcher(.periodicTimerFired(
+                        candidatePaths: self.candidateBrainWatchPaths(),
+                        now: Date()
+                    ))
+                }
+            case .stopPeriodicTimer:
+                refreshTimer?.invalidate()
+                refreshTimer = nil
+            case .startFSWatcher(let paths):
+                startBrainWatcher(paths: paths)
+            case .stopFSWatcher:
+                stopBrainWatcher()
+            case .scheduleDebounce(let generation, let delay):
+                fsRefreshDebounce?.cancel()
+                let item = DispatchWorkItem { [weak self] in
+                    self?.dispatchBrainWatcher(.debounceFired(generation: generation))
+                }
+                fsRefreshDebounce = item
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+            case .cancelDebounce:
+                fsRefreshDebounce?.cancel()
+                fsRefreshDebounce = nil
+            case .scheduleWakeRefresh(let generation, let delay):
+                wakeRefreshWork?.cancel()
+                let item = DispatchWorkItem { [weak self] in
+                    guard let self = self else { return }
+                    self.dispatchBrainWatcher(.wakeTimerFired(
+                        generation: generation,
+                        candidatePaths: self.candidateBrainWatchPaths(),
+                        now: Date()
+                    ))
+                }
+                wakeRefreshWork = item
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+            case .cancelWakeRefresh:
+                wakeRefreshWork?.cancel()
+                wakeRefreshWork = nil
+            case .triggerRefresh:
+                store.refresh()
+            }
+        }
+    }
+
+    private func stopBrainWatcher() {
+        if let stream = fsEventStream {
+            FSEventStreamStop(stream)
+            FSEventStreamInvalidate(stream)
+            FSEventStreamRelease(stream)
+            fsEventStream = nil
+        }
+    }
+
+    private func startBrainWatcher(paths watchPaths: [String]) {
+        stopBrainWatcher()
+        guard !watchPaths.isEmpty else {
+            dispatchBrainWatcher(.fsWatcherResult(watchedPaths: [], at: Date()))
+            return
+        }
 
         var context = FSEventStreamContext(
             version: 0,
@@ -330,13 +383,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             // stream before the process goes away.
             info: Unmanaged.passUnretained(self).toOpaque(),
             retain: nil, release: nil, copyDescription: nil)
-        // Directory-level events suffice (we only need "something changed";
-        // FSEvents watches recursively by default — no FileEvents flag needed).
-        // latency 5s lets the kernel coalesce write bursts before calling us.
         let callback: FSEventStreamCallback = { _, info, _, _, _, _ in
             guard let info = info else { return }
             let delegate = Unmanaged<AppDelegate>.fromOpaque(info).takeUnretainedValue()
-            delegate.scheduleDebouncedRefresh()
+            delegate.dispatchBrainWatcher(.fsEventReceived(now: Date()))
         }
         guard let stream = FSEventStreamCreate(
             kCFAllocatorDefault,
@@ -346,52 +396,36 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
             5.0,  // seconds of kernel-side coalescing
             FSEventStreamCreateFlags(kFSEventStreamCreateFlagNone)
-        ) else { return }
+        ) else {
+            dispatchBrainWatcher(.fsWatcherResult(watchedPaths: [], at: Date()))
+            return
+        }
         fsEventStream = stream
-        // Deliver callbacks on the main queue: scheduleDebouncedRefresh touches
-        // main-thread-only state (fsRefreshDebounce) and store.refresh() expects main.
         FSEventStreamSetDispatchQueue(stream, DispatchQueue.main)
-        if !FSEventStreamStart(stream) {
-            // Start failure leaves a dead stream — clean up and fall back to
-            // the 30-min timer (which keeps working regardless).
+        if FSEventStreamStart(stream) {
+            dispatchBrainWatcher(.fsWatcherResult(watchedPaths: watchPaths, at: Date()))
+        } else {
             NSLog("AGYMonitor: FSEventStreamStart failed; falling back to timer-only refresh")
             FSEventStreamInvalidate(stream)
             FSEventStreamRelease(stream)
             fsEventStream = nil
+            dispatchBrainWatcher(.fsWatcherResult(watchedPaths: [], at: Date()))
         }
-    }
-
-    /// Main thread only. Trailing 3s debounce + 120s minimum gap enforced via `fsThrottle`
-    /// across ALL refresh sources (⌘R, timer, wake, popover open, and FSEvents).
-    private func scheduleDebouncedRefresh() {
-        fsRefreshDebounce?.cancel()
-        let item = DispatchWorkItem { [weak self] in
-            guard let self = self else { return }
-            self.store.refresh()
-        }
-        fsRefreshDebounce = item
-        let delay = fsThrottle.delayForFSEvent(at: Date())
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        cancellable?.cancel(); cancellable = nil
+        displayModeCancellable?.cancel(); displayModeCancellable = nil
+        hotkeyCancellable?.cancel(); hotkeyCancellable = nil
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+        DistributedNotificationCenter.default().removeObserver(self)
         dispatchPresentation(.appWillTerminate)
+        dispatchBrainWatcher(.terminate)
         store.stopSessionMonitoring()
-        fsRefreshDebounce?.cancel()
-        fsRefreshDebounce = nil
-        if let stream = fsEventStream {
-            FSEventStreamStop(stream)
-            FSEventStreamInvalidate(stream)
-            FSEventStreamRelease(stream)
-            fsEventStream = nil
-        }
     }
 
     @objc private func onWake(_ note: Notification) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
-            self?.retryBrainWatcherIfNeeded()
-            self?.store.refresh()
-        }
+        dispatchBrainWatcher(.wakeReceived)
     }
 
     @objc private func handleStatusItemClick() {
@@ -402,7 +436,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     private func showStatusContextMenu(anchorButton button: NSStatusBarButton) {
-        if popover.isShown { popover.performClose(nil) }
         let loc = Localizer(language: store.language)
         let menu = NSMenu()
 

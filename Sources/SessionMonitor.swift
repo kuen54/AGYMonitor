@@ -79,6 +79,9 @@ final class SessionMonitor {
     private var fsCoalesceWork: DispatchWorkItem?
     private var pollTimer: DispatchSourceTimer?
     private var lifecycle = SessionMonitorLifecycleState()
+    private let runGenLock = NSLock()
+    private var activeRunGeneration: Int = 0
+    private var isMonitorRunning: Bool = false
 
     // Queue-confined caches
     private var lastScan: SessionScan?
@@ -95,6 +98,7 @@ final class SessionMonitor {
     private var transcriptCache: [String: TranscriptCacheEntry] = [:]
 
     private struct AnnotationCacheEntry {
+        let path: String
         let mtime: TimeInterval
         let title: String?
     }
@@ -132,8 +136,7 @@ final class SessionMonitor {
     private var terminalInfoCache: [String: (bundleId: String?, name: String?)] = [:]
 
     // Done-unseen state (busy/waiting -> idle transition tracker)
-    private var prevStatuses: [String: SessionStatus] = [:]
-    private var doneUnseen: [String: Double] = [:]
+    private var doneUnseenState = DoneUnseenState()
 
     init(sessionsDir: String? = nil, projectsDir: URL? = nil,
          onChange: @escaping (SessionScan) -> Void) {
@@ -149,6 +152,29 @@ final class SessionMonitor {
             ?? (projectsDir != nil
                 ? (self.cliRootDir as NSString).appendingPathComponent("presence")
                 : AGYLocator.presenceDir(home: home))
+    }
+
+    deinit {
+        fsCoalesceWork?.cancel()
+        pollTimer?.cancel()
+        if let s = fsStream {
+            FSEventStreamStop(s)
+            FSEventStreamInvalidate(s)
+            FSEventStreamRelease(s)
+        }
+    }
+
+    private func syncPublishedLifecycleFlag() {
+        runGenLock.lock()
+        activeRunGeneration = lifecycle.runGeneration
+        isMonitorRunning = lifecycle.isStarted
+        runGenLock.unlock()
+    }
+
+    private func canPublishOnMain(generation: Int) -> Bool {
+        runGenLock.lock()
+        defer { runGenLock.unlock() }
+        return isMonitorRunning && activeRunGeneration == generation
     }
 
     // MARK: - Lifecycle (backed by SessionMonitorLifecycleMachine)
@@ -174,17 +200,28 @@ final class SessionMonitor {
     func markSeen(sessionId: String) {
         queue.async { [weak self] in
             guard let self = self,
-                  self.doneUnseen.removeValue(forKey: sessionId) != nil else { return }
+                  self.lifecycle.isStarted,
+                  self.doneUnseenState.markSeen(sessionId) else { return }
             guard var scan = self.lastScan else { return }
-            scan.doneUnseenIds = Set(self.doneUnseen.keys)
-            scan.anyDoneUnseen = !self.doneUnseen.isEmpty
+            scan.doneUnseenIds = self.doneUnseenState.ids
+            scan.anyDoneUnseen = self.doneUnseenState.anyUnseen
             self.lastScan = scan
-            DispatchQueue.main.async { [weak self] in self?.onChange(scan) }
+            let gen = self.lifecycle.runGeneration
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self, self.canPublishOnMain(generation: gen) else { return }
+                self.onChange(scan)
+            }
         }
     }
 
     private func dispatchLifecycle(_ event: SessionMonitorLifecycleEvent) {
+        let wasStarted = lifecycle.isStarted
         let effects = SessionMonitorLifecycleMachine.reduce(&lifecycle, event: event)
+        if wasStarted && !lifecycle.isStarted {
+            doneUnseenState.reset()
+            lastScan = nil
+        }
+        syncPublishedLifecycleFlag()
         for effect in effects {
             switch effect {
             case .startFSWatcher:
@@ -267,13 +304,16 @@ final class SessionMonitor {
         FSEventStreamSetDispatchQueue(stream, queue)
         if FSEventStreamStart(stream) {
             fsStream = stream
-            let healthy = existingDirs.contains(cliRootDir)
-            dispatchLifecycle(.fsWatcherAttempted(healthy: healthy, at: attemptAt))
+            lifecycle.watchedDirs = existingDirs
+            // Any existing Antigravity surface root (CLI, Desktop, or IDE) gives a healthy
+            // watcher — Desktop/IDE-only setups no longer thrash teardown/recreate every 30s.
+            dispatchLifecycle(.fsWatcherAttempted(healthy: !existingDirs.isEmpty, at: attemptAt))
         } else {
             NSLog("AGYMonitor: session FSEventStreamStart failed; poll-only")
             FSEventStreamInvalidate(stream)
             FSEventStreamRelease(stream)
             fsStream = nil
+            lifecycle.watchedDirs = []
             dispatchLifecycle(.fsWatcherAttempted(healthy: false, at: attemptAt))
         }
     }
@@ -309,18 +349,18 @@ final class SessionMonitor {
 
     private func performScan(now: Double = Date().timeIntervalSince1970) {
         guard lifecycle.isStarted else { return }
+        let gen = lifecycle.runGeneration
         var scan = computeScan(now: now)
-        let stepped = SessionLogic.stepDoneUnseen(
-            prev: prevStatuses, current: scan.sessions,
-            doneUnseen: doneUnseen, seenAll: false, now: now)
-        prevStatuses = stepped.prev
-        doneUnseen = stepped.doneUnseen
-        scan.doneUnseenIds = Set(doneUnseen.keys)
-        scan.anyDoneUnseen = !doneUnseen.isEmpty
+        doneUnseenState.step(sessions: scan.sessions, now: now)
+        scan.doneUnseenIds = doneUnseenState.ids
+        scan.anyDoneUnseen = doneUnseenState.anyUnseen
 
         if scan != lastScan {
             lastScan = scan
-            DispatchQueue.main.async { [weak self] in self?.onChange(scan) }
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self, self.canPublishOnMain(generation: gen) else { return }
+                self.onChange(scan)
+            }
         }
         dispatchLifecycle(.scanCompleted(liveCount: scan.sessions.count))
     }
@@ -688,6 +728,8 @@ final class SessionMonitor {
               let attrs = try? fm.attributesOfItem(atPath: path),
               let mtime = attrs[.modificationDate] as? Date,
               let size = attrs[.size] as? NSNumber else {
+            cachedJSONStamp = ""
+            cachedJSONRows.removeAll()
             return [:]
         }
         let stamp = "\(mtime.timeIntervalSinceReferenceDate)|\(size.int64Value)"
@@ -726,7 +768,11 @@ final class SessionMonitor {
         let dbPath = usesCustomProjectsDir
             ? (cliRootDir as NSString).appendingPathComponent("conversation_summaries.db")
             : AGYLocator.conversationSummariesDBPath(home: homeDir)
-        guard fm.fileExists(atPath: dbPath) else { return [:] }
+        guard fm.fileExists(atPath: dbPath) else {
+            cachedDBStamp = ""
+            cachedDBRows.removeAll()
+            return [:]
+        }
 
         let dbAttrs = try? fm.attributesOfItem(atPath: dbPath)
         let dbMtime = (dbAttrs?[.modificationDate] as? Date)?.timeIntervalSinceReferenceDate ?? 0
@@ -859,22 +905,24 @@ final class SessionMonitor {
 
         let attrs = try? fm.attributesOfItem(atPath: p)
         let size = (attrs?[.size] as? Int) ?? -1
-        let mtime = (attrs?[.modificationDate] as? Date)?.timeIntervalSinceReferenceDate ?? -1
+        // Use 1970 Unix epoch consistently to match `SessionLogic.resolveLiveSessionStatus` (`now`)
+        // and prevent epoch-mismatch cache misses on every 2s poll.
+        let mtime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? -1
 
         if let hit = transcriptCache[sessionId],
            hit.path == p, hit.size == size, hit.mtime == mtime {
             return hit
         }
 
+        // Single bounded tail read (>= 256 KB) produces title, instruction, and tail step status together.
         let sum = AITitleReader.summary(inFileAt: p, needInstruction: true)
-        let snap = AITitleReader.tailSnapshot(inFileAt: p)
         let entry = TranscriptCacheEntry(
             path: p,
             size: size,
-            mtime: snap.fileMtime,
+            mtime: mtime,
             title: sum.title,
             instruction: sum.instruction,
-            tailSummary: snap.summary
+            tailSummary: sum
         )
         transcriptCache[sessionId] = entry
         return entry
@@ -882,18 +930,27 @@ final class SessionMonitor {
 
     private func cachedAnnotationTitle(sessionId: String) -> String? {
         let fm = FileManager.default
-        let path = AGYLocator.annotationPath(home: homeDir, conversationId: sessionId)
-        if fm.fileExists(atPath: path),
-           let mtime = (try? fm.attributesOfItem(atPath: path)[.modificationDate] as? Date)?
-               .timeIntervalSinceReferenceDate {
-            if let hit = annotationCache[sessionId], hit.mtime == mtime {
+        // Check all 3 Antigravity surface annotation paths so Desktop & IDE sessions are stat-cached too.
+        for surface in AGYSurface.allCases {
+            let root = AGYLocator.surfaceRoot(home: homeDir, surface: surface)
+            let path = ((root as NSString).appendingPathComponent("annotations") as NSString)
+                .appendingPathComponent("\(sessionId).pbtxt")
+            guard fm.fileExists(atPath: path),
+                  let mtime = (try? fm.attributesOfItem(atPath: path)[.modificationDate] as? Date)?
+                      .timeIntervalSince1970 else {
+                continue
+            }
+            if let hit = annotationCache[sessionId], hit.path == path, hit.mtime == mtime {
                 return hit.title
             }
-            let title = AITitleReader.annotationTitle(sessionId: sessionId, home: homeDir)
-            annotationCache[sessionId] = AnnotationCacheEntry(mtime: mtime, title: title)
+            let title = (try? String(contentsOfFile: path, encoding: .utf8))
+                .flatMap { TranscriptParse.parseAnnotationTitle($0) }
+                .flatMap { $0.isEmpty ? nil : $0 }
+            annotationCache[sessionId] = AnnotationCacheEntry(path: path, mtime: mtime, title: title)
             return title
         }
-        return AITitleReader.annotationTitle(sessionId: sessionId, home: homeDir)
+        annotationCache.removeValue(forKey: sessionId)
+        return nil
     }
 
     private func cachedSwarmInfo(sessionId: String) -> AITitleReader.SwarmCoordinatorInfo? {

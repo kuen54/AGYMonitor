@@ -54,18 +54,21 @@ final class FullscreenSpace {
         }
         let conn = mainConn()
         let sid = create(conn, 1, 0)
+        guard sid != 0 else {
+            connection = 0; space = 0; addRemove = nil; removeFrom = nil; isAvailable = false; return
+        }
         _ = setLevel(conn, sid, FullscreenSpace.absoluteLevel)
         _ = show(conn, [sid] as CFArray)
         connection = conn; space = sid; addRemove = addRem; removeFrom = remFrom; isAvailable = true
     }
 
     func add(_ window: NSWindow) {
-        guard isAvailable, let addRemove = addRemove else { return }
+        guard isAvailable, window.windowNumber > 0, let addRemove = addRemove else { return }
         _ = addRemove(connection, space, [window.windowNumber] as CFArray, 7)
     }
 
     func remove(_ window: NSWindow) {
-        guard isAvailable, let removeFrom = removeFrom else { return }
+        guard isAvailable, window.windowNumber > 0, let removeFrom = removeFrom else { return }
         _ = removeFrom(connection, [window.windowNumber] as CFArray, [space] as CFArray)
     }
 }

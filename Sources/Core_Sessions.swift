@@ -1068,4 +1068,41 @@ public enum SessionLogic {
         }
         return (curStatus, next)
     }
+
+    // MARK: - WezTerm CLI JSON/TTY Pane Matcher
+
+    /// Pure WezTerm pane matcher (`wezterm cli list --format json`) mirroring Otty & AppleScript.
+    public static func matchWeztermPaneId(devTTY: String, jsonString: String) -> String? {
+        guard let data = jsonString.data(using: .utf8),
+              let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            return nil
+        }
+        let bare = devTTY.replacingOccurrences(of: "/dev/", with: "")
+        let match = rows.first { row in
+            guard let t = row["tty_name"] as? String else { return false }
+            return t == devTTY || t == bare || t.hasSuffix("/\(bare)") || t.hasSuffix(bare)
+        }
+        guard let rawPaneId = match?["pane_id"] else { return nil }
+        return "\(rawPaneId)"
+    }
+}
+
+// MARK: - Latest-Wins Jump Request Gate
+
+/// Monotonic latest-wins generation gate for `SessionJumper`.
+/// Ensures rapid clicks supersede older queued jump requests (especially when an earlier
+/// `osascript` TCC prompt blocked) so stale jumps neither steal focus nor flash stale hints.
+public struct JumpRequestGate: Equatable, Sendable {
+    public private(set) var latestGeneration: Int = 0
+
+    public init() {}
+
+    public mutating func beginRequest() -> Int {
+        latestGeneration += 1
+        return latestGeneration
+    }
+
+    public func isLatest(_ generation: Int) -> Bool {
+        generation == latestGeneration
+    }
 }

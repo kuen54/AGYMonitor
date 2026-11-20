@@ -59,11 +59,6 @@ enum NotchAnimations {
     static let reduced = Animation.linear(duration: 0.12)
 }
 
-enum NotchTiming {
-    static let openDwell:  TimeInterval = 0.18
-    static let closeGrace: TimeInterval = 0.12
-}
-
 // MARK: - Measurement keys
 
 private struct NotchContentSizeKey: PreferenceKey {
@@ -94,19 +89,18 @@ private struct NotchRightWidthKey: PreferenceKey {
 
 final class NotchViewModel: ObservableObject {
     @Published var isOpen: Bool = false
-    @Published var isPanelShown: Bool = true
+    @Published var isPanelShown: Bool = false
     @Published var closedNotchSize: CGSize = .zero
     @Published var isSynthetic: Bool = false
     @Published var activeWing: NotchWingKind? = nil
-    @Published var anyBusy: Bool = false
-    @Published var anyWaiting: Bool = false
 
     /// AppKit geometry readouts consumed only by NotchController — intentionally NOT @Published
     /// so PreferenceKey updates during spring animations never trigger SwiftUI body rebuild storms.
-    var contentSize: CGSize = .zero
-    var compactGapOffset: CGFloat = 0
+    /// Separates closed-pill and expanded-popover dimensions so closing the notch can never feed
+    /// expanded dimensions into `closedWingRect` hit-testing.
+    var geometry = NotchGeometryState()
 
-    var onContentSizeChanged: (() -> Void)?
+    var onGeometryChanged: (() -> Void)?
     var onAcquireModalLock: ((NotchModalLock) -> Void)?
     var onReleaseModalLock: ((NotchModalLock) -> Void)?
     var onTapWing: ((String) -> Void)?
@@ -190,7 +184,7 @@ struct CompactNotchView: View {
             Text(store.menuBarValue)
                 .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
                 .monospacedDigit()
-                .foregroundColor(vm.anyWaiting ? darkTheme.signalAmber : darkTheme.inkPrimary)
+                .foregroundColor(sessionStore.anyWaiting ? darkTheme.signalAmber : darkTheme.inkPrimary)
                 .lineLimit(1)
                 .fixedSize()
                 .padding(.leading, Self.innerPad)
@@ -309,27 +303,35 @@ struct NotchRootView: View {
         .preferredColorScheme(.dark)
         .onPreferenceChange(NotchContentSizeKey.self) { size in
             guard size != .zero else { return }
-            if abs(size.width - vm.contentSize.width) > 0.5 || abs(size.height - vm.contentSize.height) > 0.5 {
-                vm.contentSize = size
-                vm.onContentSizeChanged?()
+            if vm.geometry.updateContentSize(
+                width: Double(size.width),
+                height: Double(size.height),
+                isOpen: vm.isOpen
+            ) {
+                vm.onGeometryChanged?()
             }
         }
         .onPreferenceChange(NotchLeftWidthKey.self) { w in
             if w > 0, abs(w - leftWidth) > 0.5 {
                 leftWidth = w
-                vm.compactGapOffset = compactGapOffset
+                if vm.geometry.updateWingWidths(left: Double(w)) {
+                    vm.onGeometryChanged?()
+                }
             }
         }
         .onPreferenceChange(NotchRightWidthKey.self) { w in
             if w > 0, abs(w - rightWidth) > 0.5 {
                 rightWidth = w
-                vm.compactGapOffset = compactGapOffset
+                if vm.geometry.updateWingWidths(right: Double(w)) {
+                    vm.onGeometryChanged?()
+                }
             }
         }
         .onReceive(NSWorkspace.shared.notificationCenter.publisher(
             for: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification)) { _ in
             reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         }
+        .environment(\.telemetryReduceMotion, reduceMotion)
     }
 
     private var currentAnimation: Animation? {

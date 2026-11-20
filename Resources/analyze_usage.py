@@ -45,7 +45,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import urllib.parse
 import urllib.request
 
-__version__ = "1.5.0"
+__version__ = "1.5.1"
 
 # ---------------------------------------------------------------------------
 # Antigravity surfaces & cache paths
@@ -315,10 +315,12 @@ def _load_scan_cache() -> Dict[str, Any]:
         files = data.get("files")
         if not isinstance(files, dict):
             return {}
+        # Drop only individual malformed entries instead of discarding the entire cache.
+        valid_files: Dict[str, Any] = {}
         for path, entry in files.items():
-            if not isinstance(path, str) or not _valid_cache_entry(entry):
-                return {}
-        return files
+            if isinstance(path, str) and _valid_cache_entry(entry):
+                valid_files[path] = entry
+        return valid_files
     except Exception:
         return {}
 
@@ -366,6 +368,15 @@ def _fetch_litellm_pricing(offline: bool = False) -> Optional[Dict[str, Any]]:
     if offline or os.environ.get("AGY_OFFLINE_PRICING") == "1":
         return None
 
+    # Cold-start negative backoff: avoid 5s network timeout on every scan while offline.
+    backoff_path = PRICING_CACHE_PATH.with_name(f"{PRICING_CACHE_PATH.name}.backoff")
+    if not PRICING_CACHE_PATH.exists() and backoff_path.exists():
+        try:
+            if (time.time() - backoff_path.stat().st_mtime) < 3600:
+                return None
+        except Exception:
+            pass
+
     try:
         req = urllib.request.Request(
             LITELLM_PRICING_URL,
@@ -389,6 +400,12 @@ def _fetch_litellm_pricing(offline: bool = False) -> Optional[Dict[str, Any]]:
                     return stale
             except Exception:
                 pass
+        else:
+            try:
+                backoff_path.parent.mkdir(parents=True, exist_ok=True)
+                backoff_path.write_text("1", encoding="utf-8")
+            except Exception:
+                pass
         return None
 
     tmp_path: Optional[Path] = None
@@ -398,6 +415,10 @@ def _fetch_litellm_pricing(offline: bool = False) -> Optional[Dict[str, Any]]:
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f)
         os.replace(tmp_path, PRICING_CACHE_PATH)
+        try:
+            backoff_path.unlink(missing_ok=True)
+        except Exception:
+            pass
     except Exception:
         if tmp_path is not None:
             try:
@@ -1935,7 +1956,21 @@ def scan_sessions(
         parsed_by_conv[finfo["conv_id"]].append((finfo, entry))
 
     if use_cache:
-        stale = [k for k in cache_files if k not in seen_paths]
+        # Prune only entries under the scanned root prefixes (or all entries on default
+        # scan) so `--data-dir /tmp/...` never wipes production `~/.gemini` cache entries.
+        if data_dirs is not None:
+            scoped_prefixes = tuple(
+                str(r).rstrip(os.sep) + os.sep
+                for _name, brain_dir, conv_root in surfaces
+                for r in (brain_dir, conv_root)
+                if r is not None
+            )
+            stale = [
+                k for k in cache_files
+                if k not in seen_paths and (not scoped_prefixes or k.startswith(scoped_prefixes))
+            ]
+        else:
+            stale = [k for k in cache_files if k not in seen_paths]
         for k in stale:
             del cache_files[k]
         if stale:

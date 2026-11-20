@@ -160,6 +160,7 @@ public enum QuotaStateEvent<Snapshot: Equatable & Sendable>: Equatable, Sendable
     case beginFetch
     case fetched(Snapshot, source: QuotaSource, at: Date, notice: QuotaRefreshNotice)
     case fetchFailed(CoreQuotaError, retryAt: Date?, at: Date)
+    case cooldownExpired(now: Date)
 }
 
 public enum QuotaStateReducer {
@@ -179,10 +180,12 @@ public enum QuotaStateReducer {
             return phase
 
         case .beginFetch:
-            if case .noAccount = phase {
+            switch phase {
+            case .noAccount, .failed:
                 return .loading
+            case .loading, .ready:
+                return phase
             }
-            return phase
 
         case .fetched(let snapshot, let source, let at, let notice):
             return .ready(snapshot: snapshot, source: source, updatedAt: at, notice: notice)
@@ -198,6 +201,22 @@ public enum QuotaStateReducer {
                 return .ready(snapshot: snapshot, source: source, updatedAt: updatedAt, notice: notice)
             }
             return .failed(error: error, retryAt: retryAt)
+
+        case .cooldownExpired(let now):
+            switch phase {
+            case .ready(let snapshot, let source, let updatedAt, .rateLimited(let retryAt)):
+                if let retryAt = retryAt, retryAt <= now {
+                    return .ready(snapshot: snapshot, source: source, updatedAt: updatedAt, notice: .none)
+                }
+                return phase
+            case .failed(.rateLimited, let retryAt):
+                if let retryAt = retryAt, retryAt <= now {
+                    return .failed(error: .rateLimited, retryAt: nil)
+                }
+                return phase
+            default:
+                return phase
+            }
         }
     }
 
@@ -246,11 +265,13 @@ public struct QuotaFetchGate: Equatable, Sendable {
         cooldownDeadline: Date?,
         now: Date = Date()
     ) -> QuotaFetchDecision {
-        if !force, let cachedAt = cacheTimestamp, now.timeIntervalSince(cachedAt) < ttl {
-            return .serveCache
-        }
+        // Active 429 cooldown ALWAYS takes precedence over TTL cache so a non-forced
+        // refresh within 60s never wipes an active rate-limit notice banner.
         if let until = cooldownDeadline, until > now {
             return .serveCooldown(retryAt: until)
+        }
+        if !force, let cachedAt = cacheTimestamp, now.timeIntervalSince(cachedAt) < ttl {
+            return .serveCache
         }
         if !isInFlight {
             isInFlight = true
@@ -293,10 +314,13 @@ public enum TokenPresenceAction: Equatable, Sendable {
 }
 
 /// Pure SWR state machine for `SubscriptionQuotaService.hasOAuthToken`.
+/// Generation-stamped so a slow background SWR revalidation can NEVER overwrite
+/// a newer synchronous `probeTokenPresenceNow()` result.
 public struct TokenPresenceProbeState: Equatable, Sendable {
     public private(set) var cachedValue: Bool?
     public private(set) var cachedAt: Date?
     public private(set) var isRevalidating: Bool = false
+    public private(set) var generation: Int = 0
     public let ttl: TimeInterval
 
     public init(ttl: TimeInterval = 60) {
@@ -314,12 +338,25 @@ public struct TokenPresenceProbeState: Equatable, Sendable {
             return .returnCached(value)
         }
         isRevalidating = true
+        generation += 1
         return .returnCachedAndRevalidate(value)
     }
 
+    /// Record a direct/synchronous probe result (advances generation, superseding any in-flight SWR).
     public mutating func recordResult(_ value: Bool, at now: Date = Date()) {
+        generation += 1
         cachedValue = value
         cachedAt = now
         isRevalidating = false
+    }
+
+    /// Record a background SWR result only if `token` still matches the latest generation.
+    @discardableResult
+    public mutating func recordRevalidatedResult(_ value: Bool, generation token: Int, at now: Date = Date()) -> Bool {
+        guard token == generation else { return false }
+        cachedValue = value
+        cachedAt = now
+        isRevalidating = false
+        return true
     }
 }
