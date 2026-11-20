@@ -75,10 +75,19 @@ private struct LocalizerKey: EnvironmentKey {
     static let defaultValue = Localizer(language: AppLanguage.fromSystem())
 }
 
+private struct TelemetryReduceMotionKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
 extension EnvironmentValues {
     var localizer: Localizer {
         get { self[LocalizerKey.self] }
         set { self[LocalizerKey.self] = newValue }
+    }
+
+    var telemetryReduceMotion: Bool {
+        get { self[TelemetryReduceMotionKey.self] }
+        set { self[TelemetryReduceMotionKey.self] = newValue }
     }
 }
 
@@ -391,9 +400,7 @@ final class PointingCursorCoordinator {
 final class TelemetryArtworkCache {
     static let shared = TelemetryArtworkCache()
 
-    private var entries: [AnyHashable: NSImage] = [:]
-    private var order: [AnyHashable] = []
-    private let maxEntries = 24
+    private var lru = BoundedLRUState<AnyHashable, NSImage>(maxEntries: 24)
 
     func image<K: Hashable, V: View>(
         for key: K,
@@ -402,11 +409,7 @@ final class TelemetryArtworkCache {
     ) -> NSImage? {
         guard size.width >= 2, size.height >= 2 else { return nil }
         let box = AnyHashable(key)
-        if let hit = entries[box] {
-            if let idx = order.firstIndex(of: box) {
-                order.remove(at: idx)
-                order.append(box)
-            }
+        if let hit = lru.get(box) {
             return hit
         }
         let renderer = ImageRenderer(
@@ -416,13 +419,7 @@ final class TelemetryArtworkCache {
         )
         renderer.scale = 2.0
         guard let img = renderer.nsImage else { return nil }
-        entries[box] = img
-        order.removeAll { $0 == box }
-        order.append(box)
-        while order.count > maxEntries {
-            let evicted = order.removeFirst()
-            entries.removeValue(forKey: evicted)
-        }
+        lru.set(img, for: box)
         return img
     }
 }
@@ -720,8 +717,11 @@ struct PrecisionHeroNumber: View {
     var accentPrimary: Color? = nil
 
     @Environment(\.agyTheme) private var theme
+    @Environment(\.telemetryStaticRender) private var isStaticRender
+    @Environment(\.telemetryReduceMotion) private var reduceMotion
 
     var body: some View {
+        let numericTransition: ContentTransition = (isStaticRender || reduceMotion) ? .identity : .numericText()
         HStack(alignment: .firstTextBaseline, spacing: 0) {
             if let p = prefix, !p.isEmpty {
                 Text(p)
@@ -733,13 +733,13 @@ struct PrecisionHeroNumber: View {
                 .font(.system(size: size, weight: weight, design: .monospaced))
                 .monospacedDigit()
                 .foregroundColor(accentPrimary ?? theme.inkPrimary)
-                .contentTransition(.numericText())
+                .contentTransition(numericTransition)
             if let f = fraction, !f.isEmpty {
                 Text(f)
                     .font(.system(size: size * 0.50, weight: .light, design: .monospaced))
                     .monospacedDigit()
                     .foregroundColor(accentPrimary?.opacity(0.8) ?? theme.inkSecondary)
-                    .contentTransition(.numericText())
+                    .contentTransition(numericTransition)
             }
             if let s = suffix, !s.isEmpty {
                 Text(s)
@@ -758,13 +758,17 @@ struct RadarStatusDot: View {
     @Environment(\.agyTheme) private var theme
     @Environment(\.telemetryStaticRender) private var isStaticRender
     @Environment(\.telemetryPanelVisible) private var isPanelVisible
-    @State private var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    @Environment(\.telemetryReduceMotion) private var reduceMotion
 
     var body: some View {
         Group {
             switch kind {
             case .busy:
-                if reduceMotion || isStaticRender || !isPanelVisible {
+                if !TelemetryAnimationGate.shouldAnimate(
+                    panelVisible: isPanelVisible,
+                    reduceMotion: reduceMotion,
+                    staticRender: isStaticRender
+                ) {
                     ZStack {
                         Circle()
                             .stroke(theme.accent.opacity(0.45), lineWidth: 1)
@@ -804,10 +808,6 @@ struct RadarStatusDot: View {
             }
         }
         .frame(width: 12, height: 12)
-        .onReceive(NSWorkspace.shared.notificationCenter.publisher(
-            for: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification)) { _ in
-            reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        }
     }
 }
 
@@ -816,11 +816,15 @@ struct TelemetrySkeleton: View {
     @Environment(\.agyTheme) private var theme
     @Environment(\.telemetryStaticRender) private var isStaticRender
     @Environment(\.telemetryPanelVisible) private var isPanelVisible
-    @State private var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    @Environment(\.telemetryReduceMotion) private var reduceMotion
 
     var body: some View {
         Group {
-            if isStaticRender || reduceMotion || !isPanelVisible {
+            if !TelemetryAnimationGate.shouldAnimate(
+                panelVisible: isPanelVisible,
+                reduceMotion: reduceMotion,
+                staticRender: isStaticRender
+            ) {
                 content(opacity: 0.85)
             } else {
                 TimelineView(.animation(minimumInterval: 1.0 / 12.0)) { ctx in
@@ -828,10 +832,6 @@ struct TelemetrySkeleton: View {
                     content(opacity: 0.45 + 0.45 * wave)
                 }
             }
-        }
-        .onReceive(NSWorkspace.shared.notificationCenter.publisher(
-            for: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification)) { _ in
-            reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         }
     }
 
@@ -912,12 +912,17 @@ struct RefreshToolbarButton: View {
     @Environment(\.agyTheme) private var theme
     @Environment(\.telemetryStaticRender) private var isStaticRender
     @Environment(\.telemetryPanelVisible) private var isPanelVisible
+    @Environment(\.telemetryReduceMotion) private var reduceMotion
     @State private var hovering = false
-    @State private var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
 
     var body: some View {
         Group {
-            if isLoading && isPanelVisible && !isStaticRender && !reduceMotion {
+            if TelemetryAnimationGate.shouldAnimate(
+                active: isLoading,
+                panelVisible: isPanelVisible,
+                reduceMotion: reduceMotion,
+                staticRender: isStaticRender
+            ) {
                 TimelineView(.animation(minimumInterval: 1.0 / 20.0)) { ctx in
                     let angle = (ctx.date.timeIntervalSinceReferenceDate * 360.0)
                         .truncatingRemainder(dividingBy: 360.0)
@@ -936,10 +941,6 @@ struct RefreshToolbarButton: View {
         .help(helpText)
         .onHover { hovering = $0 }
         .onTapGesture(perform: action)
-        .onReceive(NSWorkspace.shared.notificationCenter.publisher(
-            for: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification)) { _ in
-            reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        }
     }
 
     private func iconView(angle: Double, tint: Color) -> some View {
@@ -1009,9 +1010,9 @@ struct TelemetryTabBar: View {
 
     @Environment(\.agyTheme) private var theme
     @Environment(\.telemetryStaticRender) private var isStaticRender
+    @Environment(\.telemetryReduceMotion) private var reduceMotion
     @Namespace private var tabNamespace
     @State private var hovered: DisplayTab? = nil
-    @State private var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
 
     private var indicatorAnimation: Animation? {
         guard !isStaticRender else { return nil }
@@ -1080,10 +1081,6 @@ struct TelemetryTabBar: View {
             }
             .fixedSize(horizontal: false, vertical: true)
             .animation(indicatorAnimation, value: selection)
-            .onReceive(NSWorkspace.shared.notificationCenter.publisher(
-                for: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification)) { _ in
-                reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-            }
 
             Rectangle().fill(theme.hairline).frame(height: 1)
         }
@@ -1122,9 +1119,9 @@ struct TelemetrySegmentedStrip<Value: Hashable>: View {
 
     @Environment(\.agyTheme) private var theme
     @Environment(\.telemetryStaticRender) private var isStaticRender
+    @Environment(\.telemetryReduceMotion) private var reduceMotion
     @Namespace private var stripNamespace
     @State private var hovered: Value? = nil
-    @State private var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
 
     private var indicatorAnimation: Animation? {
         guard !isStaticRender else { return nil }
@@ -1180,10 +1177,6 @@ struct TelemetrySegmentedStrip<Value: Hashable>: View {
             }
             .fixedSize(horizontal: false, vertical: true)
             .animation(indicatorAnimation, value: selection)
-            .onReceive(NSWorkspace.shared.notificationCenter.publisher(
-                for: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification)) { _ in
-                reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-            }
 
             HairlineRule(showCrosshairs: true)
         }

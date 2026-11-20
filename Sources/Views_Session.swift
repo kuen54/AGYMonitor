@@ -21,11 +21,13 @@ private struct HostWindowProbe: NSViewRepresentable {
 struct SessionTabView: View {
     @ObservedObject var sessionStore: SessionStore
     var visualMode: TelemetryVisualMode = .instrument
+    var isActiveTab: Bool = true
     var onClose: (() -> Void)? = nil
 
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
     @Environment(\.telemetryStaticRender) private var isStaticRender
+    @Environment(\.telemetryPanelVisible) private var isPanelVisible
 
     @State private var deck = SessionDeckState()
     @State private var hoveredFilter: SessionStatusFilter? = nil
@@ -148,19 +150,31 @@ struct SessionTabView: View {
                     }
                 }
 
+                if orderedVisibleSessionIds.isEmpty {
+                    filteredEmptyState
+                }
+
                 HairlineRule(showCrosshairs: false)
                 colophonFooter
             }
         }
         .background {
             if !isStaticRender {
-                HostWindowProbe { w in hostWindow = w }
-                    .frame(width: 0, height: 0)
+                HostWindowProbe { w in
+                    if hostWindow !== w { hostWindow = w }
+                }
+                .frame(width: 0, height: 0)
             }
         }
         .animation(.easeInOut(duration: 0.16), value: sessionStore.jumpHint)
         .onChange(of: orderedVisibleSessionIds) { ids in
             dispatchDeck(.reconcileVisibleIds(ids))
+        }
+        .onChange(of: isPanelVisible) { visible in
+            if !visible {
+                hoveredFilter = nil
+                dispatchDeck(.setHoveredSession(nil, visibleIds: orderedVisibleSessionIds))
+            }
         }
         .onAppear { if !isStaticRender { installKeyMonitor() } }
         .onDisappear { removeKeyMonitor() }
@@ -342,6 +356,14 @@ struct SessionTabView: View {
         .frame(height: 130)
     }
 
+    private var filteredEmptyState: some View {
+        Text("—")
+            .font(.system(size: 11, weight: .regular, design: .monospaced))
+            .foregroundColor(theme.inkMuted)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 22)
+    }
+
     private func jumpHintBanner(_ key: String) -> some View {
         HStack(spacing: 6) {
             Image(systemName: "info.circle")
@@ -362,28 +384,37 @@ struct SessionTabView: View {
         .transition(.opacity)
     }
 
-    // MARK: - Keyboard ↑/↓/Return Navigation
+    // MARK: - Keyboard ↑/↓/Return Navigation (routed via pure SessionKeyRouter)
 
     private func installKeyMonitor() {
         guard keyMonitor == nil else { return }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             guard let hw = hostWindow, event.window === hw else { return event }
-            let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            guard mods.isEmpty || mods == .numericPad || mods == .function else { return event }
+            let rawMods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            var mods = SessionKeyModifiers()
+            if rawMods.contains(.command)    { mods.insert(.command) }
+            if rawMods.contains(.option)     { mods.insert(.option) }
+            if rawMods.contains(.control)    { mods.insert(.control) }
+            if rawMods.contains(.shift)      { mods.insert(.shift) }
+            if rawMods.contains(.numericPad) { mods.insert(.numericPad) }
+            if rawMods.contains(.function)   { mods.insert(.function) }
 
-            switch event.keyCode {
-            case 125:
-                dispatchDeck(.moveKeyboardSelection(delta: 1, visibleIds: orderedVisibleSessionIds))
+            let action = SessionKeyRouter.route(
+                keyCode: event.keyCode,
+                modifiers: mods,
+                isPanelVisible: isPanelVisible,
+                isSessionTabActive: isActiveTab
+            )
+            switch action {
+            case .moveSelection(let delta):
+                dispatchDeck(.moveKeyboardSelection(delta: delta, visibleIds: orderedVisibleSessionIds))
                 return nil
-            case 126:
-                dispatchDeck(.moveKeyboardSelection(delta: -1, visibleIds: orderedVisibleSessionIds))
-                return nil
-            case 36, 76:
+            case .activateSelected:
                 let ids = orderedVisibleSessionIds
                 guard !ids.isEmpty else { return event }
                 dispatchDeck(.activateSelected(visibleIds: ids))
                 return nil
-            default:
+            case .ignore:
                 return event
             }
         }
@@ -458,6 +489,7 @@ struct SessionRow: View {
 
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
+    @Environment(\.telemetryPanelVisible) private var isPanelVisible
     @State private var hovering = false
 
     private var isActiveHighlight: Bool { hovering || isSelected }
@@ -557,15 +589,17 @@ struct SessionRow: View {
             }
         }
         .onHover { inside in
-            guard inside != hovering else { return }
             hovering = inside
             PointingCursorCoordinator.shared.setPointing(inside, token: "session-row-\(session.sessionId)")
         }
-        .onDisappear {
-            if hovering {
+        .onChange(of: isPanelVisible) { visible in
+            if !visible && hovering {
                 hovering = false
-                PointingCursorCoordinator.shared.setPointing(false, token: "session-row-\(session.sessionId)")
             }
+        }
+        .onDisappear {
+            hovering = false
+            PointingCursorCoordinator.shared.setPointing(false, token: "session-row-\(session.sessionId)")
         }
         .onTapGesture { sessionStore.jump(session) }
     }

@@ -349,11 +349,20 @@ class UsageStore: ObservableObject {
         if quotaError != next.error { quotaError = next.error }
         if quotaUpdatedAt != next.updatedAt { quotaUpdatedAt = next.updatedAt }
         if quotaRetryAt != next.retryAt { quotaRetryAt = next.retryAt }
+        syncActiveLoadingFlag()
+    }
+
+    /// Reconciles expired HTTP 429 cooldowns so the Plan tab banner & Retry button
+    /// recover immediately once `retryAt` passes.
+    func reconcileQuotaCooldown(now: Date = Date()) {
+        applyQuotaEvent(.cooldownExpired(now: now))
     }
 
     private func syncActiveLoadingFlag() {
         let active: Bool
-        if selectedTab == .time && timeRange == .year {
+        if selectedTab == .subscription {
+            active = (quotaState == .loading)
+        } else if selectedTab == .time && timeRange == .year {
             active = yearLoadPhase.isLoading
         } else {
             active = isCurrentMonth ? currentMonthLoadPhase.isLoading : historicalMonthLoadPhase.isLoading
@@ -468,13 +477,21 @@ class UsageStore: ObservableObject {
         guard archiveHistoryLocally != on else { return }
         archiveHistoryLocally = on
         UserDefaults.standard.set(on, forKey: "archiveHistoryLocally")
+        yearTimeCache.removeAll()
+        yearLoadGate.invalidateAll()
         if on {
             archiveSweepIfNeeded(force: true)
+        } else {
+            archiveSweepGate.reset()
         }
         republishAfterArchiveChange()
     }
 
     func clearArchive() {
+        archiveSweepGate.reset()
+        UserDefaults.standard.removeObject(forKey: "archiveSweptThrough")
+        yearTimeCache.removeAll()
+        yearLoadGate.invalidateAll()
         archive.clear()
         republishAfterArchiveChange()
     }
@@ -505,7 +522,10 @@ class UsageStore: ObservableObject {
     }
 
     func archiveSweepIfNeeded(force: Bool = false) {
-        guard archiveSweepGate.shouldStart(force: force, enabled: archiveHistoryLocally) else { return }
+        guard let sweepGen = archiveSweepGate.beginSweep(
+            force: force,
+            enabled: archiveHistoryLocally
+        ) else { return }
         let cal = AppDate.gregorian
         let now = Date()
         let todayKey = AppDate.dayKey(now)
@@ -522,14 +542,17 @@ class UsageStore: ObservableObject {
             guard let self = self else { return }
             let range = "\(startKey):\(todayKey)"
             let json = self.scriptClient.runScript(["--json", "--no-sessions", "--range", range])
-            if let json = json {
-                let daily = UsageParser.parseAllDailyBreakdown(json)
-                let time = UsageParser.parseTimeSection(json)
+            let daily = json.flatMap { UsageParser.parseAllDailyBreakdown($0) }
+            let time = json.flatMap { UsageParser.parseTimeSection($0) }
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                // Only commit & advance watermark if this sweep was NOT invalidated mid-flight
+                // by `clearArchive()` or toggling `archiveHistoryLocally` off.
+                guard self.archiveSweepGate.finish(generation: sweepGen, succeeded: json != nil),
+                      self.archiveHistoryLocally,
+                      json != nil else { return }
                 self.archive.merge(daily: daily, time: time)
                 UserDefaults.standard.set(todayKey, forKey: "archiveSweptThrough")
-            }
-            DispatchQueue.main.async { [weak self] in
-                self?.archiveSweepGate.finish(succeeded: json != nil)
             }
         }
     }
@@ -559,7 +582,10 @@ class UsageStore: ObservableObject {
         let ym = String(format: "%04d-%02d", y, m)
         if !force,
            let snapshot = loadCacheSnapshot(year: y, month: m),
-           snapshot.dailyBreakdown != nil, snapshot.time != nil {
+           snapshot.dailyBreakdown != nil, snapshot.time != nil,
+           SnapshotFreshnessPolicy.isCompleteHistoricalSnapshot(
+               year: y, month: m, lastUpdated: snapshot.lastUpdated
+           ) {
             historicalLoadGate.invalidate()
             let (om, od, ot) = archiveOverlayHistorical(
                 month: snapshot.data, daily: snapshot.dailyBreakdown,
@@ -631,7 +657,6 @@ class UsageStore: ObservableObject {
         }
 
         refreshQuota(force: force)
-        archiveSweepIfNeeded(force: force)
 
         if force {
             yearTimeCache.removeAll()
@@ -650,14 +675,17 @@ class UsageStore: ObservableObject {
                 syncActiveLoadingFlag()
             }
         } else {
+            // Queue visible historical-month scan ahead of background archive sweep.
             if force || historicalMonthLoadPhase == .idle {
                 loadHistoricalMonth(force: force)
             }
         }
 
         let req = refreshQueue.request(force: force)
-        guard req.shouldStartNow else { return }
-        startCurrentMonthScriptRefresh(force: req.effectiveForce)
+        if req.shouldStartNow {
+            startCurrentMonthScriptRefresh(force: req.effectiveForce)
+        }
+        archiveSweepIfNeeded(force: force)
     }
 
     private func startCurrentMonthScriptRefresh(force: Bool) {
@@ -772,9 +800,12 @@ class UsageStore: ObservableObject {
 
     private func completeRefreshQueueAndCheckFollowUp() {
         let next = refreshQueue.complete()
-        syncActiveLoadingFlag()
         if next.shouldRunFollowUp {
+            currentMonthLoadPhase = currentMonthLoadPhase.transitioningToLoading()
+            syncActiveLoadingFlag()
             startCurrentMonthScriptRefresh(force: next.followUpForce)
+        } else {
+            syncActiveLoadingFlag()
         }
     }
 
@@ -796,7 +827,7 @@ class UsageStore: ObservableObject {
         scriptQueue.async { [weak self] in
             guard let self = self,
                   let jsonData = UsageParser.encodeSnapshot(snapshot) else { return }
-            try? jsonData.write(to: URL(fileURLWithPath: self.cachePath(year: year, month: month)))
+            try? jsonData.write(to: URL(fileURLWithPath: self.cachePath(year: year, month: month)), options: .atomic)
         }
     }
 
@@ -874,10 +905,11 @@ class UsageStore: ObservableObject {
     // MARK: - Year time loading (--time-year)
 
     func loadYearTime(_ year: Int, force: Bool = false) {
-        viewingTimeYear = year
-        let cached = yearTimeCache[year]
+        let clampedYear = SnapshotFreshnessPolicy.clampedYear(year)
+        viewingTimeYear = clampedYear
+        let cached = yearTimeCache[clampedYear]
         guard let generation = yearLoadGate.beginLoad(
-            year: year, force: force, hasCachedValue: cached != nil
+            year: clampedYear, force: force, hasCachedValue: cached != nil
         ) else {
             if let cached = cached {
                 yearTimeDays = cached
@@ -893,39 +925,40 @@ class UsageStore: ObservableObject {
         syncActiveLoadingFlag()
         scriptQueue.async { [weak self] in
             guard let self = self else { return }
-            let json = self.scriptClient.runScript(["--time-year", "\(year)"])
+            let json = self.scriptClient.runScript(["--time-year", "\(clampedYear)"])
             let parsed = json.flatMap { UsageParser.parseYearTime($0) }
             DispatchQueue.main.async {
                 self.yearLoadGate.completeLoad(generation: generation)
                 guard generation == self.yearLoadGate.generation,
-                      self.viewingTimeYear == year else { return }
-                if let parsed = parsed, parsed.year == year {
+                      self.viewingTimeYear == clampedYear else { return }
+                let latestCached = self.yearTimeCache[clampedYear]
+                if let parsed = parsed, parsed.year == clampedYear {
                     let final: [String: Int]
                     if self.archiveHistoryLocally {
                         self.archive.mergeYearSeconds(parsed.days)
-                        let overlaid = self.archive.yearSeconds(year: year)
+                        let overlaid = self.archive.yearSeconds(year: clampedYear)
                         final = overlaid.isEmpty ? parsed.days : overlaid
                     } else {
                         final = parsed.days
                     }
-                    self.yearTimeCache[year] = final
+                    self.yearTimeCache[clampedYear] = final
                     self.yearTimeDays = final
                     self.yearLoadPhase = .loaded(final)
                 } else if self.archiveHistoryLocally {
-                    let archived = self.archive.yearSeconds(year: year)
+                    let archived = self.archive.yearSeconds(year: clampedYear)
                     if !archived.isEmpty {
-                        self.yearTimeCache[year] = archived
+                        self.yearTimeCache[clampedYear] = archived
                         self.yearTimeDays = archived
                         self.yearLoadPhase = .loaded(archived)
                     } else {
                         self.yearLoadPhase = (json == nil || parsed == nil)
-                            ? .failed(.scriptFailed, cached: cached)
+                            ? .failed(.scriptFailed, cached: latestCached)
                             : .loaded([:])
                         self.yearTimeDays = self.yearLoadPhase.value
                     }
                 } else {
                     self.yearLoadPhase = (json == nil || parsed == nil)
-                        ? .failed(.scriptFailed, cached: cached)
+                        ? .failed(.scriptFailed, cached: latestCached)
                         : .loaded([:])
                     self.yearTimeDays = self.yearLoadPhase.value
                 }
@@ -935,7 +968,9 @@ class UsageStore: ObservableObject {
     }
 
     func navigateTimeYear(offset: Int) {
-        loadYearTime(viewingTimeYear + offset)
+        let target = SnapshotFreshnessPolicy.clampedYear(viewingTimeYear + offset)
+        guard target != viewingTimeYear else { return }
+        loadYearTime(target)
     }
 
     // MARK: - Week sub-view navigation

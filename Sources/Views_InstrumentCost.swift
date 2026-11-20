@@ -21,9 +21,9 @@ struct CostInstrumentView: View {
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
     @Environment(\.telemetryStaticRender) private var isStaticRender
+    @Environment(\.telemetryReduceMotion) private var reduceMotion
     @Namespace private var scopeNamespace
     @State private var hoveredScope: UsagePeriodScope? = nil
-    @State private var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
 
     private var scopeAnimation: Animation? {
         guard !isStaticRender else { return nil }
@@ -213,10 +213,6 @@ struct CostInstrumentView: View {
         }
         .fixedSize(horizontal: false, vertical: true)
         .animation(scopeAnimation, value: binding.wrappedValue)
-        .onReceive(NSWorkspace.shared.notificationCenter.publisher(
-            for: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification)) { _ in
-            reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        }
     }
 
     private func activeScopeSublabel(scope: UsagePeriodScope, cost: Double, monthTotal: Double) -> String {
@@ -270,9 +266,7 @@ private enum TopographicRidgeCache {
     }
 
     private static let lock = NSLock()
-    private static var entries: [Key: TopographicRidgeResult] = [:]
-    private static var order: [Key] = []
-    private static let maxEntries = 12
+    private static var lru = BoundedLRUState<Key, TopographicRidgeResult>(maxEntries: 12)
 
     static func ridge(dailyValues: [Double], layerCount: Int, samplesPerDay: Int) -> TopographicRidgeResult {
         let key = Key(
@@ -282,11 +276,7 @@ private enum TopographicRidgeCache {
         )
 
         lock.lock()
-        if let hit = entries[key] {
-            if let idx = order.firstIndex(of: key) {
-                order.remove(at: idx)
-                order.append(key)
-            }
+        if let hit = lru.get(key) {
             lock.unlock()
             return hit
         }
@@ -299,13 +289,7 @@ private enum TopographicRidgeCache {
         )
 
         lock.lock()
-        entries[key] = built
-        order.removeAll { $0 == key }
-        order.append(key)
-        while order.count > maxEntries {
-            let evicted = order.removeFirst()
-            entries.removeValue(forKey: evicted)
-        }
+        lru.set(built, for: key)
         lock.unlock()
 
         return built
@@ -321,7 +305,13 @@ struct TopographicRidgeChart: View {
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
     @Environment(\.telemetryStaticRender) private var isStaticRender
-    @State private var hoveredDay: Int? = nil
+    @Environment(\.telemetryPanelVisible) private var isPanelVisible
+    @State private var inspection = ChartInspectionState<String, Int>(scope: "")
+
+    private var inspectionScope: String { "\(year)-\(month)" }
+    private var hoveredDay: Int? {
+        inspection.scope == inspectionScope ? inspection.target : nil
+    }
 
     private let plotHeight: CGFloat = 158
     private let daysInMonth: Int
@@ -447,12 +437,13 @@ struct TopographicRidgeChart: View {
                                 let w = max(1.0, Double(geo.size.width))
                                 let nx = min(0.999999, max(0.0, Double(pt.x) / w))
                                 let nextDay = min(daysInMonth, max(1, Int(floor(nx * Double(daysInMonth))) + 1))
-                                if hoveredDay != nextDay {
-                                    hoveredDay = nextDay
+                                inspection.syncScope(inspectionScope)
+                                if inspection.target != nextDay {
+                                    inspection.setTarget(nextDay)
                                 }
                             case .ended:
-                                if hoveredDay != nil {
-                                    hoveredDay = nil
+                                if inspection.target != nil {
+                                    inspection.reset()
                                 }
                             }
                         }
@@ -465,6 +456,12 @@ struct TopographicRidgeChart: View {
         .padding(.horizontal, 14)
         .padding(.top, 11)
         .padding(.bottom, 9)
+        .onChange(of: inspectionScope) { nextScope in
+            inspection.syncScope(nextScope)
+        }
+        .onChange(of: isPanelVisible) { visible in
+            if !visible { inspection.reset() }
+        }
     }
 
     private var headerRow: some View {
@@ -1223,6 +1220,9 @@ struct BoreholeModelSection: View {
         }
         .onDisappear {
             focusState.reset()
+            if focusedModelId != nil {
+                focusedModelId = nil
+            }
         }
     }
 

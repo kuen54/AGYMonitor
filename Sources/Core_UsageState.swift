@@ -208,8 +208,15 @@ public struct YearLoadGate: Equatable, Sendable {
 
     /// Deduplicates overlapping non-forced requests for the same year while keeping
     /// generation ordering for cross-year switches and forced refreshes.
+    /// Switching to a cached year while another year is in flight cancels `activeYear`
+    /// and advances `generation` so bouncing `2026 -> 2025 -> 2026 -> 2025` never gets
+    /// stuck displaying the wrong year's heatmap.
     public mutating func beginLoad(year: Int, force: Bool, hasCachedValue: Bool) -> Int? {
         if !force && hasCachedValue {
+            if activeYear != nil {
+                activeYear = nil
+                generation += 1
+            }
             return nil
         }
         if !force && activeYear == year {
@@ -273,6 +280,7 @@ public struct HistoricalMonthLoadGate: Equatable, Sendable {
 public struct ArchiveSweepGate: Equatable, Sendable {
     public private(set) var isInFlight: Bool = false
     public private(set) var lastSucceededAt: Date? = nil
+    public private(set) var generation: Int = 0
     public let minInterval: TimeInterval
 
     public init(minInterval: TimeInterval = 6 * 3600, lastSucceededAt: Date? = nil) {
@@ -281,12 +289,22 @@ public struct ArchiveSweepGate: Equatable, Sendable {
     }
 
     public mutating func shouldStart(force: Bool, enabled: Bool, now: Date = Date()) -> Bool {
-        guard enabled, !isInFlight else { return false }
+        beginSweep(force: force, enabled: enabled, now: now) != nil
+    }
+
+    /// Starts a sweep and returns a monotonic generation token, or `nil` if gated.
+    public mutating func beginSweep(force: Bool, enabled: Bool, now: Date = Date()) -> Int? {
+        guard enabled, !isInFlight else { return nil }
         if !force, let last = lastSucceededAt, now.timeIntervalSince(last) < minInterval {
-            return false
+            return nil
         }
         isInFlight = true
-        return true
+        generation += 1
+        return generation
+    }
+
+    public func isCurrent(generation token: Int) -> Bool {
+        token == generation
     }
 
     /// Only successful sweeps stamp `lastSucceededAt`; failures remain immediately retryable.
@@ -295,6 +313,53 @@ public struct ArchiveSweepGate: Equatable, Sendable {
         if succeeded {
             lastSucceededAt = now
         }
+    }
+
+    /// Generation-checked completion: returns `false` if invalidated mid-flight (e.g. `clearArchive()`
+    /// or `archiveHistoryLocally = false`) so stale sweeps never resurrect deleted data.
+    @discardableResult
+    public mutating func finish(generation token: Int, succeeded: Bool, now: Date = Date()) -> Bool {
+        guard token == generation else { return false }
+        finish(succeeded: succeeded, now: now)
+        return true
+    }
+
+    /// Invalidate any in-flight sweep and clear cooldown (e.g. on `clearArchive()` or toggle off).
+    public mutating func reset() {
+        isInFlight = false
+        lastSucceededAt = nil
+        generation += 1
+    }
+}
+
+// MARK: - Historical Disk Snapshot Completeness & Year Bounds
+
+public enum SnapshotFreshnessPolicy {
+
+    /// A cached `YYYY-MM.json` snapshot is complete for a historical month ONLY if it was
+    /// written at or after the first instant of the FOLLOWING month (`YYYY-(MM+1)-01 00:00`).
+    /// Prevents permanent data truncation when a snapshot was written mid-month (e.g. Oct 15)
+    /// and later viewed as a historical month (e.g. in November).
+    public static func isCompleteHistoricalSnapshot(
+        year: Int,
+        month: Int,
+        lastUpdated: Date
+    ) -> Bool {
+        var nextMonthComps = DateComponents()
+        nextMonthComps.year = year
+        nextMonthComps.month = month + 1
+        nextMonthComps.day = 1
+        guard let nextMonthStart = AppDate.gregorian.date(from: nextMonthComps) else {
+            return false
+        }
+        return lastUpdated >= nextMonthStart
+    }
+
+    /// Clamp a requested heatmap year to `[1970, currentYear]` so keyboard/programmatic
+    /// navigation can never request future years or invalid years below Python's floor.
+    public static func clampedYear(_ year: Int, now: Date = Date()) -> Int {
+        let currentYear = AppDate.gregorian.component(.year, from: now)
+        return min(max(year, 1970), currentYear)
     }
 }
 

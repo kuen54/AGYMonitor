@@ -156,4 +156,45 @@ struct QuotaStateTests {
         #expect(!QuotaStateReducer.shouldAutoRefreshOnTabEntry(phase: freshReady, cooldownUntil: nil, now: now))
         #expect(QuotaStateReducer.shouldAutoRefreshOnTabEntry(phase: staleReady, cooldownUntil: nil, now: now))
     }
+
+    @Test("QuotaFetchGate prioritizes active 429 cooldown over TTL cache, Retry enters .loading, cooldownExpired recovers, and SWR checks generation")
+    func quotaCooldownPrecedenceAndRecovery() {
+        var gate = QuotaFetchGate()
+        let t0 = Date(timeIntervalSince1970: 80_000)
+        let until = t0.addingTimeInterval(180)
+
+        // Even with a fresh 10s-old offline cache, active 429 cooldown MUST return .serveCooldown (never wipe banner!)
+        #expect(
+            gate.request(
+                force: false,
+                cacheTimestamp: t0.addingTimeInterval(-10),
+                ttl: 60,
+                cooldownDeadline: until,
+                now: t0
+            ) == .serveCooldown(retryAt: until)
+        )
+
+        // Clicking Retry (.beginFetch) from .failed transitions immediately to .loading
+        let failed: QuotaPhase<String> = .failed(error: .networkFailure, retryAt: nil)
+        #expect(QuotaStateReducer.reduce(failed, event: .beginFetch) == .loading)
+
+        // Cooldown expiry clears expired .rateLimited notice on ready snapshot and unlocks Retry on .failed
+        let readyRL: QuotaPhase<String> = .ready(snapshot: "s", source: .offlineCache, updatedAt: t0, notice: .rateLimited(retryAt: until))
+        #expect(QuotaStateReducer.reduce(readyRL, event: .cooldownExpired(now: until.addingTimeInterval(-1))) == readyRL)
+        #expect(QuotaStateReducer.reduce(readyRL, event: .cooldownExpired(now: until)) == .ready(snapshot: "s", source: .offlineCache, updatedAt: t0, notice: .none))
+
+        let failedRL: QuotaPhase<String> = .failed(error: .rateLimited, retryAt: until)
+        #expect(QuotaStateReducer.reduce(failedRL, event: .cooldownExpired(now: until)) == .failed(error: .rateLimited, retryAt: nil))
+
+        // Generation-stamped SWR probe never overwrites a newer forced probe
+        var swr = TokenPresenceProbeState(ttl: 60)
+        swr.recordResult(true, at: t0)
+        _ = swr.evaluate(now: t0.addingTimeInterval(70))
+        let staleGen = swr.generation
+        // Forced probe supersedes SWR
+        swr.recordResult(false, at: t0.addingTimeInterval(71))
+        let staleRevalAccepted = swr.recordRevalidatedResult(true, generation: staleGen, at: t0.addingTimeInterval(72))
+        #expect(!staleRevalAccepted)
+        #expect(swr.cachedValue == false)
+    }
 }

@@ -160,4 +160,100 @@ struct NotchStateTests {
         #expect(!hiddenPres.visible)
         #expect(hiddenPres.ignoresMouseEvents)
     }
+
+    @Test("lastPointerSample auto-invalidates on explicitReveal and fullscreenChanged so mouse moves are never swallowed")
+    func pointerSampleInvalidationPreventsStuckOpenAndDeadZone() {
+        var state = NotchState()
+        // Mouse rests outside notch -> sample cached
+        _ = NotchMachine.reduce(&state, event: .pointerMoved(outsideOnScreen))
+        // Duplicate pointer sample while idle is a no-op
+        #expect(NotchMachine.reduce(&state, event: .pointerMoved(outsideOnScreen)).isEmpty)
+
+        // User triggers ⌥⇧A (explicitReveal) while mouse stays outside -> MUST invalidate lastPointerSample
+        _ = NotchMachine.reduce(&state, event: .explicitReveal)
+        #expect(state.phase == .open)
+        #expect(state.lastPointerSample == nil)
+
+        // Subsequent mouse move outside MUST NOT be dropped -> immediately enters closingGrace
+        let closeEff = NotchMachine.reduce(&state, event: .pointerMoved(outsideOnScreen))
+        #expect(state.phase == .closingGrace)
+        #expect(closeEff.contains(.scheduleCloseGrace))
+
+        // Fullscreen Space switch resets revealArmed AND invalidates lastPointerSample
+        _ = NotchMachine.reduce(&state, event: .explicitClose)
+        _ = NotchMachine.reduce(&state, event: .fullscreenChanged(true))
+        _ = NotchMachine.reduce(&state, event: .pointerMoved(topEdgeFullscreen))
+        #expect(state.revealArmed)
+        _ = NotchMachine.reduce(&state, event: .fullscreenChanged(false))
+        _ = NotchMachine.reduce(&state, event: .fullscreenChanged(true))
+        #expect(!state.revealArmed)
+        // Wiggling inside top 8pt edge immediately re-arms reveal!
+        _ = NotchMachine.reduce(&state, event: .pointerMoved(topEdgeFullscreen))
+        #expect(state.revealArmed)
+    }
+
+    @Test("NotchGeometryState separates closed/open dimensions and aligns initial compactGapOffset")
+    func notchGeometrySeparatesClosedAndOpen() {
+        var geo = NotchGeometryState()
+        #expect(geo.compactGapOffset == 8.5)
+
+        let closedChanged = geo.updateContentSize(width: 280, height: 32, isOpen: false)
+        let openChanged = geo.updateContentSize(width: 396, height: 540, isOpen: true)
+        #expect(closedChanged)
+        #expect(openChanged)
+
+        // Closing immediately reads 280x32 (never leaks 396x540 into closedWingRect)
+        let closed = geo.contentSize(isOpen: false)
+        let open = geo.contentSize(isOpen: true)
+        #expect(closed.width == 280 && closed.height == 32)
+        #expect(open.width == 396 && open.height == 540)
+
+        let wingsChanged = geo.updateWingWidths(left: 40, right: 80)
+        #expect(wingsChanged)
+        #expect(geo.compactGapOffset == 20.0)
+    }
+
+    @Test("NotchCoordinatorMachine preserves open/modal displays across screen changes, enforces single-open exclusivity, and diffs visibility")
+    func notchCoordinatorInvariants() {
+        var coord = NotchCoordinatorState()
+        #expect(NotchCoordinatorMachine.start(&coord))
+        #expect(!NotchCoordinatorMachine.start(&coord)) // idempotent
+
+        let d1 = NotchDisplayDescriptor(displayId: 10, isBuiltin: true, isMain: true, isFullscreen: false)
+        let d2 = NotchDisplayDescriptor(displayId: 20, isBuiltin: false, isMain: false, isFullscreen: false)
+        let p1 = NotchCoordinatorMachine.reconcileScreens(&coord, descriptors: [d1, d2])
+        #expect(p1.added.count == 2)
+        #expect(p1.removed.isEmpty)
+
+        // Open display 10 and pin a modal lock on it
+        var st1 = coord.displays[10]!
+        _ = NotchMachine.reduce(&st1, event: .modalLockAcquired(.optionsMenu))
+        coord.displays[10] = st1
+
+        // Reconcile when display 20 disconnects and display 30 connects: display 10 MUST keep modal lock!
+        let d3 = NotchDisplayDescriptor(displayId: 30, isBuiltin: false, isMain: false, isFullscreen: false)
+        let p2 = NotchCoordinatorMachine.reconcileScreens(&coord, descriptors: [d1, d3])
+        #expect(p2.removed == [20])
+        #expect(p2.kept == [10])
+        #expect(p2.added == [d3])
+        #expect(coord.displays[10]?.isPinnedOpen == true)
+
+        // Unpin display 10; opening display 30 asks display 10 to close (single-open exclusivity)
+        var st1Unpin = coord.displays[10]!
+        st1Unpin.modalLocks.removeAll()
+        coord.displays[10] = st1Unpin
+        #expect(NotchCoordinatorMachine.displaysToCloseForExclusivity(coord, openingDisplayId: 30) == [10])
+
+        // Deterministic primary display: mouse -> builtin -> main -> lowest ID
+        #expect(NotchCoordinatorMachine.selectPrimaryDisplay(descriptors: [d3, d1], mouseDisplayId: 30) == 30)
+        #expect(NotchCoordinatorMachine.selectPrimaryDisplay(descriptors: [d3, d1], mouseDisplayId: nil) == 10)
+
+        // Visibility diffing: first apply snaps (shouldAnimate == false), duplicate is no-op, flip animates once
+        let v1 = NotchCoordinatorMachine.updateVisibility(&coord, displayId: 10, visible: true)
+        #expect(v1.changed && !v1.shouldAnimate)
+        let v2 = NotchCoordinatorMachine.updateVisibility(&coord, displayId: 10, visible: true)
+        #expect(!v2.changed)
+        let v3 = NotchCoordinatorMachine.updateVisibility(&coord, displayId: 10, visible: false)
+        #expect(v3.changed && v3.shouldAnimate)
+    }
 }

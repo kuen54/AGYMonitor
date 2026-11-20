@@ -177,14 +177,16 @@ private struct OrbitalQuotaDial: View {
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
     @Environment(\.telemetryStaticRender) private var telemetryStaticRender
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.telemetryReduceMotion) private var reduceMotion
 
     private let dialWidth: CGFloat = 152
     private let dialHeight: CGFloat = 132
 
     private struct ProtractorArtworkKey: Hashable {
         let usedPercent: Int
-        let paceAngleMilli: Int?
+        /// Quantized to ~2.3° buckets (40 mrad) so a 5h pace ray never churns
+        /// the 24-entry global artwork cache every 4 seconds while staying pixel-accurate.
+        let paceAngleBucket: Int?
         let isOverPace: Bool
         let dialSeed: Int
         let useSecondaryAccent: Bool
@@ -248,7 +250,7 @@ private struct OrbitalQuotaDial: View {
                 CachedTelemetryArtwork(
                     key: ProtractorArtworkKey(
                         usedPercent: usedPercent,
-                        paceAngleMilli: angles.paceAngle.map { Int(($0 * 1000.0).rounded()) },
+                        paceAngleBucket: angles.paceAngle.map { Int(($0 / 0.04).rounded()) },
                         isOverPace: currentPace?.isOverPaceWarning == true,
                         dialSeed: dialSeed,
                         useSecondaryAccent: useSecondaryAccent,

@@ -22,8 +22,7 @@ struct AgentTelemetryRadarView: View {
     @Environment(\.agyTheme) private var theme
     @Environment(\.telemetryStaticRender) private var isStaticRender
     @Environment(\.telemetryPanelVisible) private var isPanelVisible
-    @State private var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-    @State private var isPointingCursor = false
+    @Environment(\.telemetryReduceMotion) private var reduceMotion
 
     private let radarHeight: CGFloat = 152
 
@@ -49,10 +48,6 @@ struct AgentTelemetryRadarView: View {
         .padding(.horizontal, 14)
         .padding(.top, 10)
         .padding(.bottom, 10)
-        .onReceive(NSWorkspace.shared.notificationCenter.publisher(
-            for: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification)) { _ in
-            reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        }
     }
 
     @ViewBuilder
@@ -107,7 +102,15 @@ struct AgentTelemetryRadarView: View {
     }
 
     private func radarStage(layout: SessionRadarLayout) -> some View {
-        let shouldAnimateBusy = isPanelVisible && anyBusy && !reduceMotion && !isStaticRender
+        let shouldAnimateBusy = TelemetryAnimationGate.shouldAnimate(
+            active: anyBusy,
+            panelVisible: isPanelVisible,
+            reduceMotion: reduceMotion,
+            staticRender: isStaticRender
+        )
+        let interactiveNodes = visibleSessionIds.map { allowed in
+            layout.nodes.filter { allowed.contains($0.id) }
+        } ?? layout.nodes
         let activeHighlightId = hoveredSessionId ?? selectedSessionId
         let busyTargets: [BusyPulseTarget] = shouldAnimateBusy
             ? layout.nodes.compactMap { node in
@@ -199,19 +202,19 @@ struct AgentTelemetryRadarView: View {
                                 y: Double(pt.y),
                                 width: Double(w),
                                 height: Double(h),
-                                nodes: layout.nodes,
+                                nodes: interactiveNodes,
                                 maxRadius: 20.0
                             )
                             let hitId = hit?.id
                             if hoveredSessionId != hitId {
                                 hoveredSessionId = hitId
                             }
-                            setPointingCursor(hitId != nil)
+                            PointingCursorCoordinator.shared.setPointing(hitId != nil, token: "session-radar")
                         case .ended:
                             if hoveredSessionId != nil {
                                 hoveredSessionId = nil
                             }
-                            setPointingCursor(false)
+                            PointingCursorCoordinator.shared.setPointing(false, token: "session-radar")
                         }
                     }
                     .onTapGesture(coordinateSpace: .local) { pt in
@@ -220,26 +223,20 @@ struct AgentTelemetryRadarView: View {
                             y: Double(pt.y),
                             width: Double(w),
                             height: Double(h),
-                            nodes: layout.nodes,
+                            nodes: interactiveNodes,
                             maxRadius: 20.0
                         ) {
                             sessionStore.jump(hit.session)
                         }
                     }
                     .onDisappear {
-                        setPointingCursor(false)
+                        PointingCursorCoordinator.shared.setPointing(false, token: "session-radar")
                         if hoveredSessionId != nil {
                             hoveredSessionId = nil
                         }
                     }
             }
         }
-    }
-
-    private func setPointingCursor(_ pointing: Bool) {
-        guard pointing != isPointingCursor else { return }
-        isPointingCursor = pointing
-        PointingCursorCoordinator.shared.setPointing(pointing, token: "session-radar")
     }
 }
 

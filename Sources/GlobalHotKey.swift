@@ -17,9 +17,10 @@ final class GlobalHotKeyManager {
         unregister()
     }
 
-    func register(onTrigger: @escaping () -> Void) {
+    @discardableResult
+    func register(onTrigger: @escaping () -> Void) -> Bool {
         self.onTrigger = onTrigger
-        guard hotKeyRef == nil else { return }
+        guard hotKeyRef == nil else { return true }
 
         var eventSpec = EventTypeSpec(
             eventClass: OSType(kEventClassKeyboard),
@@ -34,7 +35,7 @@ final class GlobalHotKeyManager {
             userData,
             &eventHandlerRef
         )
-        guard installStatus == noErr else { return }
+        guard installStatus == noErr else { return false }
 
         let keyID = EventHotKeyID(signature: Self.signature, id: Self.hotKeyID)
         let modifiers = UInt32(optionKey | shiftKey)
@@ -48,10 +49,13 @@ final class GlobalHotKeyManager {
         )
         if regStatus != noErr {
             unregister()
+            return false
         }
+        return true
     }
 
     func unregister() {
+        onTrigger = nil
         if let hk = hotKeyRef {
             UnregisterEventHotKey(hk)
             hotKeyRef = nil
@@ -80,7 +84,8 @@ final class GlobalHotKeyManager {
             return OSStatus(eventNotHandledErr)
         }
         DispatchQueue.main.async { [weak self] in
-            self?.onTrigger?()
+            guard let self = self, self.hotKeyRef != nil else { return }
+            self.onTrigger?()
         }
         return noErr
     }

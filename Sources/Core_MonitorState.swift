@@ -48,6 +48,11 @@ public struct SessionMonitorLifecycleState: Equatable, Sendable {
     public var lastFSAttemptAt: Date?
     public var pollInterval: TimeInterval?
     public var lastLiveCount: Int
+    /// Monotonic generation bumped on `stop()` so in-flight async `onChange` / `markSeen`
+    /// dispatches can NEVER publish stale snapshots after shutdown.
+    public var runGeneration: Int
+    /// Sorted list of directories currently attached to the active `FSEventStream`.
+    public var watchedDirs: [String]
 
     public init(
         isStarted: Bool = false,
@@ -55,7 +60,9 @@ public struct SessionMonitorLifecycleState: Equatable, Sendable {
         fsHealthy: Bool = false,
         lastFSAttemptAt: Date? = nil,
         pollInterval: TimeInterval? = nil,
-        lastLiveCount: Int = 0
+        lastLiveCount: Int = 0,
+        runGeneration: Int = 0,
+        watchedDirs: [String] = []
     ) {
         self.isStarted = isStarted
         self.isActive = isActive
@@ -63,6 +70,8 @@ public struct SessionMonitorLifecycleState: Equatable, Sendable {
         self.lastFSAttemptAt = lastFSAttemptAt
         self.pollInterval = pollInterval
         self.lastLiveCount = lastLiveCount
+        self.runGeneration = runGeneration
+        self.watchedDirs = watchedDirs
     }
 }
 
@@ -109,11 +118,14 @@ public enum SessionMonitorLifecycleMachine {
             state.isStarted = false
             state.fsHealthy = false
             state.pollInterval = nil
+            state.watchedDirs = []
+            state.runGeneration += 1
             return [.cancelFSCoalesce, .setPollTimer(nil), .stopFSWatcher]
 
         case .setActive(let active, let now):
-            guard state.isStarted, state.isActive != active else { return [] }
+            guard state.isActive != active else { return [] }
             state.isActive = active
+            guard state.isStarted else { return [] }
             var effects: [SessionMonitorLifecycleEffect] = []
             if SessionPollCadence.shouldRetryFSWatcher(
                 started: state.isStarted,
@@ -200,6 +212,200 @@ public struct FSEventsThrottleState: Equatable, Sendable {
         guard let last = lastRefreshTriggeredAt else { return debounceSeconds }
         let untilWindowEnd = last.addingTimeInterval(minGapSeconds).timeIntervalSince(now)
         return max(debounceSeconds, untilWindowEnd)
+    }
+}
+
+// MARK: - Brain FSEvents Watcher & Refresh Scheduler Lifecycle Machine
+
+public struct BrainWatcherLifecycleState: Equatable, Sendable {
+    public var isStarted: Bool
+    public var watchedPaths: [String]
+    public var lastWatchAttemptAt: Date?
+    public var debounceGeneration: Int
+    public var wakeGeneration: Int
+    public var throttle: FSEventsThrottleState
+
+    public init(
+        isStarted: Bool = false,
+        watchedPaths: [String] = [],
+        lastWatchAttemptAt: Date? = nil,
+        debounceGeneration: Int = 0,
+        wakeGeneration: Int = 0,
+        throttle: FSEventsThrottleState = FSEventsThrottleState()
+    ) {
+        self.isStarted = isStarted
+        self.watchedPaths = watchedPaths
+        self.lastWatchAttemptAt = lastWatchAttemptAt
+        self.debounceGeneration = debounceGeneration
+        self.wakeGeneration = wakeGeneration
+        self.throttle = throttle
+    }
+
+    public var isWatcherHealthy: Bool { !watchedPaths.isEmpty }
+}
+
+public enum BrainWatcherLifecycleEvent: Equatable, Sendable {
+    case start(candidatePaths: [String], now: Date)
+    case fsWatcherResult(watchedPaths: [String], at: Date)
+    case reconcileWatchPaths(candidatePaths: [String], now: Date)
+    case fsEventReceived(now: Date)
+    case debounceFired(generation: Int)
+    case refreshTriggered(at: Date)
+    case periodicTimerFired(candidatePaths: [String], now: Date)
+    case wakeReceived
+    case wakeTimerFired(generation: Int, candidatePaths: [String], now: Date)
+    case terminate
+}
+
+public enum BrainWatcherLifecycleEffect: Equatable, Sendable {
+    case startPeriodicTimer
+    case stopPeriodicTimer
+    case startFSWatcher(paths: [String])
+    case stopFSWatcher
+    case scheduleDebounce(generation: Int, delay: TimeInterval)
+    case cancelDebounce
+    case scheduleWakeRefresh(generation: Int, delay: TimeInterval)
+    case cancelWakeRefresh
+    case triggerRefresh
+}
+
+/// Pure lifecycle reducer for `AppDelegate`'s Antigravity brain FSEvents watcher,
+/// 30-min periodic timer, sleep/wake refresh, and 120s minimum-gap debounce floor.
+/// Guarantees:
+/// 1. Any refresh (`⌘R`, wake, popover/notch open, timer) cancels pending FSEvent
+///    debounces so stale timers can NEVER violate the 120s floor.
+/// 2. Newly created Antigravity surfaces (`antigravity/brain`, `antigravity-ide/brain`)
+///    trigger watcher path reconciliation instead of staying permanently unwatched.
+/// 3. `terminate` cleanly stops periodic timer, wake timer, debounce, and FSEventStream.
+public enum BrainWatcherLifecycleMachine {
+
+    @discardableResult
+    public static func reduce(
+        _ state: inout BrainWatcherLifecycleState,
+        event: BrainWatcherLifecycleEvent
+    ) -> [BrainWatcherLifecycleEffect] {
+        switch event {
+        case .start(let candidatePaths, let now):
+            guard !state.isStarted else { return [] }
+            state.isStarted = true
+            state.lastWatchAttemptAt = now
+            var effects: [BrainWatcherLifecycleEffect] = [.startPeriodicTimer]
+            let normalized = Array(Set(candidatePaths)).sorted()
+            if !normalized.isEmpty {
+                effects.append(.startFSWatcher(paths: normalized))
+            }
+            return effects
+
+        case .fsWatcherResult(let watchedPaths, let at):
+            state.lastWatchAttemptAt = at
+            state.watchedPaths = state.isStarted ? Array(Set(watchedPaths)).sorted() : []
+            return []
+
+        case .reconcileWatchPaths(let candidatePaths, let now):
+            guard state.isStarted else { return [] }
+            return reconcilePaths(&state, candidatePaths: candidatePaths, now: now)
+
+        case .fsEventReceived(let now):
+            guard state.isStarted else { return [] }
+            state.debounceGeneration += 1
+            let delay = state.throttle.delayForFSEvent(at: now)
+            return [.scheduleDebounce(generation: state.debounceGeneration, delay: delay)]
+
+        case .debounceFired(let generation):
+            guard state.isStarted, generation == state.debounceGeneration else { return [] }
+            return [.triggerRefresh]
+
+        case .refreshTriggered(let at):
+            state.throttle.noteRefreshTriggered(at: at)
+            guard state.isStarted else { return [] }
+            // Invalidate any pending FSEvent debounce scheduled before this refresh so it
+            // cannot fire prematurely inside the new 120s cooldown window.
+            state.debounceGeneration += 1
+            return [.cancelDebounce]
+
+        case .periodicTimerFired(let candidatePaths, let now):
+            guard state.isStarted else { return [] }
+            var effects = reconcilePaths(&state, candidatePaths: candidatePaths, now: now)
+            effects.append(.triggerRefresh)
+            return effects
+
+        case .wakeReceived:
+            guard state.isStarted else { return [] }
+            state.wakeGeneration += 1
+            return [.scheduleWakeRefresh(generation: state.wakeGeneration, delay: 5.0)]
+
+        case .wakeTimerFired(let generation, let candidatePaths, let now):
+            guard state.isStarted, generation == state.wakeGeneration else { return [] }
+            var effects = reconcilePaths(&state, candidatePaths: candidatePaths, now: now)
+            effects.append(.triggerRefresh)
+            return effects
+
+        case .terminate:
+            guard state.isStarted else { return [] }
+            state.isStarted = false
+            state.watchedPaths = []
+            state.debounceGeneration += 1
+            state.wakeGeneration += 1
+            return [.cancelDebounce, .cancelWakeRefresh, .stopPeriodicTimer, .stopFSWatcher]
+        }
+    }
+
+    private static func reconcilePaths(
+        _ state: inout BrainWatcherLifecycleState,
+        candidatePaths: [String],
+        now: Date
+    ) -> [BrainWatcherLifecycleEffect] {
+        let normalized = Array(Set(candidatePaths)).sorted()
+        guard !normalized.isEmpty else { return [] }
+        // Start/restart if new surface directories appeared, or retry after 30s if unhealthy.
+        if normalized != state.watchedPaths {
+            if !state.watchedPaths.isEmpty || SessionPollCadence.shouldRetryFSWatcher(
+                started: true,
+                fsHealthy: false,
+                now: now,
+                lastAttemptAt: state.lastWatchAttemptAt
+            ) {
+                state.lastWatchAttemptAt = now
+                return [.startFSWatcher(paths: normalized)]
+            }
+        }
+        return []
+    }
+}
+
+// MARK: - Done-Unseen State Wrapper (Single Source of Truth)
+
+/// Encapsulates `prevStatuses` + `doneUnseen` so `SessionMonitor` never mutates
+/// `doneUnseen` outside `SessionLogic.stepDoneUnseen` and resets atomically on `stop()`.
+public struct DoneUnseenState: Equatable, Sendable {
+    public private(set) var prevStatuses: [String: SessionStatus] = [:]
+    public private(set) var doneUnseen: [String: Double] = [:]
+
+    public init() {}
+
+    public var ids: Set<String> { Set(doneUnseen.keys) }
+    public var anyUnseen: Bool { !doneUnseen.isEmpty }
+
+    public mutating func step(sessions: [SessionInfo], now: Double) {
+        let stepped = SessionLogic.stepDoneUnseen(
+            prev: prevStatuses,
+            current: sessions,
+            doneUnseen: doneUnseen,
+            seenAll: false,
+            now: now
+        )
+        prevStatuses = stepped.prev
+        doneUnseen = stepped.doneUnseen
+    }
+
+    @discardableResult
+    public mutating func markSeen(_ sessionId: String) -> Bool {
+        doneUnseen.removeValue(forKey: sessionId) != nil
+    }
+
+    public mutating func reset() {
+        prevStatuses.removeAll()
+        doneUnseen.removeAll()
     }
 }
 

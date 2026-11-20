@@ -56,7 +56,12 @@ final class SessionStore: ObservableObject {
     // MARK: Lifecycle
 
     func startMonitoring() { monitor.start() }
-    func setActive(_ active: Bool) { monitor.setActive(active) }
+    func setActive(_ active: Bool) {
+        if !active {
+            setJumpHint(nil)
+        }
+        monitor.setActive(active)
+    }
     func stopMonitoring() { monitor.stop() }
 
     /// Clear a single session's green "finished, unseen" dot on user engagement.

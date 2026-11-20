@@ -232,7 +232,7 @@ struct OptionsMenu: NSViewRepresentable {
 
         @objc func clearArchive() {
             notchVM?.acquireModalLock(.clearArchiveAlert)
-            if notchVM != nil { NSApp.activate(ignoringOtherApps: true) }
+            NSApp.activate(ignoringOtherApps: true)
             defer { notchVM?.releaseModalLock(.clearArchiveAlert) }
 
             let alert = NSAlert()

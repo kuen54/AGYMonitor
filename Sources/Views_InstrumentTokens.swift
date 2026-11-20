@@ -23,8 +23,8 @@ struct TokensInstrumentView: View {
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
     @Environment(\.telemetryStaticRender) private var isStaticRender
+    @Environment(\.telemetryReduceMotion) private var reduceMotion
     @Namespace private var scopeNamespace
-    @State private var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
     @State private var hoveredScope: UsagePeriodScope? = nil
 
     private var scopeAnimation: Animation? {
@@ -80,13 +80,6 @@ struct TokensInstrumentView: View {
 
             HairlineRule(showCrosshairs: false)
             specimenColophon
-        }
-        .onReceive(
-            NSWorkspace.shared.notificationCenter.publisher(
-                for: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification
-            )
-        ) { _ in
-            reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         }
     }
 
@@ -296,7 +289,13 @@ struct FoldedTokenFlowChart: View {
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
     @Environment(\.telemetryStaticRender) private var isStaticRender
-    @State private var hoveredChannel: TokenChannel? = nil
+    @Environment(\.telemetryPanelVisible) private var isPanelVisible
+    /// Mutually exclusive model-vs-channel focus arbiter so header, left column,
+    /// canvas, and right column can never disagree on precedence.
+    @State private var flowFocus: TokenFlowFocus<TokenChannel> = .none
+
+    private var hoveredChannel: TokenChannel? { flowFocus.channel }
+    private var activeFocusedModelId: String? { flowFocus.modelId ?? (flowFocus.channel == nil ? focusedModelId : nil) }
 
     private let layout: TokenFlowLayout
     private let modelById: [String: ModelUsage]
@@ -437,6 +436,22 @@ struct FoldedTokenFlowChart: View {
         .padding(.horizontal, 14)
         .padding(.top, 11)
         .padding(.bottom, 10)
+        .onChange(of: leftNodeIds) { ids in
+            flowFocus.reconcile(validModelIds: Set(ids))
+            if focusedModelId != flowFocus.modelId {
+                focusedModelId = flowFocus.modelId
+            }
+        }
+        .onChange(of: isPanelVisible) { visible in
+            if !visible {
+                flowFocus.reset()
+                if focusedModelId != nil { focusedModelId = nil }
+            }
+        }
+        .onDisappear {
+            flowFocus.reset()
+            if focusedModelId != nil { focusedModelId = nil }
+        }
     }
 
     @ViewBuilder
@@ -556,12 +571,14 @@ struct FoldedTokenFlowChart: View {
                     ids: leftNodeIds,
                     maxDistance: 12.0
                 )
-                if focusedModelId != hit {
-                    focusedModelId = hit
+                flowFocus.setModel(hit)
+                if focusedModelId != flowFocus.modelId {
+                    focusedModelId = flowFocus.modelId
                 }
             case .ended:
-                if focusedModelId != nil {
-                    focusedModelId = nil
+                flowFocus.setModel(nil)
+                if focusedModelId != flowFocus.modelId {
+                    focusedModelId = flowFocus.modelId
                 }
             }
         }
@@ -636,13 +653,12 @@ struct FoldedTokenFlowChart: View {
                     maxDistance: 12.0
                 )
                 let hitChannel = hitId.flatMap { Self.channelFromNodeId($0) }
-                if hoveredChannel != hitChannel {
-                    hoveredChannel = hitChannel
+                flowFocus.setChannel(hitChannel)
+                if focusedModelId != flowFocus.modelId {
+                    focusedModelId = flowFocus.modelId
                 }
             case .ended:
-                if hoveredChannel != nil {
-                    hoveredChannel = nil
-                }
+                flowFocus.setChannel(nil)
             }
         }
     }
@@ -1320,9 +1336,7 @@ private enum TokenThroughputRidgeCache {
     }
 
     private static let lock = NSLock()
-    private static var entries: [Key: TopographicRidgeResult] = [:]
-    private static var order: [Key] = []
-    private static let maxEntries = 12
+    private static var lru = BoundedLRUState<Key, TopographicRidgeResult>(maxEntries: 12)
 
     static func ridge(dailyValues: [Double], layerCount: Int, samplesPerDay: Int) -> TopographicRidgeResult {
         let key = Key(
@@ -1332,11 +1346,7 @@ private enum TokenThroughputRidgeCache {
         )
 
         lock.lock()
-        if let hit = entries[key] {
-            if let idx = order.firstIndex(of: key) {
-                order.remove(at: idx)
-                order.append(key)
-            }
+        if let hit = lru.get(key) {
             lock.unlock()
             return hit
         }
@@ -1349,13 +1359,7 @@ private enum TokenThroughputRidgeCache {
         )
 
         lock.lock()
-        entries[key] = built
-        order.removeAll { $0 == key }
-        order.append(key)
-        while order.count > maxEntries {
-            let evicted = order.removeFirst()
-            entries.removeValue(forKey: evicted)
-        }
+        lru.set(built, for: key)
         lock.unlock()
 
         return built
@@ -1381,7 +1385,13 @@ struct TokenDensityMatrix: View {
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
     @Environment(\.telemetryStaticRender) private var isStaticRender
-    @State private var hoveredDay: Int? = nil
+    @Environment(\.telemetryPanelVisible) private var isPanelVisible
+    @State private var inspection = ChartInspectionState<String, Int>(scope: "")
+
+    private var inspectionScope: String { "\(year)-\(month)" }
+    private var hoveredDay: Int? {
+        inspection.scope == inspectionScope ? inspection.target : nil
+    }
 
     private let plotHeight: CGFloat = 118
     private let topPad: CGFloat = 20
@@ -1531,6 +1541,12 @@ struct TokenDensityMatrix: View {
         .padding(.horizontal, 14)
         .padding(.top, 11)
         .padding(.bottom, 9)
+        .onChange(of: inspectionScope) { nextScope in
+            inspection.syncScope(nextScope)
+        }
+        .onChange(of: isPanelVisible) { visible in
+            if !visible { inspection.reset() }
+        }
     }
 
     private var headerRow: some View {
@@ -1595,12 +1611,13 @@ struct TokenDensityMatrix: View {
                         let w = max(1.0, Double(geo.size.width))
                         let nx = min(0.999999, max(0.0, Double(pt.x) / w))
                         let day = min(totalDays, max(1, Int(floor(nx * Double(totalDays))) + 1))
-                        if hoveredDay != day {
-                            hoveredDay = day
+                        inspection.syncScope(inspectionScope)
+                        if inspection.target != day {
+                            inspection.setTarget(day)
                         }
                     case .ended:
-                        if hoveredDay != nil {
-                            hoveredDay = nil
+                        if inspection.target != nil {
+                            inspection.reset()
                         }
                     }
                 }

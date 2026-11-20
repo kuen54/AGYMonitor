@@ -12,6 +12,7 @@ struct UsageOverviewSection: View {
     var metricOverride: DisplayTab? = nil
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
+    @Environment(\.telemetryPanelVisible) private var isPanelVisible
     @State private var focusedModelId: String? = nil
 
     private var activeMetric: DisplayTab {
@@ -79,38 +80,21 @@ struct UsageOverviewSection: View {
 
                     HairlineRule(showCrosshairs: true)
 
-                    if store.visualMode == .instrument {
-                        FoldedTokenFlowChart(
-                            usage: activeUsage,
-                            focusedModelId: $focusedModelId
-                        )
+                    ModelLedgerSection(
+                        metric: activeMetric,
+                        usage: activeUsage,
+                        focusedModelId: $focusedModelId
+                    )
 
-                        if let daily = bundle.dailyBreakdown, !daily.isEmpty {
-                            HairlineRule(showCrosshairs: true)
-                            TokenDensityMatrix(
-                                data: daily,
-                                year: store.viewingYear,
-                                month: store.viewingMonth,
-                                focusedModelId: focusedModelId
-                            )
-                        }
-                    } else {
-                        ModelLedgerSection(
-                            metric: activeMetric,
-                            usage: activeUsage,
-                            focusedModelId: $focusedModelId
+                    if let daily = bundle.dailyBreakdown, !daily.isEmpty {
+                        HairlineRule(showCrosshairs: true)
+                        DailyChart(
+                            data: daily,
+                            mode: activeMetric,
+                            year: store.viewingYear,
+                            month: store.viewingMonth,
+                            focusedModelId: focusedModelId
                         )
-
-                        if let daily = bundle.dailyBreakdown, !daily.isEmpty {
-                            HairlineRule(showCrosshairs: true)
-                            DailyChart(
-                                data: daily,
-                                mode: activeMetric,
-                                year: store.viewingYear,
-                                month: store.viewingMonth,
-                                focusedModelId: focusedModelId
-                            )
-                        }
                     }
 
                     if activeMetric == .cost {
@@ -164,38 +148,21 @@ struct UsageOverviewSection: View {
 
                     HairlineRule(showCrosshairs: true)
 
-                    if store.visualMode == .instrument {
-                        FoldedTokenFlowChart(
-                            usage: bundle.month,
-                            focusedModelId: $focusedModelId
-                        )
+                    ModelLedgerSection(
+                        metric: activeMetric,
+                        usage: bundle.month,
+                        focusedModelId: $focusedModelId
+                    )
 
-                        if let daily = bundle.dailyBreakdown, !daily.isEmpty {
-                            HairlineRule(showCrosshairs: true)
-                            TokenDensityMatrix(
-                                data: daily,
-                                year: store.viewingYear,
-                                month: store.viewingMonth,
-                                focusedModelId: focusedModelId
-                            )
-                        }
-                    } else {
-                        ModelLedgerSection(
-                            metric: activeMetric,
-                            usage: bundle.month,
-                            focusedModelId: $focusedModelId
+                    if let daily = bundle.dailyBreakdown, !daily.isEmpty {
+                        HairlineRule(showCrosshairs: true)
+                        DailyChart(
+                            data: daily,
+                            mode: activeMetric,
+                            year: store.viewingYear,
+                            month: store.viewingMonth,
+                            focusedModelId: focusedModelId
                         )
-
-                        if let daily = bundle.dailyBreakdown, !daily.isEmpty {
-                            HairlineRule(showCrosshairs: true)
-                            DailyChart(
-                                data: daily,
-                                mode: activeMetric,
-                                year: store.viewingYear,
-                                month: store.viewingMonth,
-                                focusedModelId: focusedModelId
-                            )
-                        }
                     }
 
                     if activeMetric == .cost {
@@ -219,6 +186,7 @@ struct UsageOverviewSection: View {
         .onChange(of: store.viewingYear) { _ in focusedModelId = nil }
         .onChange(of: store.selectedPeriodScope) { _ in focusedModelId = nil }
         .onChange(of: store.visualMode) { _ in focusedModelId = nil }
+        .onChange(of: isPanelVisible) { visible in if !visible { focusedModelId = nil } }
     }
 
     private var apiEquivFootnote: some View {
@@ -360,9 +328,9 @@ struct PeriodScopeStrip: View {
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
     @Environment(\.telemetryStaticRender) private var isStaticRender
+    @Environment(\.telemetryReduceMotion) private var reduceMotion
     @Namespace private var scopeNamespace
     @State private var hovered: UsagePeriodScope? = nil
-    @State private var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
 
     private var scopeAnimation: Animation? {
         guard !isStaticRender else { return nil }
@@ -422,10 +390,6 @@ struct PeriodScopeStrip: View {
         }
         .fixedSize(horizontal: false, vertical: true)
         .animation(scopeAnimation, value: selection)
-        .onReceive(NSWorkspace.shared.notificationCenter.publisher(
-            for: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification)) { _ in
-            reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        }
     }
 }
 
@@ -633,7 +597,13 @@ struct DailyChart: View {
 
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
-    @State private var hoveredDay: Int? = nil
+    @Environment(\.telemetryPanelVisible) private var isPanelVisible
+    @State private var inspection = ChartInspectionState<String, Int>(scope: "")
+
+    private var inspectionScope: String { "\(year)-\(month)-\(mode.rawValue)" }
+    private var hoveredDay: Int? {
+        inspection.scope == inspectionScope ? inspection.target : nil
+    }
 
     private var daysInMonth: Int { AppDate.daysInMonth(year: year, month: month) ?? 30 }
 
@@ -692,6 +662,12 @@ struct DailyChart: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
+        .onChange(of: inspectionScope) { nextScope in
+            inspection.syncScope(nextScope)
+        }
+        .onChange(of: isPanelVisible) { visible in
+            if !visible { inspection.reset() }
+        }
     }
 
     private var plotCanvas: some View {
@@ -794,7 +770,14 @@ struct DailyChart: View {
                 Color.clear
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .contentShape(Rectangle())
-                    .onHover { h in hoveredDay = h ? day : (hoveredDay == day ? nil : hoveredDay) }
+                    .onHover { h in
+                        inspection.syncScope(inspectionScope)
+                        if h {
+                            inspection.setTarget(day)
+                        } else if inspection.target == day {
+                            inspection.setTarget(nil)
+                        }
+                    }
             }
         }
     }

@@ -9,15 +9,14 @@ struct TimeTabView: View {
     @ObservedObject var store: UsageStore
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
+    @Environment(\.telemetryPanelVisible) private var isPanelVisible
     @Environment(\.telemetryStaticRender) private var isStaticRender
+    @Environment(\.telemetryReduceMotion) private var reduceMotion
     @State private var rangeTransition: TabTransitionState<TimeRange>
-    @State private var displayedRange: TimeRange
-    @State private var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
 
     init(store: UsageStore) {
         self.store = store
         _rangeTransition = State(initialValue: TabTransitionState(initial: store.timeRange))
-        _displayedRange = State(initialValue: store.timeRange)
     }
 
     private var rangeAnimation: Animation? {
@@ -34,8 +33,9 @@ struct TimeTabView: View {
             )
 
             ZStack(alignment: .top) {
-                rangeContent(for: displayedRange)
-                    .id(displayedRange)
+                let activeRange = rangeTransition.activeId
+                rangeContent(for: activeRange)
+                    .id(activeRange)
                     .transition(
                         TelemetryMotion.tabContentTransition(
                             direction: rangeTransition.direction,
@@ -47,14 +47,11 @@ struct TimeTabView: View {
             .clipped()
         }
         .onChange(of: store.timeRange) { nextRange in
-            rangeTransition.transition(to: nextRange, in: TimeRange.allCases)
+            var next = rangeTransition
+            next.transition(to: nextRange, in: TimeRange.allCases)
             withAnimation(rangeAnimation) {
-                displayedRange = nextRange
+                rangeTransition = next
             }
-        }
-        .onReceive(NSWorkspace.shared.notificationCenter.publisher(
-            for: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification)) { _ in
-            reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         }
     }
 
@@ -262,6 +259,7 @@ struct WeekTimeChart: View {
 
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
+    @Environment(\.telemetryPanelVisible) private var isPanelVisible
 
     private struct HoveredInterval: Equatable {
         let dayKey: String
@@ -343,6 +341,8 @@ struct WeekTimeChart: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 9)
         }
+        .onChange(of: dayKeys) { _ in hovered = nil }
+        .onChange(of: isPanelVisible) { visible in if !visible { hovered = nil } }
     }
 
     private var hoverReadout: some View {
@@ -508,6 +508,7 @@ struct MonthTimeChart: View {
 
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
+    @Environment(\.telemetryPanelVisible) private var isPanelVisible
 
     private struct HoveredInterval: Equatable {
         let dayKey: String
@@ -656,6 +657,20 @@ struct MonthTimeChart: View {
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 6)
+            }
+        }
+        .onChange(of: monthPrefix) { _ in
+            hovered = nil
+            hoveredDayKey = nil
+        }
+        .onChange(of: instrumentElevation) { _ in
+            hovered = nil
+            hoveredDayKey = nil
+        }
+        .onChange(of: isPanelVisible) { visible in
+            if !visible {
+                hovered = nil
+                hoveredDayKey = nil
             }
         }
     }
@@ -1345,6 +1360,7 @@ struct YearHeatmap: View {
     @ObservedObject var store: UsageStore
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
+    @Environment(\.telemetryPanelVisible) private var isPanelVisible
 
     @State private var hoveredKey: String? = nil
 
@@ -1387,6 +1403,8 @@ struct YearHeatmap: View {
                 store.loadYearTime(store.viewingTimeYear)
             }
         }
+        .onChange(of: store.viewingTimeYear) { _ in hoveredKey = nil }
+        .onChange(of: isPanelVisible) { visible in if !visible { hoveredKey = nil } }
     }
 
     @ViewBuilder
