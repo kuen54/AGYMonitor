@@ -36,6 +36,7 @@ swiftc "$SCRIPT_DIR/Sources/"*.swift \
     -framework Cocoa \
     -framework Carbon \
     -framework Security \
+    -framework UserNotifications \
     -lsqlite3 \
     -O \
     -target arm64-apple-macosx13.0
@@ -44,6 +45,7 @@ swiftc "$SCRIPT_DIR/Sources/"*.swift \
     -framework Cocoa \
     -framework Carbon \
     -framework Security \
+    -framework UserNotifications \
     -lsqlite3 \
     -O \
     -target x86_64-apple-macosx13.0

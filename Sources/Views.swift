@@ -95,6 +95,7 @@ private enum PopoverHeightMemory {
 
 struct PopoverView: View {
     @ObservedObject var store: UsageStore
+    @ObservedObject private var updateService: UpdateService
     let onQuit: () -> Void
     var onClose: (() -> Void)? = nil
 
@@ -109,6 +110,7 @@ struct PopoverView: View {
 
     init(store: UsageStore, onQuit: @escaping () -> Void, onClose: (() -> Void)? = nil) {
         self.store = store
+        _updateService = ObservedObject(wrappedValue: store.updateService)
         self.onQuit = onQuit
         self.onClose = onClose
         let initialTab = store.selectedTab
@@ -145,7 +147,8 @@ struct PopoverView: View {
 
     private var maxContentHeight: CGFloat {
         let screenH = popoverHostScreenHeight ?? NSScreen.main?.visibleFrame.height ?? 900
-        return max(260, screenH - 170)
+        let updateReserve: CGFloat = updateService.state.bannerDisplay != .none ? 34 : 0
+        return max(260, screenH - 170 - updateReserve)
     }
 
     private var clampedContentHeight: CGFloat {
@@ -234,6 +237,8 @@ struct PopoverView: View {
                     heightState = nextState
                 }
             }
+
+            UpdateBannerStrip(updateService: updateService)
 
             HairlineRule(showCrosshairs: true)
 
@@ -551,6 +556,138 @@ struct PopoverView: View {
             store.navigateTimeYear(offset: offset)
         } else if store.selectedTab == .cost || store.selectedTab == .tokens || store.selectedTab == .time {
             store.navigateMonth(offset: offset)
+        }
+    }
+}
+
+// MARK: - In-App Update Status Strip
+
+/// Compact Swiss Telemetry strip rendered above the footer when a new GitHub Release
+/// is available (or during transient manual-check feedback). Uses `.onTapGesture`
+/// rather than SwiftUI `Button` so `ImageRenderer` stays crash-free.
+struct UpdateBannerStrip: View {
+    @ObservedObject var updateService: UpdateService
+
+    @Environment(\.agyTheme) private var theme
+    @Environment(\.localizer) private var loc
+    @State private var hoverView = false
+    @State private var hoverSkip = false
+
+    var body: some View {
+        switch updateService.state.bannerDisplay {
+        case .none:
+            EmptyView()
+
+        case .available(let release):
+            VStack(spacing: 0) {
+                HairlineRule(showCrosshairs: false)
+                HStack(spacing: 8) {
+                    HStack(spacing: 6) {
+                        Rectangle()
+                            .fill(theme.accent)
+                            .frame(width: 5, height: 5)
+                            .rotationEffect(.degrees(45))
+                        Text(String(format: loc("updateBannerAvailableFmt"), release.version.displayTag))
+                            .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                            .tracking(0.4)
+                            .foregroundColor(theme.inkPrimary)
+                            .lineLimit(1)
+                    }
+
+                    Spacer(minLength: 4)
+
+                    Text(loc("updateBannerView"))
+                        .font(.system(size: 8.5, weight: .bold, design: .monospaced))
+                        .tracking(0.5)
+                        .foregroundColor(hoverView ? theme.invertedInk : theme.accent)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(hoverView ? theme.accent : theme.accent.opacity(theme.isDark ? 0.16 : 0.10))
+                        .overlay(
+                            Rectangle()
+                                .strokeBorder(theme.accent.opacity(hoverView ? 1.0 : 0.55), lineWidth: 0.75)
+                        )
+                        .contentShape(Rectangle())
+                        .onHover { hovering in
+                            hoverView = hovering
+                            PointingCursorCoordinator.shared.setPointing(hovering, token: "updateBanner.view")
+                        }
+                        .onTapGesture {
+                            updateService.openReleasePage()
+                        }
+
+                    Image(systemName: "xmark")
+                        .font(.system(size: 8.5, weight: .bold))
+                        .foregroundColor(hoverSkip ? theme.inkPrimary : theme.inkSecondary)
+                        .frame(width: 18, height: 18)
+                        .background(hoverSkip ? theme.surfaceRaised : Color.clear)
+                        .contentShape(Rectangle())
+                        .help(loc("updateBannerSkip"))
+                        .onHover { hovering in
+                            hoverSkip = hovering
+                            PointingCursorCoordinator.shared.setPointing(hovering, token: "updateBanner.skip")
+                        }
+                        .onTapGesture {
+                            PointingCursorCoordinator.shared.setPointing(false, token: "updateBanner.skip")
+                            updateService.dismissAvailableUpdate()
+                        }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 6)
+                .background(theme.accent.opacity(theme.isDark ? 0.09 : 0.055))
+                .overlay(alignment: .leading) {
+                    Rectangle()
+                        .fill(theme.accent)
+                        .frame(width: 2)
+                }
+            }
+            .onDisappear {
+                hoverView = false
+                hoverSkip = false
+                PointingCursorCoordinator.shared.setPointing(false, token: "updateBanner.view")
+                PointingCursorCoordinator.shared.setPointing(false, token: "updateBanner.skip")
+            }
+
+        case .checking:
+            transientStatusRow(
+                dotColor: theme.accent,
+                text: loc("updateChecking"),
+                textColor: theme.accent
+            )
+
+        case .upToDate(let version):
+            transientStatusRow(
+                dotColor: theme.signalGreen,
+                text: String(format: loc("updateUpToDateFmt"), version.displayTag),
+                textColor: theme.inkSecondary
+            )
+
+        case .failed:
+            transientStatusRow(
+                dotColor: theme.signalAmber,
+                text: loc("updateCheckFailed"),
+                textColor: theme.signalAmber
+            )
+        }
+    }
+
+    private func transientStatusRow(dotColor: Color, text: String, textColor: Color) -> some View {
+        VStack(spacing: 0) {
+            HairlineRule(showCrosshairs: false)
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(dotColor)
+                    .frame(width: 4.5, height: 4.5)
+                Text(text)
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .tracking(0.4)
+                    .foregroundColor(textColor)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 6)
+            .background(theme.surface.opacity(theme.isNotch ? 0.0 : 0.65))
         }
     }
 }

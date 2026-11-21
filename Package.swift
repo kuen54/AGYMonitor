@@ -37,6 +37,7 @@ let package = Package(
                 "SessionMonitor.swift",
                 "SessionStore.swift",
                 "Theme.swift",
+                "UpdateService.swift",
                 "UsageArchive.swift",
                 "UsageScriptClient.swift",
                 "UsageStore.swift",
@@ -71,6 +72,7 @@ let package = Package(
                 "Core_MonitorState.swift",
                 "Core_AppState.swift",
                 "Core_UIState.swift",
+                "Core_UpdateState.swift",
                 "Core_Telemetry.swift",
                 "Core_Instruments.swift",
             ]

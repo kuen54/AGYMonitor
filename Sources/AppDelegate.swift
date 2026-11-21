@@ -173,6 +173,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // popover is on screen (popoverDidShow/Close).
         store.startSessionMonitoring()
 
+        // GitHub Releases update checker (10s launch delay, 24h cadence, one-time system notification)
+        store.startUpdateChecking()
+
         // Brain FSEvents watcher + 30-min periodic fallback + sleep/wake refresh
         dispatchBrainWatcher(.start(candidatePaths: candidateBrainWatchPaths(), now: Date()))
 
@@ -756,11 +759,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         DistributedNotificationCenter.default().removeObserver(self)
         dispatchPresentation(.appWillTerminate)
         dispatchBrainWatcher(.terminate)
+        store.stopUpdateChecking()
         store.stopSessionMonitoring()
     }
 
     @objc private func onWake(_ note: Notification) {
         dispatchBrainWatcher(.wakeReceived)
+        store.handleSystemWakeForUpdates()
     }
 
     @objc private func handleStatusItemClick() {
@@ -854,11 +859,34 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(metricSubItem)
         menu.addItem(.separator())
 
-        // 5. Hotkey, Refresh & Quit
+        // 5. Hotkey, Updates, Refresh & Quit
         let hkItem = NSMenuItem(title: loc("hotkeyToggle"), action: #selector(contextToggleHotkey), keyEquivalent: "")
         hkItem.target = self
         hkItem.state = store.globalHotkeyEnabled ? .on : .off
         menu.addItem(hkItem)
+
+        if let available = store.updateService.state.availableUpdate {
+            let updateItem = NSMenuItem(
+                title: String(format: loc("updateMenuAvailableFmt"), available.version.displayTag),
+                action: #selector(contextOpenAvailableUpdate),
+                keyEquivalent: ""
+            )
+            updateItem.target = self
+            menu.addItem(updateItem)
+        }
+
+        let isCheckingUpdates = store.updateService.state.isChecking
+        let checkTitle = isCheckingUpdates
+            ? loc("updateMenuChecking")
+            : loc("updateMenuCheck")
+        let checkUpdatesItem = NSMenuItem(
+            title: checkTitle,
+            action: isCheckingUpdates ? nil : #selector(contextCheckForUpdates),
+            keyEquivalent: ""
+        )
+        checkUpdatesItem.target = isCheckingUpdates ? nil : self
+        checkUpdatesItem.isEnabled = !isCheckingUpdates
+        menu.addItem(checkUpdatesItem)
 
         let refreshItem = NSMenuItem(title: loc("refresh"), action: #selector(contextRefresh), keyEquivalent: "")
         refreshItem.target = self
@@ -912,6 +940,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func contextToggleHotkey() {
         store.setGlobalHotkeyEnabled(!store.globalHotkeyEnabled)
+    }
+
+    @objc private func contextOpenAvailableUpdate() {
+        store.updateService.openReleasePage()
+    }
+
+    @objc private func contextCheckForUpdates() {
+        dispatchPresentation(.reopenRequested)
+        store.checkForUpdatesManually()
     }
 
     @objc private func contextRefresh() {

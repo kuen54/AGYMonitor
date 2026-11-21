@@ -333,6 +333,8 @@ struct DemoPopover: View {
                 }
             }
 
+            UpdateBannerStrip(updateService: store.updateService)
+
             HairlineRule(showCrosshairs: true)
 
             // Bare Statusline Footer
@@ -527,6 +529,29 @@ struct RenderApp {
         app.setActivationPolicy(.accessory)
         let loc = Localizer(language: .en)
         let args = Array(CommandLine.arguments.dropFirst())
+
+        if let updIdx = args.firstIndex(of: "--update-banner"), updIdx + 1 < args.count {
+            let dir = args[updIdx + 1]
+            try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            let previewState = UpdateCheckerState(
+                currentVersion: SemanticVersion(major: 1, minor: 5, patch: 2),
+                cachedLatestTag: "v1.6.0"
+            )
+            let enStore = makeStore(tab: .cost)
+            enStore.updateService.setPreviewState(previewState)
+            render("update-banner-light-en", DemoPopover(store: enStore, loc: Localizer(language: .en), dark: false), to: dir)
+
+            let zhStore = makeStore(tab: .cost)
+            zhStore.language = .zhHans
+            zhStore.updateService.setPreviewState(previewState)
+            render("update-banner-dark-zh", DemoPopover(store: zhStore, loc: Localizer(language: .zhHans), dark: true), to: dir)
+
+            let notchStore = makeStore(tab: .cost, notch: true)
+            notchStore.language = .zhHans
+            notchStore.updateService.setPreviewState(previewState)
+            render("update-banner-notch", DemoNotch(store: notchStore, loc: Localizer(language: .zhHans)), to: dir)
+            return
+        }
 
         if let themeIdx = args.firstIndex(of: "--themes"), themeIdx + 1 < args.count {
             let dir = args[themeIdx + 1]
