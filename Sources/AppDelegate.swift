@@ -5,9 +5,14 @@ import CoreServices
 
 // MARK: - App Delegate
 
-class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
-    private var popover: NSPopover!
+    private var menuBarPanel: MenuBarPanel!
+    private var menuBarHostingView: FirstMouseHostingView<MenuBarPanelRootView>!
+    private var menuBarPanelAnimates = true
+    private var lastMeasuredPanelHeight: Double = 560.0
+    private var panelAnimationToken = 0
+    private var activeMenuTrackingCount = 0
     private var store = UsageStore()
     private var refreshTimer: Timer?
     private var cancellable: AnyCancellable?
@@ -20,17 +25,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     // Menu-bar content is a SwiftUI hosting view inside the status button (so the
     // Antigravity mark can levitate/pulse while a session is busy and carry the attention dot —
     // the same behavior as the notch and popover header). `menuBarAnchor` coordinates
-    // value/width freezing while the popover is open and flushing on close.
+    // value/width freezing while the panel is open and flushing on close.
     private let menuBarModel = MenuBarModel(text: "…")
     private var menuBarAnchor = MenuBarAnchorState(initialText: "…", initialWidth: 40, isMenuBarVisible: true)
 
     // App presentation state machine: single source of truth for display surface
-    // (menu bar vs notch), popover/notch visibility, statusItem visibility, and hotkey.
+    // (menu bar vs notch), panel/notch visibility, statusItem visibility, and hotkey.
     private var presentation = AppPresentationState()
     private var notchController: NotchController?
     private var displayModeCancellable: AnyCancellable?
     private let hotKeyManager = GlobalHotKeyManager()
     private var hotkeyCancellable: AnyCancellable?
+
+    // Menu-bar floating panel anchor validation, placement, dismiss monitors, and host display
+    // height metrics (backed by `MenuBarAnchorResolver` & `PopoverAnchorSessionState`).
+    private let popoverHostMetrics = PopoverHostMetrics()
+    private var popoverAnchorSession = PopoverAnchorSessionState()
+    private var globalMouseMonitor: Any?
+    private var panelDismissObservers: [NSObjectProtocol] = []
+    private var menuTrackingObservers: [NSObjectProtocol] = []
+    private var screenParametersObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Initialize presentation state synchronously from persisted preferences so zero
@@ -74,20 +88,59 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             ])
         }
 
-        // Popover with SwiftUI content
-        popover = NSPopover()
-        popover.behavior = .transient
-        popover.animates = true
-        popover.delegate = self
-        let hostingController = NSHostingController(
-            rootView: PopoverView(
-                store: store,
-                onQuit: { NSApplication.shared.terminate(nil) },
-                onClose: { [weak self] in self?.popover.performClose(nil) }
-            )
+        // Borderless Control-Center-style floating NSPanel with SwiftUI content.
+        // Replaces arrowed NSPopover so multi-display anchoring, fullscreen menu-bar
+        // retraction, and top-pinned tab height changes never jump or leave an orphaned arrow.
+        let rootView = MenuBarPanelRootView(
+            hostMetrics: popoverHostMetrics,
+            store: store,
+            onQuit: { NSApplication.shared.terminate(nil) },
+            onClose: { [weak self] in self?.closeMenuBarPanel(animated: true) },
+            onHeightChange: { [weak self] h in self?.updateMenuBarPanelHeight(h) }
         )
-        hostingController.sizingOptions = .preferredContentSize
-        popover.contentViewController = hostingController
+        let hostingView = FirstMouseHostingView(rootView: rootView)
+        hostingView.sizingOptions = []
+        hostingView.autoresizingMask = [.width, .height]
+        menuBarHostingView = hostingView
+
+        let panel = MenuBarPanel(
+            contentRect: NSRect(x: 0, y: 0, width: AGYTheme.panelWidth, height: CGFloat(lastMeasuredPanelHeight))
+        )
+        panel.contentView = hostingView
+        panel.onCancelOperation = { [weak self] in
+            self?.closeMenuBarPanel(animated: true)
+        }
+        menuBarPanel = panel
+
+        // Track active NSMenu dropdowns (OptionsMenu / LanguageSwitcher) so opening a
+        // footer menu inside the floating panel never triggers outside-click or resign-key close.
+        let center = NotificationCenter.default
+        let beginMenuObs = center.addObserver(
+            forName: NSMenu.didBeginTrackingNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.activeMenuTrackingCount += 1
+        }
+        let endMenuObs = center.addObserver(
+            forName: NSMenu.didEndTrackingNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.activeMenuTrackingCount = max(0, self.activeMenuTrackingCount - 1)
+            }
+        }
+        menuTrackingObservers = [beginMenuObs, endMenuObs]
+
+        screenParametersObserver = center.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.reconcileMenuBarPanelForScreenChange()
+        }
 
         // Observe current month data + tab changes to update menu bar title.
         // Always shows current month regardless of which month is being viewed.
@@ -189,6 +242,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 if visible {
                     menuBarModel.text = menuBarAnchor.displayedText
                     statusItem.length = CGFloat(menuBarAnchor.appliedWidth)
+                } else {
+                    closeMenuBarPanel(animated: false)
                 }
                 statusItem.isVisible = visible
             case .setMenuBarLogoActive(let active):
@@ -196,20 +251,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                     menuBarModel.isVisible = active
                 }
             case .setPopoverAnimates(let animates):
-                popover.animates = animates
+                menuBarPanelAnimates = animates
             case .openPopover:
-                if let button = statusItem.button, !popover.isShown {
-                    popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-                    popover.contentViewController?.view.window?.makeKey()
-                    dispatchBrainWatcher(.reconcileWatchPaths(candidatePaths: candidateBrainWatchPaths(), now: Date()))
-                    store.refresh()
+                if !presentation.popoverOpen || !menuBarPanel.isVisible {
+                    openMenuBarPanel(animated: menuBarPanelAnimates)
                 }
             case .closePopover:
-                if popover.isShown { popover.performClose(nil) }
+                closeMenuBarPanel(animated: presentation.surface == .menubar && menuBarPanelAnimates)
             case .showStatusContextMenu:
-                if let button = statusItem.button {
-                    showStatusContextMenu(anchorButton: button)
-                }
+                showStatusContextMenu()
             case .revealNotch:
                 notchController?.reveal()
             case .toggleNotch:
@@ -237,11 +287,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     /// The SwiftUI menu-bar content measured a new intrinsic width — size the status
-    /// item to it. Frozen while the popover is open (a resizing anchor drifts the
-    /// popover left); popoverDidClose restores appliedWidth.
+    /// item to it. Frozen while the panel is open; closing restores appliedWidth.
     private func updateMenuBarWidth(_ w: CGFloat) {
         menuBarAnchor.updateMeasuredWidth(Double(w))
-        guard presentation.isStatusItemVisible, !menuBarAnchor.isPopoverShown, !popover.isShown else { return }
+        guard presentation.isStatusItemVisible, !menuBarAnchor.isPopoverShown, !presentation.popoverOpen else { return }
         statusItem.length = CGFloat(menuBarAnchor.appliedWidth)
     }
 
@@ -258,22 +307,299 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
     }
 
-    // NSPopoverDelegate: the title may have changed (data refresh or tab switch) while
-    // the popover was open and we deferred it to keep the anchor stable. Apply it now.
-    func popoverDidClose(_ notification: Notification) {
+    // MARK: - Control-Center Floating Menu Bar Panel (Validated Anchor + Top-Pinned Resize)
+
+    private func currentDisplayDescriptors() -> (
+        descriptors: [MenuBarDisplayDescriptor],
+        byId: [UInt32: NSScreen],
+        mouseDisplayId: UInt32?
+    ) {
+        let mainId = NSScreen.main?.displayID
+        let mouse = NSEvent.mouseLocation
+        var descriptors: [MenuBarDisplayDescriptor] = []
+        var byId: [UInt32: NSScreen] = [:]
+        var mouseDisplayId: UInt32? = nil
+
+        for screen in NSScreen.screens {
+            guard let id = screen.displayID else { continue }
+            byId[id] = screen
+            if NSMouseInRect(mouse, screen.frame, false) {
+                mouseDisplayId = id
+            }
+            let isFS = screen.displayUUID
+                .map { FullscreenDetector.shared.isFullscreen(displayUUID: $0) } ?? false
+            descriptors.append(MenuBarDisplayDescriptor(
+                displayId: id,
+                frame: ScreenRect(nsRect: screen.frame),
+                visibleFrame: ScreenRect(nsRect: screen.visibleFrame),
+                auxiliaryTopLeftArea: screen.auxiliaryTopLeftArea.map(ScreenRect.init(nsRect:)),
+                auxiliaryTopRightArea: screen.auxiliaryTopRightArea.map(ScreenRect.init(nsRect:)),
+                safeAreaTop: Double(screen.safeAreaInsets.top),
+                isBuiltin: screen.isBuiltin,
+                isMain: id == mainId,
+                isFullscreen: isFS
+            ))
+        }
+        return (descriptors, byId, mouseDisplayId)
+    }
+
+    private func statusItemAnchorSnapshot() -> StatusItemAnchorSnapshot {
+        guard let button = statusItem.button, let win = button.window else {
+            return StatusItemAnchorSnapshot(
+                statusItemVisible: statusItem.isVisible,
+                hasWindow: false,
+                windowVisible: false,
+                windowAlpha: 0.0,
+                buttonScreenRect: nil,
+                windowScreenDisplayId: nil
+            )
+        }
+        let rectInWindow = button.convert(button.bounds, to: nil)
+        let rectOnScreen = win.convertToScreen(rectInWindow)
+        return StatusItemAnchorSnapshot(
+            statusItemVisible: statusItem.isVisible,
+            hasWindow: true,
+            windowVisible: win.isVisible,
+            windowAlpha: Double(win.alphaValue),
+            buttonScreenRect: ScreenRect(nsRect: rectOnScreen),
+            windowScreenDisplayId: win.screen?.displayID
+        )
+    }
+
+    private func openMenuBarPanel(animated: Bool) {
+        let (descriptors, byId, mouseDisplayId) = currentDisplayDescriptors()
+        let decision = MenuBarAnchorResolver.resolve(
+            snapshot: statusItemAnchorSnapshot(),
+            displays: descriptors,
+            mouseDisplayId: mouseDisplayId,
+            panelWidth: Double(AGYTheme.panelWidth)
+        )
+
+        let hostDisplayId: UInt32
+        let anchorRect: ScreenRect
+        let shouldHighlightButton: Bool
+
+        switch decision {
+        case .statusItem(let displayId, let buttonRect):
+            hostDisplayId = displayId
+            anchorRect = buttonRect
+            shouldHighlightButton = true
+        case .fallbackMenuBar(let displayId, let rect, _):
+            hostDisplayId = displayId
+            anchorRect = rect
+            shouldHighlightButton = false
+        case .unavailable:
+            popoverAnchorSession.popoverClosed()
+            return
+        }
+
+        guard let hostDisplay = descriptors.first(where: { $0.displayId == hostDisplayId }) else {
+            popoverAnchorSession.popoverClosed()
+            return
+        }
+
+        popoverHostMetrics.screenVisibleHeight = byId[hostDisplayId]?.visibleFrame.height
+            ?? CGFloat(hostDisplay.visibleFrame.height)
+
+        // Freeze status-item text/width BEFORE showing so synchronous refreshes never shift the anchor.
+        menuBarAnchor.popoverOpened()
+        popoverAnchorSession.beginSession(decision: decision)
+
+        // Measure intrinsic SwiftUI height so the initial frame matches content on frame 0.
+        menuBarHostingView.layoutSubtreeIfNeeded()
+        let fittingH = ceil(Double(menuBarHostingView.fittingSize.height))
+        let initialHeight = fittingH > 1.0 ? max(180.0, fittingH) : lastMeasuredPanelHeight
+        lastMeasuredPanelHeight = initialHeight
+
+        let targetFrame = MenuBarAnchorResolver.panelFrame(
+            anchorRect: anchorRect,
+            hostDisplay: hostDisplay,
+            panelWidth: Double(AGYTheme.panelWidth),
+            panelHeight: initialHeight
+        )
+
+        panelAnimationToken += 1
+        detachPanelDismissMonitors()
+
+        menuBarPanel.setFrame(targetFrame.nsRect, display: true)
+        menuBarPanel.invalidateShadow()
+        statusItem.button?.highlight(shouldHighlightButton)
+
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        if animated && !reduceMotion {
+            menuBarPanel.alphaValue = 0.0
+            menuBarPanel.makeKeyAndOrderFront(nil)
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.12
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                self.menuBarPanel.animator().alphaValue = 1.0
+            }
+        } else {
+            menuBarPanel.alphaValue = 1.0
+            menuBarPanel.makeKeyAndOrderFront(nil)
+        }
+
+        dispatchPresentation(.popoverShown)
+        let openToken = panelAnimationToken
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self,
+                  self.panelAnimationToken == openToken,
+                  self.presentation.popoverOpen else { return }
+            self.attachPanelDismissMonitors()
+        }
+
+        dispatchBrainWatcher(.reconcileWatchPaths(candidatePaths: candidateBrainWatchPaths(), now: Date()))
+        store.refresh()
+    }
+
+    private func closeMenuBarPanel(animated: Bool) {
+        let wasOpen = presentation.popoverOpen || menuBarPanel.isVisible
+        detachPanelDismissMonitors()
+        statusItem.button?.highlight(false)
+
+        panelAnimationToken += 1
+        let closeToken = panelAnimationToken
+
+        popoverAnchorSession.popoverClosed()
         menuBarAnchor.popoverClosed()
         menuBarModel.text = menuBarAnchor.displayedText
         if presentation.isStatusItemVisible {
             statusItem.length = CGFloat(menuBarAnchor.appliedWidth)
         }
-        dispatchPresentation(.popoverClosed)
+
+        if presentation.popoverOpen {
+            dispatchPresentation(.popoverClosed)
+        }
+
+        guard wasOpen, menuBarPanel.isVisible else {
+            menuBarPanel.orderOut(nil)
+            menuBarPanel.alphaValue = 1.0
+            return
+        }
+
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        if animated && !reduceMotion {
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0.10
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
+                self.menuBarPanel.animator().alphaValue = 0.0
+            }, completionHandler: { [weak self] in
+                guard let self = self, self.panelAnimationToken == closeToken else { return }
+                self.menuBarPanel.orderOut(nil)
+                self.menuBarPanel.alphaValue = 1.0
+            })
+        } else {
+            menuBarPanel.orderOut(nil)
+            menuBarPanel.alphaValue = 1.0
+        }
     }
 
-    // Animate the open, but stop animating once shown so per-tab content-height
-    // changes resize the popover instantly instead of jittering the rows above.
-    func popoverDidShow(_ notification: Notification) {
-        menuBarAnchor.popoverOpened()
-        dispatchPresentation(.popoverShown)
+    private func updateMenuBarPanelHeight(_ rawHeight: CGFloat) {
+        let h = max(180.0, ceil(Double(rawHeight)))
+        let heightChanged = abs(h - lastMeasuredPanelHeight) > 0.5
+        let frameNeedsSync = presentation.popoverOpen
+            && menuBarPanel.isVisible
+            && abs(Double(menuBarPanel.frame.height) - h) > 0.5
+        guard heightChanged || frameNeedsSync else { return }
+        lastMeasuredPanelHeight = h
+
+        guard presentation.popoverOpen, menuBarPanel.isVisible else { return }
+        let (descriptors, _, _) = currentDisplayDescriptors()
+        let hostDisplay = popoverAnchorSession.mode.displayId.flatMap { id in
+            descriptors.first(where: { $0.displayId == id })
+        }
+        let resized = MenuBarAnchorResolver.resizedPanelFrame(
+            currentFrame: ScreenRect(nsRect: menuBarPanel.frame),
+            newHeight: h,
+            hostDisplay: hostDisplay
+        )
+        menuBarPanel.setFrame(resized.nsRect, display: true, animate: false)
+        menuBarPanel.invalidateShadow()
+    }
+
+    private func reconcileMenuBarPanelForScreenChange() {
+        guard presentation.popoverOpen, menuBarPanel.isVisible else { return }
+        let (descriptors, byId, _) = currentDisplayDescriptors()
+        guard let hostId = popoverAnchorSession.mode.displayId,
+              let host = descriptors.first(where: { $0.displayId == hostId }) else {
+            closeMenuBarPanel(animated: false)
+            return
+        }
+        popoverHostMetrics.screenVisibleHeight = byId[hostId]?.visibleFrame.height
+            ?? CGFloat(host.visibleFrame.height)
+        if let anchor = popoverAnchorSession.mode.anchorRect {
+            let clamped = MenuBarAnchorResolver.panelFrame(
+                anchorRect: anchor,
+                hostDisplay: host,
+                panelWidth: Double(AGYTheme.panelWidth),
+                panelHeight: lastMeasuredPanelHeight
+            )
+            menuBarPanel.setFrame(clamped.nsRect, display: true, animate: false)
+            menuBarPanel.invalidateShadow()
+        }
+    }
+
+    private func attachPanelDismissMonitors() {
+        detachPanelDismissMonitors()
+
+        // Outside clicks in any other application or desktop immediately dismiss the panel.
+        globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        ) { [weak self] _ in
+            guard let self = self else { return }
+            guard self.presentation.popoverOpen,
+                  self.activeMenuTrackingCount == 0,
+                  NSApp.modalWindow == nil else { return }
+            self.closeMenuBarPanel(animated: true)
+        }
+
+        let center = NotificationCenter.default
+        let resignKeyObs = center.addObserver(
+            forName: NSWindow.didResignKeyNotification,
+            object: menuBarPanel,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self = self,
+                  self.presentation.popoverOpen,
+                  self.activeMenuTrackingCount == 0,
+                  NSApp.modalWindow == nil else { return }
+            // If resign-key was caused by clicking our own statusItem button, suppress the
+            // matching `leftMouseUp` toggle so clicking the icon closes cleanly without bouncing.
+            if NSApp.currentEvent?.type == .leftMouseDown,
+               let buttonRect = self.statusItemAnchorSnapshot().buttonScreenRect {
+                let mouse = NSEvent.mouseLocation
+                if buttonRect.contains(x: Double(mouse.x), y: Double(mouse.y)) {
+                    self.popoverAnchorSession.noteTransientCloseFromStatusItemClick(at: Date())
+                }
+            }
+            self.closeMenuBarPanel(animated: true)
+        }
+
+        let spaceObs = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self = self, self.presentation.popoverOpen else { return }
+            self.closeMenuBarPanel(animated: false)
+        }
+
+        panelDismissObservers = [resignKeyObs, spaceObs]
+    }
+
+    private func detachPanelDismissMonitors() {
+        if let monitor = globalMouseMonitor {
+            NSEvent.removeMonitor(monitor)
+            globalMouseMonitor = nil
+        }
+        guard !panelDismissObservers.isEmpty else { return }
+        let center = NotificationCenter.default
+        let wsCenter = NSWorkspace.shared.notificationCenter
+        for token in panelDismissObservers {
+            center.removeObserver(token)
+            wsCenter.removeObserver(token)
+        }
+        panelDismissObservers.removeAll()
     }
 
     // MARK: - Brain Watcher & Refresh Scheduler (backed by BrainWatcherLifecycleMachine)
@@ -417,6 +743,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         cancellable?.cancel(); cancellable = nil
         displayModeCancellable?.cancel(); displayModeCancellable = nil
         hotkeyCancellable?.cancel(); hotkeyCancellable = nil
+        closeMenuBarPanel(animated: false)
+        for obs in menuTrackingObservers {
+            NotificationCenter.default.removeObserver(obs)
+        }
+        menuTrackingObservers.removeAll()
+        if let obs = screenParametersObserver {
+            NotificationCenter.default.removeObserver(obs)
+            screenParametersObserver = nil
+        }
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         DistributedNotificationCenter.default().removeObserver(self)
         dispatchPresentation(.appWillTerminate)
@@ -432,10 +767,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let event = NSApp.currentEvent
         let isRightClick = event?.type == .rightMouseUp
             || (event?.type == .leftMouseUp && event?.modifierFlags.contains(.control) == true)
+        if !isRightClick, popoverAnchorSession.consumeSuppressedStatusItemClick(at: Date()) {
+            return
+        }
         dispatchPresentation(isRightClick ? .statusItemRightClicked : .statusItemLeftClicked)
     }
 
-    private func showStatusContextMenu(anchorButton button: NSStatusBarButton) {
+    private func showStatusContextMenu() {
+        let (descriptors, _, mouseDisplayId) = currentDisplayDescriptors()
+        let decision = MenuBarAnchorResolver.resolve(
+            snapshot: statusItemAnchorSnapshot(),
+            displays: descriptors,
+            mouseDisplayId: mouseDisplayId,
+            panelWidth: Double(AGYTheme.panelWidth)
+        )
+        guard decision != .unavailable else { return }
+
         let loc = Localizer(language: store.language)
         let menu = NSMenu()
 
@@ -521,7 +868,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         quitItem.target = self
         menu.addItem(quitItem)
 
-        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
+        switch decision {
+        case .statusItem:
+            if let button = statusItem.button {
+                menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
+            }
+        case .fallbackMenuBar(_, let anchorRect, _):
+            menu.popUp(positioning: nil, at: NSPoint(x: anchorRect.midX, y: anchorRect.minY), in: nil)
+        case .unavailable:
+            break
+        }
     }
 
     @objc private func contextJumpWaiting(_ sender: NSMenuItem) {
@@ -564,6 +920,112 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     @objc private func contextQuit() {
         NSApplication.shared.terminate(nil)
+    }
+}
+
+// MARK: - Popover Host Metrics & ScreenRect Bridge
+
+private extension ScreenRect {
+    init(nsRect: NSRect) {
+        self.init(
+            x: Double(nsRect.origin.x),
+            y: Double(nsRect.origin.y),
+            width: Double(nsRect.size.width),
+            height: Double(nsRect.size.height)
+        )
+    }
+
+    var nsRect: NSRect {
+        NSRect(x: CGFloat(x), y: CGFloat(y), width: CGFloat(width), height: CGFloat(height))
+    }
+}
+
+/// Borderless Control-Center-style floating panel for Menu Bar mode.
+/// Non-activating so opening over native Fullscreen apps never switches Spaces, yet
+/// accepts key focus for keyboard shortcuts (`⌘1`–`⌘5`, `↑`/`↓`/`Return`, `Esc`).
+private final class MenuBarPanel: NSPanel {
+    var onCancelOperation: (() -> Void)?
+
+    convenience init(contentRect: NSRect) {
+        self.init(
+            contentRect: contentRect,
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+    }
+
+    override init(
+        contentRect: NSRect,
+        styleMask: NSWindow.StyleMask,
+        backing: NSWindow.BackingStoreType,
+        defer flag: Bool
+    ) {
+        super.init(contentRect: contentRect, styleMask: styleMask, backing: backing, defer: flag)
+        isFloatingPanel = true
+        hidesOnDeactivate = false
+        isOpaque = false
+        backgroundColor = .clear
+        hasShadow = true
+        isMovable = false
+        isMovableByWindowBackground = false
+        titleVisibility = .hidden
+        titlebarAppearsTransparent = true
+        isReleasedWhenClosed = false
+        acceptsMouseMovedEvents = true
+        animationBehavior = .none
+        level = .statusBar
+        collectionBehavior = [.transient, .ignoresCycle, .canJoinAllSpaces, .fullScreenAuxiliary]
+    }
+
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+
+    override func cancelOperation(_ sender: Any?) {
+        onCancelOperation?()
+    }
+}
+
+/// Holds the resolved host display's visible height for the Menu Bar panel so
+/// `PopoverView.maxContentHeight` clamps against the actual host display instead of `NSScreen.main`.
+final class PopoverHostMetrics: ObservableObject {
+    @Published var screenVisibleHeight: CGFloat? = nil
+}
+
+private struct MenuBarPanelRootView: View {
+    @ObservedObject var hostMetrics: PopoverHostMetrics
+    @ObservedObject var store: UsageStore
+    let onQuit: () -> Void
+    let onClose: () -> Void
+    let onHeightChange: (CGFloat) -> Void
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    private let cornerRadius: CGFloat = 12
+
+    private var borderColor: Color {
+        let theme = AGYTheme(preset: store.themePreset, colorScheme: colorScheme, isNotch: false)
+        return theme.isDark
+            ? Color.white.opacity(0.14)
+            : Color.black.opacity(0.12)
+    }
+
+    var body: some View {
+        PopoverView(store: store, onQuit: onQuit, onClose: onClose)
+            .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .strokeBorder(borderColor, lineWidth: 1)
+            )
+            .background(
+                GeometryReader { geo in
+                    Color.clear
+                        .onAppear { onHeightChange(geo.size.height) }
+                        .onChange(of: geo.size.height) { h in onHeightChange(h) }
+                }
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .environment(\.popoverHostScreenHeight, hostMetrics.screenVisibleHeight)
     }
 }
 

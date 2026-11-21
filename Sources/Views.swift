@@ -47,24 +47,44 @@ struct TelemetryStepper: View {
     }
 }
 
-private struct PanelHeightKey: Hashable, Sendable {
+struct PanelHeightKey: Hashable, Sendable {
     let tab: DisplayTab
     let visualMode: TelemetryVisualMode
     let timeRange: TimeRange?
     let isCurrentMonth: Bool
+    let sessionBucket: Int
+    let monthWeekRows: Int
 
     static func make(
-        tab: DisplayTab,
-        visualMode: TelemetryVisualMode,
-        timeRange: TimeRange,
-        isCurrentMonth: Bool
+        store: UsageStore,
+        tabOverride: DisplayTab? = nil,
+        timeRangeOverride: TimeRange? = nil
     ) -> PanelHeightKey {
-        PanelHeightKey(
+        let tab = tabOverride ?? store.selectedTab
+        let range = timeRangeOverride ?? store.timeRange
+        let sessionBucket: Int = (tab == .session)
+            ? min(store.sessionStore.sessions.count, 6)
+            : 0
+        let monthWeekRows: Int = (tab == .time && range == .month)
+            ? TimeLogic.weeksOfMonth(year: store.viewingYear, month: store.viewingMonth).count
+            : 0
+        return PanelHeightKey(
             tab: tab,
-            visualMode: visualMode,
-            timeRange: tab == .time ? timeRange : nil,
-            isCurrentMonth: (tab == .cost || tab == .tokens || tab == .time) ? isCurrentMonth : true
+            visualMode: store.visualMode,
+            timeRange: tab == .time ? range : nil,
+            isCurrentMonth: (tab == .cost || tab == .tokens || tab == .time) ? store.isCurrentMonth : true,
+            sessionBucket: sessionBucket,
+            monthWeekRows: monthWeekRows
         )
+    }
+}
+
+/// Keyed per-layout height map so an outgoing tab or outgoing Time sub-range still
+/// animating out in a ZStack can never pollute or bounce the incoming panel height.
+struct ContentHeightsKey: PreferenceKey {
+    static var defaultValue: [PanelHeightKey: CGFloat] = [:]
+    static func reduce(value: inout [PanelHeightKey: CGFloat], nextValue: () -> [PanelHeightKey: CGFloat]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
     }
 }
 
@@ -80,6 +100,7 @@ struct PopoverView: View {
 
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.telemetryStaticRender) private var isStaticRender
+    @Environment(\.popoverHostScreenHeight) private var popoverHostScreenHeight
     @State private var heightState: PanelHeightState<PanelHeightKey>
     @State private var tabTransition: TabTransitionState<DisplayTab>
     @State private var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
@@ -91,12 +112,7 @@ struct PopoverView: View {
         self.onQuit = onQuit
         self.onClose = onClose
         let initialTab = store.selectedTab
-        let initialKey = PanelHeightKey.make(
-            tab: initialTab,
-            visualMode: store.visualMode,
-            timeRange: store.timeRange,
-            isCurrentMonth: store.isCurrentMonth
-        )
+        let initialKey = PanelHeightKey.make(store: store, tabOverride: initialTab)
         _heightState = State(initialValue: PanelHeightState(
             initialKey: initialKey,
             defaultHeight: 460.0,
@@ -106,42 +122,35 @@ struct PopoverView: View {
     }
 
     private var currentHeightKey: PanelHeightKey {
-        PanelHeightKey.make(
-            tab: tabTransition.activeId,
-            visualMode: store.visualMode,
-            timeRange: store.timeRange,
-            isCurrentMonth: store.isCurrentMonth
-        )
+        PanelHeightKey.make(store: store, tabOverride: tabTransition.activeId)
     }
 
     private var loc: Localizer { Localizer(language: store.language) }
     private var isNotch: Bool { store.displayMode == .notch }
+    private var allowsPanelHeightAnimation: Bool { isNotch && !isStaticRender }
     private var theme: AGYTheme {
         AGYTheme(preset: store.themePreset, colorScheme: colorScheme, isNotch: isNotch)
     }
 
     private var tabContentAnimation: Animation? {
         guard !isStaticRender else { return nil }
-        return reduceMotion ? TelemetryMotion.reduced : TelemetryMotion.tabContent
+        if reduceMotion { return TelemetryMotion.reduced }
+        return isNotch ? TelemetryMotion.tabContent : TelemetryMotion.popoverTabContent
     }
 
     private var panelHeightAnimation: Animation? {
-        guard !isStaticRender else { return nil }
+        guard allowsPanelHeightAnimation else { return nil }
         return reduceMotion ? TelemetryMotion.reduced : TelemetryMotion.panelHeight
     }
 
-    /// Keyed per-layout height map so an outgoing tab still animating out in the ZStack
-    /// can never pollute or bounce the incoming tab's target panel height.
-    private struct ContentHeightsKey: PreferenceKey {
-        static var defaultValue: [PanelHeightKey: CGFloat] = [:]
-        static func reduce(value: inout [PanelHeightKey: CGFloat], nextValue: () -> [PanelHeightKey: CGFloat]) {
-            value.merge(nextValue(), uniquingKeysWith: { _, new in new })
-        }
+    private var maxContentHeight: CGFloat {
+        let screenH = popoverHostScreenHeight ?? NSScreen.main?.visibleFrame.height ?? 900
+        return max(260, screenH - 170)
     }
 
-    private var maxContentHeight: CGFloat {
-        let screenH = NSScreen.main?.visibleFrame.height ?? 900
-        return max(260, screenH - 170)
+    private var clampedContentHeight: CGFloat {
+        let raw = min(max(CGFloat(heightState.currentHeight), 1), maxContentHeight)
+        return isNotch ? raw : ceil(raw)
     }
 
     private var currentYear: Int {
@@ -156,8 +165,9 @@ struct PopoverView: View {
 
     /// Stable identity for the right-aligned header accessory so identical steppers
     /// across COST / TOK / TIME (Week/Month) stay rock-solid while distinct badges glide.
+    /// Synced to `tabTransition.activeId` so header & content never desync by 1 frame.
     private var headerAccessoryTransitionId: String {
-        switch store.selectedTab {
+        switch tabTransition.activeId {
         case .cost, .tokens:
             return "monthStepper"
         case .time:
@@ -170,6 +180,8 @@ struct PopoverView: View {
     }
 
     var body: some View {
+        let activeTab = tabTransition.activeId
+        let activeKey = currentHeightKey
         VStack(spacing: 0) {
             header
                 .padding(.horizontal, 14)
@@ -183,33 +195,36 @@ struct PopoverView: View {
                 loc: loc
             )
 
-            ScrollView(showsIndicators: false) {
-                let activeTab = tabTransition.activeId
-                let activeKey = currentHeightKey
-                ZStack(alignment: .top) {
-                    contentSection(for: activeTab)
-                        .id(activeTab)
-                        .background(GeometryReader { geo in
-                            Color.clear.preference(
-                                key: ContentHeightsKey.self,
-                                value: [activeKey: geo.size.height]
-                            )
-                        })
-                        .transition(
-                            TelemetryMotion.tabContentTransition(
-                                direction: tabTransition.direction,
-                                reduceMotion: reduceMotion
-                            )
-                        )
+            ZStack(alignment: .top) {
+                ScrollView(showsIndicators: false) {
+                    tabContentWithHeightReporting(for: activeTab, key: activeKey)
+                        .frame(maxWidth: .infinity, alignment: .top)
                 }
-                .frame(maxWidth: .infinity, alignment: .top)
+                .id(activeTab)
+                .transition(
+                    TelemetryMotion.tabContentTransition(
+                        direction: tabTransition.direction,
+                        isNotch: isNotch,
+                        reduceMotion: reduceMotion
+                    )
+                )
             }
+            .frame(maxWidth: .infinity, alignment: .top)
+            .animation(tabContentAnimation, value: tabTransition)
+            .frame(height: clampedContentHeight, alignment: .top)
             .clipped()
             .onPreferenceChange(ContentHeightsKey.self) { heights in
                 let activeKey = currentHeightKey
                 guard let next = heights[activeKey], next > 1 else { return }
                 var nextState = heightState
-                let update = nextState.recordMeasurement(for: activeKey, height: Double(next))
+                if nextState.activeKey != activeKey {
+                    _ = nextState.switchKey(to: activeKey, allowsAnimation: allowsPanelHeightAnimation)
+                }
+                let update = nextState.recordMeasurement(
+                    for: activeKey,
+                    height: Double(next),
+                    allowsAnimation: allowsPanelHeightAnimation
+                )
                 PopoverHeightMemory.byKey = nextState.memory
                 if let update = update, update.animate {
                     withAnimation(panelHeightAnimation) {
@@ -219,7 +234,6 @@ struct PopoverView: View {
                     heightState = nextState
                 }
             }
-            .frame(height: min(max(CGFloat(heightState.currentHeight), 1), maxContentHeight))
 
             HairlineRule(showCrosshairs: true)
 
@@ -236,16 +250,21 @@ struct PopoverView: View {
         .onChange(of: store.selectedTab) { nextTab in
             var nextTransition = tabTransition
             nextTransition.transition(to: nextTab, in: Self.canonicalTabOrder)
-            let nextKey = PanelHeightKey.make(
-                tab: nextTab,
-                visualMode: store.visualMode,
-                timeRange: store.timeRange,
-                isCurrentMonth: store.isCurrentMonth
-            )
+            let nextKey = PanelHeightKey.make(store: store, tabOverride: nextTab)
             var nextHeight = heightState
-            _ = nextHeight.switchKey(to: nextKey)
-            withAnimation(tabContentAnimation) {
-                tabTransition = nextTransition
+            let heightUpdate = nextHeight.switchKey(
+                to: nextKey,
+                allowsAnimation: allowsPanelHeightAnimation
+            )
+            // Keep `tabTransition` outside `withAnimation` so `.animation(tabContentAnimation, value: tabTransition)`
+            // animates ONLY the inner tab ZStack, while `heightState` updates non-animated in Menu Bar mode
+            // (eliminating VStack vertical centering bounce & NSPopover spring churn) and smoothly in Notch mode.
+            tabTransition = nextTransition
+            if let heightUpdate = heightUpdate, heightUpdate.animate {
+                withAnimation(panelHeightAnimation) {
+                    heightState = nextHeight
+                }
+            } else {
                 heightState = nextHeight
             }
         }
@@ -253,6 +272,15 @@ struct PopoverView: View {
         .onChange(of: store.timeRange) { _ in syncPanelHeightKey() }
         .onChange(of: store.viewingMonth) { _ in syncPanelHeightKey() }
         .onChange(of: store.viewingYear) { _ in syncPanelHeightKey() }
+        .onReceive(
+            store.sessionStore.$sessions
+                .map { min($0.count, 6) }
+                .removeDuplicates()
+        ) { _ in
+            if tabTransition.activeId == .session {
+                syncPanelHeightKey()
+            }
+        }
         .onReceive(NSWorkspace.shared.notificationCenter.publisher(
             for: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification)) { _ in
             reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
@@ -266,12 +294,31 @@ struct PopoverView: View {
     private func syncPanelHeightKey() {
         let nextKey = currentHeightKey
         var nextHeight = heightState
-        if let update = nextHeight.switchKey(to: nextKey), update.animate {
+        if let update = nextHeight.switchKey(to: nextKey, allowsAnimation: allowsPanelHeightAnimation),
+           update.animate {
             withAnimation(panelHeightAnimation) {
                 heightState = nextHeight
             }
         } else {
             heightState = nextHeight
+        }
+    }
+
+    /// Emits `ContentHeightsKey` for the active tab. `.time` reports its own height from inside
+    /// `TimeTabView`'s `.id(activeRange)` child so outgoing range views can never inflate the
+    /// incoming range's measured height.
+    @ViewBuilder
+    private func tabContentWithHeightReporting(for tab: DisplayTab, key: PanelHeightKey) -> some View {
+        if tab == .time {
+            contentSection(for: tab)
+        } else {
+            contentSection(for: tab)
+                .background(GeometryReader { geo in
+                    Color.clear.preference(
+                        key: ContentHeightsKey.self,
+                        value: [key: geo.size.height]
+                    )
+                })
         }
     }
 
@@ -344,7 +391,7 @@ struct PopoverView: View {
 
     @ViewBuilder
     private var contextHeaderAccessory: some View {
-        switch store.selectedTab {
+        switch tabTransition.activeId {
         case .cost, .tokens:
             TelemetryStepper(
                 label: store.viewingMonthCompactLabel,

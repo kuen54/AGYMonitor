@@ -5,6 +5,14 @@ import AppKit
 
 // MARK: - Time Tab
 
+private struct TimeStripHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        let n = nextValue()
+        if n > 0 { value = n }
+    }
+}
+
 struct TimeTabView: View {
     @ObservedObject var store: UsageStore
     @Environment(\.localizer) private var loc
@@ -13,6 +21,7 @@ struct TimeTabView: View {
     @Environment(\.telemetryStaticRender) private var isStaticRender
     @Environment(\.telemetryReduceMotion) private var reduceMotion
     @State private var rangeTransition: TabTransitionState<TimeRange>
+    @State private var stripHeight: CGFloat = 25
 
     init(store: UsageStore) {
         self.store = store
@@ -21,37 +30,57 @@ struct TimeTabView: View {
 
     private var rangeAnimation: Animation? {
         guard !isStaticRender else { return nil }
-        return reduceMotion ? TelemetryMotion.reduced : TelemetryMotion.tabContent
+        if reduceMotion { return TelemetryMotion.reduced }
+        return theme.isNotch ? TelemetryMotion.tabContent : TelemetryMotion.popoverTabContent
     }
 
     var body: some View {
+        let activeRange = rangeTransition.activeId
+        let activeKey = PanelHeightKey.make(
+            store: store,
+            tabOverride: .time,
+            timeRangeOverride: activeRange
+        )
         VStack(spacing: 0) {
             TelemetrySegmentedStrip(
                 items: TimeRange.allCases,
                 selection: $store.timeRange,
                 label: { $0.label(loc) }
             )
+            .background(GeometryReader { geo in
+                Color.clear.preference(key: TimeStripHeightKey.self, value: geo.size.height)
+            })
+            .onPreferenceChange(TimeStripHeightKey.self) { h in
+                if h > 1, abs(h - stripHeight) > 0.5 {
+                    stripHeight = h
+                }
+            }
 
             ZStack(alignment: .top) {
-                let activeRange = rangeTransition.activeId
                 rangeContent(for: activeRange)
                     .id(activeRange)
+                    .background(GeometryReader { geo in
+                        Color.clear.preference(
+                            key: ContentHeightsKey.self,
+                            value: [activeKey: stripHeight + geo.size.height]
+                        )
+                    })
                     .transition(
                         TelemetryMotion.tabContentTransition(
                             direction: rangeTransition.direction,
+                            isNotch: theme.isNotch,
                             reduceMotion: reduceMotion
                         )
                     )
             }
             .frame(maxWidth: .infinity, alignment: .top)
             .clipped()
+            .animation(rangeAnimation, value: rangeTransition)
         }
         .onChange(of: store.timeRange) { nextRange in
             var next = rangeTransition
             next.transition(to: nextRange, in: TimeRange.allCases)
-            withAnimation(rangeAnimation) {
-                rangeTransition = next
-            }
+            rangeTransition = next
         }
     }
 

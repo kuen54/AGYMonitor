@@ -407,24 +407,32 @@ public struct PanelHeightState<Key: Hashable & Sendable>: Equatable, Sendable {
         self.phase = .unmeasured
     }
 
-    public mutating func recordMeasurement(for key: Key, height: Double) -> PanelHeightUpdate? {
-        guard height > 1.0 else { return nil }
-        memory[key] = height
+    public mutating func recordMeasurement(
+        for key: Key,
+        height: Double,
+        allowsAnimation: Bool = true
+    ) -> PanelHeightUpdate? {
+        guard height.isFinite, height > 1.0 else { return nil }
+        let normalized = allowsAnimation ? height : ceil(height)
+        memory[key] = normalized
         guard key == activeKey else { return nil }
         let wasMeasured = (phase == .measured)
         phase = .measured
-        guard abs(height - currentHeight) > 0.5 else { return nil }
-        currentHeight = height
-        return PanelHeightUpdate(height: height, animate: wasMeasured)
+        guard abs(normalized - currentHeight) > 0.5 else { return nil }
+        currentHeight = normalized
+        return PanelHeightUpdate(height: normalized, animate: allowsAnimation && wasMeasured)
     }
 
-    public mutating func switchKey(to nextKey: Key) -> PanelHeightUpdate? {
+    public mutating func switchKey(
+        to nextKey: Key,
+        allowsAnimation: Bool = true
+    ) -> PanelHeightUpdate? {
         activeKey = nextKey
-        guard let remembered = memory[nextKey], abs(remembered - currentHeight) > 0.5 else {
-            return nil
-        }
-        currentHeight = remembered
-        return PanelHeightUpdate(height: remembered, animate: phase == .measured)
+        guard let remembered = memory[nextKey] else { return nil }
+        let target = allowsAnimation ? remembered : ceil(remembered)
+        guard abs(target - currentHeight) > 0.5 else { return nil }
+        currentHeight = target
+        return PanelHeightUpdate(height: target, animate: allowsAnimation && phase == .measured)
     }
 }
 

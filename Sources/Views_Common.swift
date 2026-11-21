@@ -79,6 +79,10 @@ private struct TelemetryReduceMotionKey: EnvironmentKey {
     static let defaultValue = false
 }
 
+private struct PopoverHostScreenHeightKey: EnvironmentKey {
+    static let defaultValue: CGFloat? = nil
+}
+
 extension EnvironmentValues {
     var localizer: Localizer {
         get { self[LocalizerKey.self] }
@@ -88,6 +92,11 @@ extension EnvironmentValues {
     var telemetryReduceMotion: Bool {
         get { self[TelemetryReduceMotionKey.self] }
         set { self[TelemetryReduceMotionKey.self] = newValue }
+    }
+
+    var popoverHostScreenHeight: CGFloat? {
+        get { self[PopoverHostScreenHeightKey.self] }
+        set { self[PopoverHostScreenHeightKey.self] = newValue }
     }
 }
 
@@ -956,14 +965,27 @@ struct RefreshToolbarButton: View {
 /// Shared spring curves and transitions for AGY // TELEMETRY tab switches and
 /// segmented controls. Respects Reduce Motion and static `ImageRenderer` snapshots.
 enum TelemetryMotion {
-    static let tabIndicator = Animation.spring(response: 0.26, dampingFraction: 0.84, blendDuration: 0)
-    static let tabContent   = Animation.spring(response: 0.28, dampingFraction: 0.88, blendDuration: 0)
-    static let panelHeight  = Animation.spring(response: 0.28, dampingFraction: 0.90, blendDuration: 0)
-    static let reduced      = Animation.easeOut(duration: 0.14)
+    static let tabIndicator        = Animation.spring(response: 0.26, dampingFraction: 0.84, blendDuration: 0)
+    static let popoverTabIndicator = Animation.spring(response: 0.22, dampingFraction: 0.96, blendDuration: 0)
+    static let tabContent          = Animation.spring(response: 0.28, dampingFraction: 0.88, blendDuration: 0)
+    static let popoverTabContent   = Animation.timingCurve(0.22, 1.0, 0.36, 1.0, duration: 0.18)
+    static let panelHeight         = Animation.spring(response: 0.28, dampingFraction: 0.90, blendDuration: 0)
+    static let reduced             = Animation.easeOut(duration: 0.14)
 
-    static func tabContentTransition(direction: SlideDirection, reduceMotion: Bool) -> AnyTransition {
+    static func tabContentTransition(
+        direction: SlideDirection,
+        isNotch: Bool = true,
+        reduceMotion: Bool
+    ) -> AnyTransition {
         if reduceMotion {
             return .opacity
+        }
+        if !isNotch {
+            let incomingOffset: CGFloat = direction == .forward ? 10 : -10
+            return .asymmetric(
+                insertion: .opacity.combined(with: .offset(x: incomingOffset)),
+                removal: .opacity
+            )
         }
         let incomingOffset: CGFloat = direction == .forward ? 18 : -18
         return .asymmetric(
@@ -1016,7 +1038,8 @@ struct TelemetryTabBar: View {
 
     private var indicatorAnimation: Animation? {
         guard !isStaticRender else { return nil }
-        return reduceMotion ? TelemetryMotion.reduced : TelemetryMotion.tabIndicator
+        if reduceMotion { return TelemetryMotion.reduced }
+        return theme.isNotch ? TelemetryMotion.tabIndicator : TelemetryMotion.popoverTabIndicator
     }
 
     var body: some View {
@@ -1069,9 +1092,7 @@ struct TelemetryTabBar: View {
                     .onHover { inside in hovered = inside ? tab : (hovered == tab ? nil : hovered) }
                     .onTapGesture {
                         guard selection != tab else { return }
-                        withAnimation(indicatorAnimation) {
-                            selection = tab
-                        }
+                        selection = tab
                     }
 
                     if index < items.count - 1 {
@@ -1125,7 +1146,8 @@ struct TelemetrySegmentedStrip<Value: Hashable>: View {
 
     private var indicatorAnimation: Animation? {
         guard !isStaticRender else { return nil }
-        return reduceMotion ? TelemetryMotion.reduced : TelemetryMotion.tabIndicator
+        if reduceMotion { return TelemetryMotion.reduced }
+        return theme.isNotch ? TelemetryMotion.tabIndicator : TelemetryMotion.popoverTabIndicator
     }
 
     var body: some View {
@@ -1165,9 +1187,7 @@ struct TelemetrySegmentedStrip<Value: Hashable>: View {
                         .onHover { inside in hovered = inside ? item : (hovered == item ? nil : hovered) }
                         .onTapGesture {
                             guard selection != item else { return }
-                            withAnimation(indicatorAnimation) {
-                                selection = item
-                            }
+                            selection = item
                         }
 
                     if index < items.count - 1 {
