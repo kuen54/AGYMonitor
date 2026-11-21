@@ -93,6 +93,7 @@ final class NotchViewModel: ObservableObject {
     @Published var closedNotchSize: CGSize = .zero
     @Published var isSynthetic: Bool = false
     @Published var activeWing: NotchWingKind? = nil
+    @Published var screenVisibleHeight: CGFloat? = nil
 
     /// AppKit geometry readouts consumed only by NotchController — intentionally NOT @Published
     /// so PreferenceKey updates during spring animations never trigger SwiftUI body rebuild storms.
@@ -264,6 +265,7 @@ struct NotchRootView: View {
                     onClose: { vm.onRequestClose?() }
                 )
                 .environment(\.notchViewModel, vm)
+                .environment(\.popoverHostScreenHeight, vm.screenVisibleHeight)
                 .fixedSize()
                 .padding(.horizontal, hMargin)
                 .padding(.top, max(8, vm.closedNotchSize.height

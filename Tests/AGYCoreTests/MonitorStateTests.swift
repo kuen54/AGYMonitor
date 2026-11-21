@@ -255,4 +255,566 @@ struct MonitorStateTests {
         #expect(!du.anyUnseen)
         #expect(du.prevStatuses.isEmpty)
     }
+
+    // MARK: - MenuBarAnchorResolver & PopoverAnchorSessionState (Issue #2)
+
+    private static let builtinNotchedDisplay = MenuBarDisplayDescriptor(
+        displayId: 1,
+        frame: ScreenRect(x: 0, y: 0, width: 1728, height: 1117),
+        visibleFrame: ScreenRect(x: 0, y: 0, width: 1728, height: 1080),
+        auxiliaryTopLeftArea: ScreenRect(x: 0, y: 1080, width: 764, height: 37),
+        auxiliaryTopRightArea: ScreenRect(x: 964, y: 1080, width: 764, height: 37),
+        safeAreaTop: 37,
+        isBuiltin: true,
+        isMain: false
+    )
+
+    private static let externalRightDisplay = MenuBarDisplayDescriptor(
+        displayId: 2,
+        frame: ScreenRect(x: 1728, y: 0, width: 2560, height: 1440),
+        visibleFrame: ScreenRect(x: 1728, y: 0, width: 2560, height: 1415),
+        auxiliaryTopLeftArea: nil,
+        auxiliaryTopRightArea: nil,
+        safeAreaTop: 0,
+        isBuiltin: false,
+        isMain: true
+    )
+
+    @Test("MenuBarAnchorResolver accepts valid status items on notched display (LTR and RTL)")
+    func anchorValidNotchedLTRAndRTL() {
+        let ltrRect = ScreenRect(x: 1420, y: 1086, width: 64, height: 24)
+        let ltrSnap = StatusItemAnchorSnapshot(
+            statusItemVisible: true,
+            hasWindow: true,
+            windowVisible: true,
+            windowAlpha: 1.0,
+            buttonScreenRect: ltrRect,
+            windowScreenDisplayId: 1
+        )
+        #expect(
+            MenuBarAnchorResolver.resolve(snapshot: ltrSnap, displays: [Self.builtinNotchedDisplay])
+                == .statusItem(displayId: 1, buttonRect: ltrRect)
+        )
+
+        // RTL menu bar places status items in auxiliaryTopLeftArea
+        let rtlRect = ScreenRect(x: 120, y: 1086, width: 64, height: 24)
+        let rtlSnap = StatusItemAnchorSnapshot(
+            statusItemVisible: true,
+            hasWindow: true,
+            windowVisible: true,
+            windowAlpha: 1.0,
+            buttonScreenRect: rtlRect,
+            windowScreenDisplayId: 1
+        )
+        #expect(
+            MenuBarAnchorResolver.resolve(snapshot: rtlSnap, displays: [Self.builtinNotchedDisplay])
+                == .statusItem(displayId: 1, buttonRect: rtlRect)
+        )
+    }
+
+    @Test("MenuBarAnchorResolver accepts valid status items on negative-X (left) and negative-Y (bottom) displays")
+    func anchorValidNegativeCoordinateDisplays() {
+        let leftDisplay = MenuBarDisplayDescriptor(
+            displayId: 10,
+            frame: ScreenRect(x: -2560, y: 0, width: 2560, height: 1440),
+            visibleFrame: ScreenRect(x: -2560, y: 0, width: 2560, height: 1415),
+            isBuiltin: false,
+            isMain: false
+        )
+        let leftButton = ScreenRect(x: -180, y: 1416, width: 64, height: 24)
+        let leftSnap = StatusItemAnchorSnapshot(
+            statusItemVisible: true,
+            hasWindow: true,
+            windowVisible: true,
+            windowAlpha: 1.0,
+            buttonScreenRect: leftButton,
+            windowScreenDisplayId: 10
+        )
+        #expect(
+            MenuBarAnchorResolver.resolve(
+                snapshot: leftSnap,
+                displays: [Self.builtinNotchedDisplay, leftDisplay]
+            ) == .statusItem(displayId: 10, buttonRect: leftButton)
+        )
+
+        let bottomDisplay = MenuBarDisplayDescriptor(
+            displayId: 11,
+            frame: ScreenRect(x: 0, y: -1080, width: 1920, height: 1080),
+            visibleFrame: ScreenRect(x: 0, y: -1080, width: 1920, height: 1055),
+            isBuiltin: false,
+            isMain: false
+        )
+        let bottomButton = ScreenRect(x: 1680, y: -24, width: 64, height: 24)
+        let bottomSnap = StatusItemAnchorSnapshot(
+            statusItemVisible: true,
+            hasWindow: true,
+            windowVisible: true,
+            windowAlpha: 1.0,
+            buttonScreenRect: bottomButton,
+            windowScreenDisplayId: 11
+        )
+        #expect(
+            MenuBarAnchorResolver.resolve(
+                snapshot: bottomSnap,
+                displays: [Self.builtinNotchedDisplay, bottomDisplay]
+            ) == .statusItem(displayId: 11, buttonRect: bottomButton)
+        )
+    }
+
+    @Test("MenuBarAnchorResolver catches Issue #2 off-screen parked button (x = -1724) and anchors cleanly to top-right")
+    func anchorIssue2OffScreenParkedFallback() {
+        let parkedSnap = StatusItemAnchorSnapshot(
+            statusItemVisible: true,
+            hasWindow: true,
+            windowVisible: true,
+            windowAlpha: 1.0,
+            buttonScreenRect: ScreenRect(x: -1724, y: 1086, width: 64, height: 24),
+            windowScreenDisplayId: 1
+        )
+        let decision = MenuBarAnchorResolver.resolve(
+            snapshot: parkedSnap,
+            displays: [Self.builtinNotchedDisplay, Self.externalRightDisplay],
+            mouseDisplayId: 2,
+            panelWidth: 420
+        )
+        guard case .fallbackMenuBar(let displayId, let anchorRect, let reason) = decision else {
+            Issue.record("Expected .fallbackMenuBar, got \(decision)")
+            return
+        }
+        #expect(displayId == 2)
+        #expect(reason == .offScreen)
+        // Must sit in the external display's top-right menu-bar band, NEVER clamped to left edge x = 1728!
+        #expect(anchorRect.minY == 1415.0)
+        #expect(anchorRect.midX > 3800.0 && anchorRect.midX < 4288.0)
+    }
+
+    @Test("MenuBarAnchorResolver rejects buttons fully or >50% inside the MacBook notch cutout")
+    func anchorNotchOcclusion() {
+        // Completely inside notch cutout [764, 964]
+        let insideNotch = StatusItemAnchorSnapshot(
+            statusItemVisible: true,
+            hasWindow: true,
+            windowVisible: true,
+            windowAlpha: 1.0,
+            buttonScreenRect: ScreenRect(x: 830, y: 1086, width: 60, height: 24),
+            windowScreenDisplayId: 1
+        )
+        if case .fallbackMenuBar(let id, let anchorRect, let reason) = MenuBarAnchorResolver.resolve(
+            snapshot: insideNotch,
+            displays: [Self.builtinNotchedDisplay]
+        ) {
+            #expect(id == 1)
+            #expect(reason == .notchOccluded)
+            // Fallback rect must sit inside auxiliaryTopRightArea, not inside the notch
+            #expect(anchorRect.midX >= 980.0 && anchorRect.midX <= 1712.0)
+        } else {
+            Issue.record("Expected .notchOccluded fallback for button inside notch")
+        }
+
+        // Partially clipped (>50% inside notch: [924, 964] = 40pt occluded, [964, 984] = 20pt visible)
+        let clippedNotch = StatusItemAnchorSnapshot(
+            statusItemVisible: true,
+            hasWindow: true,
+            windowVisible: true,
+            windowAlpha: 1.0,
+            buttonScreenRect: ScreenRect(x: 924, y: 1086, width: 60, height: 24),
+            windowScreenDisplayId: 1
+        )
+        if case .fallbackMenuBar(_, _, let reason) = MenuBarAnchorResolver.resolve(
+            snapshot: clippedNotch,
+            displays: [Self.builtinNotchedDisplay]
+        ) {
+            #expect(reason == .notchOccluded)
+        } else {
+            Issue.record("Expected .notchOccluded fallback for >50% notch-clipped button")
+        }
+    }
+
+    @Test("MenuBarAnchorResolver pins stationary anchor under revealed auto-hide/fullscreen menu bar and rejects hidden button above frame.maxY")
+    func anchorAutoHideAndFullscreenMenuBar() {
+        let autoHideDisplay = MenuBarDisplayDescriptor(
+            displayId: 3,
+            frame: ScreenRect(x: 0, y: 0, width: 2560, height: 1440),
+            visibleFrame: ScreenRect(x: 0, y: 0, width: 2560, height: 1440),
+            isBuiltin: false,
+            isMain: true
+        )
+        #expect(autoHideDisplay.hasEphemeralMenuBar)
+
+        let revealedRect = ScreenRect(x: 2300, y: 1416, width: 64, height: 24)
+        let revealedSnap = StatusItemAnchorSnapshot(
+            statusItemVisible: true,
+            hasWindow: true,
+            windowVisible: true,
+            windowAlpha: 1.0,
+            buttonScreenRect: revealedRect,
+            windowScreenDisplayId: 3
+        )
+        // Revealed auto-hide menu bar pins stationary anchor directly under the clicked icon
+        // so the popover never rides NSStatusBarWindow upward when the menu bar retracts.
+        #expect(
+            MenuBarAnchorResolver.resolve(snapshot: revealedSnap, displays: [autoHideDisplay])
+                == .fallbackMenuBar(
+                    displayId: 3,
+                    anchorRect: MenuBarAnchorResolver.pinnedAnchorRect(for: revealedRect),
+                    reason: .ephemeralMenuBar
+                )
+        )
+
+        // Native Fullscreen Space on a notched MacBook (even when visibleFrame.maxY < frame.maxY)
+        let notchedFullscreen = MenuBarDisplayDescriptor(
+            displayId: 1,
+            frame: ScreenRect(x: 0, y: 0, width: 1728, height: 1117),
+            visibleFrame: ScreenRect(x: 0, y: 0, width: 1728, height: 1080),
+            auxiliaryTopLeftArea: ScreenRect(x: 0, y: 1080, width: 760, height: 37),
+            auxiliaryTopRightArea: ScreenRect(x: 968, y: 1080, width: 760, height: 37),
+            safeAreaTop: 37,
+            isBuiltin: true,
+            isMain: true,
+            isFullscreen: true
+        )
+        #expect(notchedFullscreen.hasEphemeralMenuBar)
+
+        let fsIconRect = ScreenRect(x: 1380, y: 1086, width: 64, height: 24)
+        let fsSnap = StatusItemAnchorSnapshot(
+            statusItemVisible: true,
+            hasWindow: true,
+            windowVisible: true,
+            windowAlpha: 1.0,
+            buttonScreenRect: fsIconRect,
+            windowScreenDisplayId: 1
+        )
+        #expect(
+            MenuBarAnchorResolver.resolve(snapshot: fsSnap, displays: [notchedFullscreen])
+                == .fallbackMenuBar(
+                    displayId: 1,
+                    anchorRect: MenuBarAnchorResolver.pinnedAnchorRect(for: fsIconRect),
+                    reason: .ephemeralMenuBar
+                )
+        )
+
+        // Fullscreen overlay menu bar revealed slightly below auxiliaryTopRightArea on notched MacBook
+        let fsOverlayRect = ScreenRect(x: 1380, y: 1056, width: 64, height: 24)
+        let fsOverlaySnap = StatusItemAnchorSnapshot(
+            statusItemVisible: true,
+            hasWindow: true,
+            windowVisible: true,
+            windowAlpha: 1.0,
+            buttonScreenRect: fsOverlayRect,
+            windowScreenDisplayId: 1
+        )
+        #expect(
+            MenuBarAnchorResolver.resolve(snapshot: fsOverlaySnap, displays: [notchedFullscreen])
+                == .fallbackMenuBar(
+                    displayId: 1,
+                    anchorRect: MenuBarAnchorResolver.pinnedAnchorRect(for: fsOverlayRect),
+                    reason: .ephemeralMenuBar
+                )
+        )
+
+        let hiddenAboveTop = StatusItemAnchorSnapshot(
+            statusItemVisible: true,
+            hasWindow: true,
+            windowVisible: true,
+            windowAlpha: 1.0,
+            buttonScreenRect: ScreenRect(x: 2300, y: 1441, width: 64, height: 24),
+            windowScreenDisplayId: 3
+        )
+        if case .fallbackMenuBar(let id, let anchorRect, let reason) = MenuBarAnchorResolver.resolve(
+            snapshot: hiddenAboveTop,
+            displays: [autoHideDisplay]
+        ) {
+            #expect(id == 3)
+            #expect(reason == .offScreen)
+            #expect(anchorRect.minY == 1416.0)
+        } else {
+            Issue.record("Expected .offScreen fallback when auto-hide status window is slid above frame.maxY")
+        }
+    }
+
+    @Test("MenuBarAnchorResolver rejects hidden, missing-window, alpha-0, degenerate, mid-screen, and empty-display states")
+    func anchorHiddenAndDegenerateStates() {
+        let displays = [Self.externalRightDisplay]
+        let validRect = ScreenRect(x: 4000, y: 1416, width: 64, height: 24)
+
+        func reasonFor(_ snap: StatusItemAnchorSnapshot) -> AnchorFallbackReason? {
+            if case .fallbackMenuBar(_, _, let reason) = MenuBarAnchorResolver.resolve(snapshot: snap, displays: displays) {
+                return reason
+            }
+            return nil
+        }
+
+        #expect(reasonFor(StatusItemAnchorSnapshot(
+            statusItemVisible: false, hasWindow: true, windowVisible: true, windowAlpha: 1, buttonScreenRect: validRect, windowScreenDisplayId: 2
+        )) == .statusItemHidden)
+
+        #expect(reasonFor(StatusItemAnchorSnapshot(
+            statusItemVisible: true, hasWindow: false, windowVisible: false, windowAlpha: 0, buttonScreenRect: nil, windowScreenDisplayId: nil
+        )) == .missingWindow)
+
+        #expect(reasonFor(StatusItemAnchorSnapshot(
+            statusItemVisible: true, hasWindow: true, windowVisible: false, windowAlpha: 1, buttonScreenRect: validRect, windowScreenDisplayId: 2
+        )) == .windowNotVisible)
+
+        #expect(reasonFor(StatusItemAnchorSnapshot(
+            statusItemVisible: true, hasWindow: true, windowVisible: true, windowAlpha: 0.0, buttonScreenRect: validRect, windowScreenDisplayId: 2
+        )) == .windowNotVisible)
+
+        #expect(reasonFor(StatusItemAnchorSnapshot(
+            statusItemVisible: true, hasWindow: true, windowVisible: true, windowAlpha: 1.0, buttonScreenRect: ScreenRect(x: 4000, y: 1416, width: 0, height: 24), windowScreenDisplayId: 2
+        )) == .degenerateRect)
+
+        #expect(reasonFor(StatusItemAnchorSnapshot(
+            statusItemVisible: true, hasWindow: true, windowVisible: true, windowAlpha: 1.0, buttonScreenRect: ScreenRect(x: 2400, y: 600, width: 64, height: 24), windowScreenDisplayId: 2
+        )) == .outsideMenuBarBand)
+
+        // Zero connected displays -> .unavailable (never fabricates coordinates)
+        #expect(MenuBarAnchorResolver.resolve(
+            snapshot: StatusItemAnchorSnapshot(
+                statusItemVisible: true, hasWindow: true, windowVisible: true, windowAlpha: 1.0, buttonScreenRect: validRect, windowScreenDisplayId: 2
+            ),
+            displays: []
+        ) == .unavailable)
+    }
+
+    @Test("MenuBarAnchorResolver enforces fallback display priority and narrow-screen X clamping")
+    func anchorFallbackDisplayPriorityAndClamping() {
+        let dLowest = MenuBarDisplayDescriptor(
+            displayId: 1,
+            frame: ScreenRect(x: 0, y: 0, width: 1280, height: 800),
+            visibleFrame: ScreenRect(x: 0, y: 0, width: 1280, height: 776),
+            isBuiltin: false,
+            isMain: false
+        )
+        let dBuiltin = MenuBarDisplayDescriptor(
+            displayId: 2,
+            frame: ScreenRect(x: 1280, y: 0, width: 1512, height: 982),
+            visibleFrame: ScreenRect(x: 1280, y: 0, width: 1512, height: 945),
+            isBuiltin: true,
+            isMain: false
+        )
+        let dMain = MenuBarDisplayDescriptor(
+            displayId: 3,
+            frame: ScreenRect(x: 2792, y: 0, width: 2560, height: 1440),
+            visibleFrame: ScreenRect(x: 2792, y: 0, width: 2560, height: 1415),
+            isBuiltin: false,
+            isMain: true
+        )
+
+        #expect(MenuBarAnchorResolver.selectFallbackDisplay(displays: [], mouseDisplayId: nil) == nil)
+        #expect(MenuBarAnchorResolver.selectFallbackDisplay(displays: [dLowest, dBuiltin, dMain], mouseDisplayId: 1)?.displayId == 1)
+        #expect(MenuBarAnchorResolver.selectFallbackDisplay(displays: [dLowest, dBuiltin, dMain], mouseDisplayId: nil)?.displayId == 3)
+        #expect(MenuBarAnchorResolver.selectFallbackDisplay(displays: [dLowest, dBuiltin], mouseDisplayId: nil)?.displayId == 2)
+        #expect(MenuBarAnchorResolver.selectFallbackDisplay(displays: [dLowest], mouseDisplayId: nil)?.displayId == 1)
+
+        // Synthetic descriptor with zero-sized auxiliary areas must not be treated as notched
+        let degenerateAux = MenuBarDisplayDescriptor(
+            displayId: 8,
+            frame: ScreenRect(x: 0, y: 0, width: 1440, height: 900),
+            visibleFrame: ScreenRect(x: 0, y: 0, width: 1440, height: 876),
+            auxiliaryTopLeftArea: ScreenRect(x: 0, y: 876, width: 0, height: 24),
+            auxiliaryTopRightArea: ScreenRect(x: 1440, y: 876, width: 0, height: 24),
+            safeAreaTop: 24
+        )
+        #expect(degenerateAux.hasNotch == false)
+
+        // Narrow notched auxiliaryTopRightArea (width 200 < panelWidth 420) clamps X inside usable area
+        let narrowNotched = MenuBarDisplayDescriptor(
+            displayId: 9,
+            frame: ScreenRect(x: 0, y: 0, width: 600, height: 800),
+            visibleFrame: ScreenRect(x: 0, y: 0, width: 600, height: 763),
+            auxiliaryTopLeftArea: ScreenRect(x: 0, y: 763, width: 200, height: 37),
+            auxiliaryTopRightArea: ScreenRect(x: 400, y: 763, width: 200, height: 37),
+            safeAreaTop: 37,
+            isBuiltin: true,
+            isMain: true
+        )
+        let clampedRect = MenuBarAnchorResolver.fallbackAnchorRect(on: narrowNotched, panelWidth: 420)
+        #expect(clampedRect.midX >= 416.0 && clampedRect.midX <= 584.0)
+        #expect(clampedRect.minY == 763.0)
+    }
+
+    @Test("MenuBarAnchorResolver.isPopoverFrameAnchored detects top-left clamps, wrong display, and vertical drops")
+    func anchorLiveDriftDetection() {
+        let host = Self.externalRightDisplay
+        let expectedRightAnchor = ScreenRect(x: 4020, y: 1415, width: 64, height: 24)
+
+        // Normal centered popover under anchor
+        let normalPopover = ScreenRect(x: 3842, y: 900, width: 420, height: 515)
+        #expect(MenuBarAnchorResolver.isPopoverFrameAnchored(
+            popoverFrame: normalPopover,
+            expectedAnchorRect: expectedRightAnchor,
+            hostDisplay: host
+        ))
+
+        // Right-edge-clamped popover (anchor near far right edge of screen)
+        let farRightAnchor = ScreenRect(x: 4220, y: 1415, width: 50, height: 24)
+        let clampedRightPopover = ScreenRect(x: 3860, y: 900, width: 420, height: 515)
+        #expect(MenuBarAnchorResolver.isPopoverFrameAnchored(
+            popoverFrame: clampedRightPopover,
+            expectedAnchorRect: farRightAnchor,
+            hostDisplay: host
+        ))
+
+        // Issue #2 failure: popover jumped to exact top-left of external display (x = 1728)
+        let topLeftJumped = ScreenRect(x: 1728, y: 900, width: 420, height: 515)
+        #expect(!MenuBarAnchorResolver.isPopoverFrameAnchored(
+            popoverFrame: topLeftJumped,
+            expectedAnchorRect: expectedRightAnchor,
+            hostDisplay: host
+        ))
+
+        // Popover drifted onto wrong display (built-in [0, 1728])
+        let wrongDisplay = ScreenRect(x: 1200, y: 560, width: 420, height: 515)
+        #expect(!MenuBarAnchorResolver.isPopoverFrameAnchored(
+            popoverFrame: wrongDisplay,
+            expectedAnchorRect: expectedRightAnchor,
+            hostDisplay: host
+        ))
+
+        // Popover dragged upward by 24pt retracting fullscreen menu bar (> 20pt tolerance)
+        let draggedUpByMenuBar = ScreenRect(x: 3842, y: 924, width: 420, height: 515)
+        #expect(!MenuBarAnchorResolver.isPopoverFrameAnchored(
+            popoverFrame: draggedUpByMenuBar,
+            expectedAnchorRect: expectedRightAnchor,
+            hostDisplay: host
+        ))
+
+        // Popover dropped vertically away from menu bar (> 20pt gap)
+        let droppedVertically = ScreenRect(x: 3842, y: 700, width: 420, height: 515)
+        #expect(!MenuBarAnchorResolver.isPopoverFrameAnchored(
+            popoverFrame: droppedVertically,
+            expectedAnchorRect: expectedRightAnchor,
+            hostDisplay: host
+        ))
+    }
+
+    @Test("PopoverAnchorSessionState suppresses transient click-to-toggle double-bounce within click window")
+    func popoverAnchorSessionSuppressesTransientBounce() {
+        var session = PopoverAnchorSessionState()
+        let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+
+        let pinnedRect = ScreenRect(x: 1411, y: 1086, width: 2, height: 2)
+        session.beginSession(decision: .fallbackMenuBar(displayId: 1, anchorRect: pinnedRect, reason: .ephemeralMenuBar))
+        session.noteTransientCloseFromStatusItemClick(at: t0)
+        // popoverClosed() preserves the suppression window until leftMouseUp arrives
+        session.popoverClosed()
+
+        let consumed = session.consumeSuppressedStatusItemClick(at: t0.addingTimeInterval(0.08))
+        #expect(consumed == true)
+        // Consumed once; subsequent click opens normally
+        let secondClick = session.consumeSuppressedStatusItemClick(at: t0.addingTimeInterval(0.12))
+        #expect(secondClick == false)
+
+        // Expired window (e.g. user pressed down then dragged off button) does not suppress later click
+        session.noteTransientCloseFromStatusItemClick(at: t0)
+        let expired = session.consumeSuppressedStatusItemClick(at: t0.addingTimeInterval(0.75))
+        #expect(expired == false)
+    }
+
+    @Test("PopoverAnchorSessionState bounds re-anchor attempts to max 2, guards re-entrancy, and resets on close")
+    func popoverAnchorSessionBounds() {
+        var session = PopoverAnchorSessionState()
+        #expect(session.mode == .none)
+        #expect(session.consumeReanchorAttempt() == false) // closed session cannot re-anchor
+
+        let btnRect = ScreenRect(x: 1420, y: 1086, width: 64, height: 24)
+        session.beginSession(decision: .statusItem(displayId: 1, buttonRect: btnRect))
+        #expect(session.mode == .statusItem(displayId: 1, anchorRect: btnRect))
+        #expect(session.reanchorAttempts == 0)
+
+        // Attempt 1 succeeds and enters reanchoring guard
+        #expect(session.consumeReanchorAttempt() == true)
+        #expect(session.isReanchoring == true)
+        #expect(session.reanchorAttempts == 1)
+        // Re-entrant call while already re-anchoring is rejected
+        #expect(session.consumeReanchorAttempt() == false)
+        session.finishReanchor(decision: .statusItem(displayId: 1, buttonRect: btnRect))
+        #expect(session.isReanchoring == false)
+        #expect(session.reanchorAttempts == 1)
+
+        // Attempt 2 succeeds and switches to fallback
+        let fallbackRect = ScreenRect(x: 1505, y: 1080, width: 2, height: 2)
+        #expect(session.consumeReanchorAttempt() == true)
+        #expect(session.reanchorAttempts == 2)
+        session.finishReanchor(decision: .fallbackMenuBar(displayId: 1, anchorRect: fallbackRect, reason: .offScreen))
+        #expect(session.mode == .fallback(displayId: 1, anchorRect: fallbackRect))
+
+        // Attempt 3 is blocked by maxReanchorAttempts = 2
+        #expect(session.consumeReanchorAttempt() == false)
+
+        // Closing popover resets mode, attempts, and guard cleanly
+        session.popoverClosed()
+        #expect(session.mode == .none)
+        #expect(session.reanchorAttempts == 0)
+        #expect(session.isReanchoring == false)
+    }
+
+    @Test("MenuBarAnchorResolver.panelFrame centers under icon, clamps edges/Dock/negative-X, and resizedPanelFrame locks topY & minX")
+    func menuBarPanelPlacementAndTopPinnedResize() {
+        // 1. Centered under status item vertically centered inside notched 37pt menu bar
+        //    (button.minY = 1089.5 is 9.5pt ABOVE visibleFrame.maxY = 1080; panel must clear notch!)
+        let anchor = ScreenRect(x: 1180, y: 1089.5, width: 64, height: 22) // midX = 1212
+        let frame = MenuBarAnchorResolver.panelFrame(
+            anchorRect: anchor,
+            hostDisplay: Self.builtinNotchedDisplay,
+            panelWidth: 420,
+            panelHeight: 540,
+            topGap: 6,
+            edgeMargin: 8
+        )
+        #expect(abs(frame.minX - (1212.0 - 210.0)) < 0.01)
+        #expect(abs(frame.maxY - (1080.0 - 6.0)) < 0.01) // strictly 6pt below notch/menu bar bottom, not 1089.5 - 6
+        #expect(abs(frame.width - 420.0) < 0.01)
+        #expect(abs(frame.height - 540.0) < 0.01)
+
+        // 2. Far-right status item clamps cleanly to right edge margin (1728 - 8 - 420 = 1300)
+        let farRight = ScreenRect(x: 1680, y: 1080, width: 44, height: 37)
+        let clampedRight = MenuBarAnchorResolver.panelFrame(
+            anchorRect: farRight,
+            hostDisplay: Self.builtinNotchedDisplay,
+            panelWidth: 420,
+            panelHeight: 500
+        )
+        #expect(abs(clampedRight.maxX - (1728.0 - 8.0)) < 0.01)
+        #expect(abs(clampedRight.maxY - 1074.0) < 0.01)
+
+        // 3. Secondary display on the left (negative X) with left-side Dock (visibleFrame.minX = -1850)
+        let leftWithDock = MenuBarDisplayDescriptor(
+            displayId: 7,
+            frame: ScreenRect(x: -1920, y: 0, width: 1920, height: 1080),
+            visibleFrame: ScreenRect(x: -1850, y: 0, width: 1850, height: 1055),
+            isBuiltin: false,
+            isMain: false
+        )
+        let leftEdgeAnchor = ScreenRect(x: -1880, y: 1055, width: 40, height: 25)
+        let clampedLeft = MenuBarAnchorResolver.panelFrame(
+            anchorRect: leftEdgeAnchor,
+            hostDisplay: leftWithDock,
+            panelWidth: 420,
+            panelHeight: 460
+        )
+        #expect(abs(clampedLeft.minX - (-1850.0 + 8.0)) < 0.01)
+        #expect(abs(clampedLeft.maxY - 1049.0) < 0.01)
+
+        // 4. Top-pinned tab resize: minX, width, and maxY stay mathematically invariant across shrink & grow
+        let shrunk = MenuBarAnchorResolver.resizedPanelFrame(
+            currentFrame: frame,
+            newHeight: 380,
+            hostDisplay: Self.builtinNotchedDisplay
+        )
+        #expect(abs(shrunk.minX - frame.minX) < 0.001)
+        #expect(abs(shrunk.width - frame.width) < 0.001)
+        #expect(abs(shrunk.maxY - frame.maxY) < 0.001)
+        #expect(abs(shrunk.height - 380.0) < 0.001)
+
+        let grown = MenuBarAnchorResolver.resizedPanelFrame(
+            currentFrame: shrunk,
+            newHeight: 620,
+            hostDisplay: Self.builtinNotchedDisplay
+        )
+        #expect(abs(grown.minX - frame.minX) < 0.001)
+        #expect(abs(grown.maxY - frame.maxY) < 0.001)
+        #expect(abs(grown.height - 620.0) < 0.001)
+    }
 }

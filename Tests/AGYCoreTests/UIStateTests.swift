@@ -239,6 +239,72 @@ struct UIStateTests {
         #expect(hs.currentHeight == 520.0)
     }
 
+    @Test("PanelHeightState suppresses height animation and applies integer ceiling when allowsAnimation is false (Menu Bar mode)")
+    func panelHeightMenuBarDiscretePolicy() {
+        var hs = PanelHeightState<String>(initialKey: "cost", defaultHeight: 460.0)
+        #expect(hs.phase == .unmeasured)
+
+        // First measurement transitions .unmeasured -> .measured, ceils fractional pt, animate == false
+        let first = hs.recordMeasurement(for: "cost", height: 412.3, allowsAnimation: false)
+        #expect(hs.phase == .measured)
+        #expect(first == PanelHeightUpdate(height: 413.0, animate: false))
+        #expect(hs.currentHeight == 413.0)
+
+        // Subsequent measurement in Menu Bar mode still returns animate == false
+        let second = hs.recordMeasurement(for: "cost", height: 501.2, allowsAnimation: false)
+        #expect(second == PanelHeightUpdate(height: 502.0, animate: false))
+
+        // Switch to a second key, measure it, then switch back — switchKey also returns animate == false
+        #expect(hs.switchKey(to: "time-week", allowsAnimation: false) == nil)
+        let weekMeasure = hs.recordMeasurement(for: "time-week", height: 359.4, allowsAnimation: false)
+        #expect(weekMeasure == PanelHeightUpdate(height: 360.0, animate: false))
+
+        let backToCost = hs.switchKey(to: "cost", allowsAnimation: false)
+        #expect(backToCost == PanelHeightUpdate(height: 502.0, animate: false))
+    }
+
+    @Test("PanelHeightState dynamically toggles animation on runtime menubar <-> notch switches while preserving memory")
+    func panelHeightDynamicSurfaceToggle() {
+        var hs = PanelHeightState<String>(initialKey: "cost", defaultHeight: 460.0)
+
+        // Start in Menu Bar mode (allowsAnimation: false)
+        _ = hs.recordMeasurement(for: "cost", height: 400.0, allowsAnimation: false)
+        _ = hs.switchKey(to: "tokens", allowsAnimation: false)
+        _ = hs.recordMeasurement(for: "tokens", height: 510.0, allowsAnimation: false)
+        #expect(hs.phase == .measured)
+
+        // Switch to Notch mode (allowsAnimation: true) — memory and .measured phase stay intact, now animates!
+        let toCostNotch = hs.switchKey(to: "cost", allowsAnimation: true)
+        #expect(toCostNotch == PanelHeightUpdate(height: 400.0, animate: true))
+
+        let notchGrow = hs.recordMeasurement(for: "cost", height: 445.5, allowsAnimation: true)
+        #expect(notchGrow == PanelHeightUpdate(height: 445.5, animate: true))
+
+        // Switch back to Menu Bar mode (allowsAnimation: false) — immediately disables height animation & ceils
+        let backToTokensMenuBar = hs.switchKey(to: "tokens", allowsAnimation: false)
+        #expect(backToTokensMenuBar == PanelHeightUpdate(height: 510.0, animate: false))
+        let backToCostMenuBar = hs.switchKey(to: "cost", allowsAnimation: false)
+        #expect(backToCostMenuBar == PanelHeightUpdate(height: 446.0, animate: false))
+    }
+
+    @Test("PanelHeightState isolates outgoing TimeRange measurements so YEAR never pollutes WEEK height")
+    func panelHeightOutgoingTimeRangeIsolation() {
+        var hs = PanelHeightState<String>(initialKey: "time-year", defaultHeight: 460.0)
+        _ = hs.recordMeasurement(for: "time-year", height: 500.0, allowsAnimation: false)
+        #expect(hs.currentHeight == 500.0)
+
+        // Switch from YEAR to WEEK (first visit to WEEK, unremembered)
+        #expect(hs.switchKey(to: "time-week", allowsAnimation: false) == nil)
+        let weekUpdate = hs.recordMeasurement(for: "time-week", height: 360.0, allowsAnimation: false)
+        #expect(weekUpdate == PanelHeightUpdate(height: 360.0, animate: false))
+
+        // Outgoing YEAR still transitioning out reports 500pt — MUST NOT clobber WEEK's currentHeight or memory!
+        #expect(hs.recordMeasurement(for: "time-year", height: 500.0, allowsAnimation: false) == nil)
+        #expect(hs.currentHeight == 360.0)
+        #expect(hs.memory["time-week"] == 360.0)
+        #expect(hs.memory["time-year"] == 500.0)
+    }
+
     @Test("BoundedLRUState promotes hits to MRU and evicts true LRU entry")
     func boundedLRUEvictionOrder() {
         var lru = BoundedLRUState<String, Int>(maxEntries: 2)

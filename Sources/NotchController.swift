@@ -292,6 +292,9 @@ final class NotchController: NSObject {
             if inst.vm.isSynthetic != ns.isSynthetic {
                 inst.vm.isSynthetic = ns.isSynthetic
             }
+            if inst.vm.screenVisibleHeight != ns.screen.visibleFrame.height {
+                inst.vm.screenVisibleHeight = ns.screen.visibleFrame.height
+            }
             if var st = coordinator.displays[id] {
                 st.lastPointerSample = nil
                 coordinator.displays[id] = st
@@ -305,6 +308,7 @@ final class NotchController: NSObject {
             let inst = NotchInstance(displayId: desc.displayId, panel: panel, screen: ns)
             inst.vm.closedNotchSize = ns.closedNotchSize
             inst.vm.isSynthetic = ns.isSynthetic
+            inst.vm.screenVisibleHeight = ns.screen.visibleFrame.height
             inst.vm.isOpen = coordinator.displays[desc.displayId]?.isOpen ?? false
             inst.vm.activeWing = wingState.activeWing
             inst.vm.onAcquireModalLock = { [weak self, weak inst] lock in

@@ -519,6 +519,601 @@ public enum MenuBarMetricPreference: String, CaseIterable, Codable, Sendable {
     case costAndQuota
 }
 
+// MARK: - Popover & Context-Menu Anchor Validation, Fallback & Drift Detection
+
+/// Foundation-only screen rectangle (`Double` coordinates, AppKit bottom-left origin).
+public struct ScreenRect: Equatable, Sendable {
+    public let x: Double
+    public let y: Double
+    public let width: Double
+    public let height: Double
+
+    public init(x: Double, y: Double, width: Double, height: Double) {
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+    }
+
+    public var isFinite: Bool {
+        x.isFinite && y.isFinite && width.isFinite && height.isFinite
+    }
+
+    public var minX: Double { x }
+    public var maxX: Double { x + width }
+    public var minY: Double { y }
+    public var maxY: Double { y + height }
+    public var midX: Double { x + width * 0.5 }
+    public var midY: Double { y + height * 0.5 }
+    public var area: Double { max(0.0, width) * max(0.0, height) }
+
+    public func contains(x px: Double, y py: Double) -> Bool {
+        guard isFinite, px.isFinite, py.isFinite, width > 0.0, height > 0.0 else {
+            return false
+        }
+        return px >= minX && px <= maxX && py >= minY && py <= maxY
+    }
+
+    public func intersection(_ other: ScreenRect) -> ScreenRect? {
+        guard isFinite, other.isFinite,
+              width > 0.0, height > 0.0,
+              other.width > 0.0, other.height > 0.0 else {
+            return nil
+        }
+        let ix1 = max(minX, other.minX)
+        let iy1 = max(minY, other.minY)
+        let ix2 = min(maxX, other.maxX)
+        let iy2 = min(maxY, other.maxY)
+        guard ix2 > ix1, iy2 > iy1 else { return nil }
+        return ScreenRect(x: ix1, y: iy1, width: ix2 - ix1, height: iy2 - iy1)
+    }
+}
+
+/// Pure display geometry snapshot corresponding to one connected `NSScreen`.
+public struct MenuBarDisplayDescriptor: Equatable, Sendable {
+    public let displayId: UInt32
+    public let frame: ScreenRect
+    public let visibleFrame: ScreenRect
+    public let auxiliaryTopLeftArea: ScreenRect?
+    public let auxiliaryTopRightArea: ScreenRect?
+    public let safeAreaTop: Double
+    public let isBuiltin: Bool
+    public let isMain: Bool
+    public let isFullscreen: Bool
+
+    public init(
+        displayId: UInt32,
+        frame: ScreenRect,
+        visibleFrame: ScreenRect,
+        auxiliaryTopLeftArea: ScreenRect? = nil,
+        auxiliaryTopRightArea: ScreenRect? = nil,
+        safeAreaTop: Double = 0.0,
+        isBuiltin: Bool = false,
+        isMain: Bool = false,
+        isFullscreen: Bool = false
+    ) {
+        self.displayId = displayId
+        self.frame = frame
+        self.visibleFrame = visibleFrame
+        self.auxiliaryTopLeftArea = auxiliaryTopLeftArea
+        self.auxiliaryTopRightArea = auxiliaryTopRightArea
+        self.safeAreaTop = safeAreaTop
+        self.isBuiltin = isBuiltin
+        self.isMain = isMain
+        self.isFullscreen = isFullscreen
+    }
+
+    /// True when the menu bar on this display slides out of view after the pointer leaves
+    /// the top edge (native macOS Fullscreen Space or auto-hidden desktop menu bar).
+    /// Anchoring `NSPopover` directly to `NSStatusBarButton` on an ephemeral menu bar drags
+    /// the popover upward/off-screen as macOS retracts `NSStatusBarWindow`.
+    public var hasEphemeralMenuBar: Bool {
+        let dockedMenuBarHeight = frame.maxY - visibleFrame.maxY
+        return isFullscreen || dockedMenuBarHeight <= 1.0
+    }
+
+    public var hasNotch: Bool {
+        guard safeAreaTop.isFinite, safeAreaTop > 0.0,
+              let left = auxiliaryTopLeftArea,
+              let right = auxiliaryTopRightArea else {
+            return false
+        }
+        return left.isFinite && left.width > 0.0 && left.height > 0.0
+            && right.isFinite && right.width > 0.0 && right.height > 0.0
+    }
+
+    /// Physical notch cutout gap between `auxiliaryTopLeftArea` and `auxiliaryTopRightArea`.
+    public var notchCutoutRect: ScreenRect? {
+        guard safeAreaTop > 0.0,
+              let left = auxiliaryTopLeftArea,
+              let right = auxiliaryTopRightArea,
+              right.minX > left.maxX else {
+            return nil
+        }
+        let bandY = frame.maxY - safeAreaTop
+        return ScreenRect(
+            x: left.maxX,
+            y: bandY,
+            width: right.minX - left.maxX,
+            height: safeAreaTop
+        )
+    }
+}
+
+/// Pure snapshot of `NSStatusItem` / `NSStatusBarButton` window visibility and screen rect.
+public struct StatusItemAnchorSnapshot: Equatable, Sendable {
+    public let statusItemVisible: Bool
+    public let hasWindow: Bool
+    public let windowVisible: Bool
+    public let windowAlpha: Double
+    public let buttonScreenRect: ScreenRect?
+    public let windowScreenDisplayId: UInt32?
+
+    public init(
+        statusItemVisible: Bool,
+        hasWindow: Bool,
+        windowVisible: Bool,
+        windowAlpha: Double,
+        buttonScreenRect: ScreenRect?,
+        windowScreenDisplayId: UInt32?
+    ) {
+        self.statusItemVisible = statusItemVisible
+        self.hasWindow = hasWindow
+        self.windowVisible = windowVisible
+        self.windowAlpha = windowAlpha
+        self.buttonScreenRect = buttonScreenRect
+        self.windowScreenDisplayId = windowScreenDisplayId
+    }
+}
+
+public enum AnchorFallbackReason: Equatable, Sendable {
+    case statusItemHidden
+    case missingWindow
+    case windowNotVisible
+    case degenerateRect
+    case offScreen
+    case notchOccluded
+    case outsideMenuBarBand
+    case ephemeralMenuBar
+}
+
+public enum PopoverAnchorDecision: Equatable, Sendable {
+    case statusItem(displayId: UInt32, buttonRect: ScreenRect)
+    case fallbackMenuBar(displayId: UInt32, anchorRect: ScreenRect, reason: AnchorFallbackReason)
+    case unavailable
+}
+
+public enum PopoverAnchorSessionMode: Equatable, Sendable {
+    case none
+    case statusItem(displayId: UInt32, anchorRect: ScreenRect)
+    case fallback(displayId: UInt32, anchorRect: ScreenRect)
+
+    public var displayId: UInt32? {
+        switch self {
+        case .none: return nil
+        case .statusItem(let id, _), .fallback(let id, _): return id
+        }
+    }
+
+    public var anchorRect: ScreenRect? {
+        switch self {
+        case .none: return nil
+        case .statusItem(_, let rect), .fallback(_, let rect): return rect
+        }
+    }
+
+    public var isFallback: Bool {
+        if case .fallback = self { return true }
+        return false
+    }
+}
+
+/// Pure open-session anchor tracker for `AppDelegate` (zero shadow booleans).
+/// Tracks the active anchor mode, bounds live drift recovery to `maxReanchorAttempts`
+/// (default 2) per open session, and guards programmatic close/re-show re-entrancy.
+public struct PopoverAnchorSessionState: Equatable, Sendable {
+    public private(set) var mode: PopoverAnchorSessionMode
+    public private(set) var reanchorAttempts: Int
+    public private(set) var isReanchoring: Bool
+    public private(set) var suppressedStatusItemClickUntil: Date?
+    public let maxReanchorAttempts: Int
+
+    public init(maxReanchorAttempts: Int = 2) {
+        self.mode = .none
+        self.reanchorAttempts = 0
+        self.isReanchoring = false
+        self.suppressedStatusItemClickUntil = nil
+        self.maxReanchorAttempts = max(0, maxReanchorAttempts)
+    }
+
+    public mutating func beginSession(decision: PopoverAnchorDecision) {
+        reanchorAttempts = 0
+        isReanchoring = false
+        suppressedStatusItemClickUntil = nil
+        applyDecision(decision)
+    }
+
+    /// Records that a fallback-anchored `.transient` popover was dismissed by `leftMouseDown`
+    /// inside `statusItem.button`, so the matching `leftMouseUp` completes the toggle-close
+    /// instead of immediately bouncing the popover back open.
+    public mutating func noteTransientCloseFromStatusItemClick(
+        at now: Date,
+        window: TimeInterval = 0.5
+    ) {
+        suppressedStatusItemClickUntil = now.addingTimeInterval(max(0.0, window))
+    }
+
+    /// Consumes a pending status-item click suppression if `now` is within the click window.
+    public mutating func consumeSuppressedStatusItemClick(at now: Date) -> Bool {
+        defer { suppressedStatusItemClickUntil = nil }
+        guard let until = suppressedStatusItemClickUntil else { return false }
+        return now <= until
+    }
+
+    /// Consumes one bounded re-anchor attempt for an active open session.
+    /// Returns `true` if recovery is allowed, or `false` if closed, already re-anchoring,
+    /// or the per-session attempt budget is exhausted.
+    public mutating func consumeReanchorAttempt() -> Bool {
+        guard mode != .none, !isReanchoring, reanchorAttempts < maxReanchorAttempts else {
+            return false
+        }
+        reanchorAttempts += 1
+        isReanchoring = true
+        return true
+    }
+
+    /// Completes an in-flight re-anchor and records the resulting anchor mode while
+    /// preserving the consumed `reanchorAttempts` count for the remainder of the session.
+    public mutating func finishReanchor(decision: PopoverAnchorDecision) {
+        isReanchoring = false
+        applyDecision(decision)
+    }
+
+    public mutating func popoverClosed() {
+        mode = .none
+        reanchorAttempts = 0
+        isReanchoring = false
+    }
+
+    private mutating func applyDecision(_ decision: PopoverAnchorDecision) {
+        switch decision {
+        case .statusItem(let displayId, let buttonRect):
+            mode = .statusItem(displayId: displayId, anchorRect: buttonRect)
+        case .fallbackMenuBar(let displayId, let anchorRect, _):
+            mode = .fallback(displayId: displayId, anchorRect: anchorRect)
+        case .unavailable:
+            mode = .none
+        }
+    }
+}
+
+/// Pure anchor validation, deterministic top-right fallback placement, and live
+/// popover-window drift detection (resolves macOS crowded/notched/multi-display
+/// menu-bar overflow where `NSStatusBarWindow` is parked off-screen or behind the notch).
+public enum MenuBarAnchorResolver {
+
+    public static func resolve(
+        snapshot: StatusItemAnchorSnapshot,
+        displays: [MenuBarDisplayDescriptor],
+        mouseDisplayId: UInt32? = nil,
+        panelWidth: Double = 420.0
+    ) -> PopoverAnchorDecision {
+        guard !displays.isEmpty else { return .unavailable }
+
+        func fallback(_ reason: AnchorFallbackReason) -> PopoverAnchorDecision {
+            guard let target = selectFallbackDisplay(displays: displays, mouseDisplayId: mouseDisplayId) else {
+                return .unavailable
+            }
+            let rect = fallbackAnchorRect(on: target, panelWidth: panelWidth)
+            return .fallbackMenuBar(displayId: target.displayId, anchorRect: rect, reason: reason)
+        }
+
+        guard snapshot.statusItemVisible else {
+            return fallback(.statusItemHidden)
+        }
+        guard snapshot.hasWindow else {
+            return fallback(.missingWindow)
+        }
+        guard snapshot.windowVisible, snapshot.windowAlpha.isFinite, snapshot.windowAlpha > 0.01 else {
+            return fallback(.windowNotVisible)
+        }
+        guard let rect = snapshot.buttonScreenRect,
+              rect.isFinite,
+              rect.width >= 1.0,
+              rect.height >= 1.0 else {
+            return fallback(.degenerateRect)
+        }
+
+        var validCandidates: [(displayId: UInt32, visibleArea: Double)] = []
+        var sawNotchOcclusion = false
+        var sawOutsideMenuBarBand = false
+
+        for display in displays {
+            guard let frameIntersection = rect.intersection(display.frame) else {
+                continue
+            }
+
+            if display.hasNotch,
+               let topLeft = display.auxiliaryTopLeftArea,
+               let topRight = display.auxiliaryTopRightArea {
+                var bestZoneArea: Double? = nil
+                for zone in [topLeft, topRight] {
+                    if let hit = rect.intersection(zone),
+                       (hit.area / rect.area) >= 0.5,
+                       zone.contains(x: rect.midX, y: rect.midY) {
+                        if bestZoneArea == nil || hit.area > bestZoneArea! {
+                            bestZoneArea = hit.area
+                        }
+                    }
+                }
+                if let area = bestZoneArea {
+                    validCandidates.append((displayId: display.displayId, visibleArea: area))
+                } else if let notch = display.notchCutoutRect,
+                          (rect.intersection(notch) != nil || notch.contains(x: rect.midX, y: rect.midY)) {
+                    sawNotchOcclusion = true
+                } else if display.isFullscreen {
+                    // In native Fullscreen Space on a notched MacBook, hovering the top edge
+                    // can reveal the overlay menu bar slightly below `auxiliaryTopRightArea`.
+                    let fsBandH = min(
+                        display.frame.height,
+                        display.safeAreaTop + max(rect.height, 24.0) + 16.0
+                    )
+                    let fsBand = ScreenRect(
+                        x: display.frame.minX,
+                        y: display.frame.maxY - fsBandH,
+                        width: display.frame.width,
+                        height: fsBandH
+                    )
+                    if let hit = rect.intersection(fsBand),
+                       (hit.area / rect.area) >= 0.5,
+                       fsBand.contains(x: rect.midX, y: rect.midY) {
+                        validCandidates.append((displayId: display.displayId, visibleArea: hit.area))
+                    } else if (frameIntersection.area / rect.area) >= 0.5
+                                && display.frame.contains(x: rect.midX, y: rect.midY) {
+                        sawOutsideMenuBarBand = true
+                    }
+                } else if (frameIntersection.area / rect.area) >= 0.5
+                            && display.frame.contains(x: rect.midX, y: rect.midY) {
+                    sawOutsideMenuBarBand = true
+                }
+            } else {
+                let menuBarThickness = max(0.0, display.frame.maxY - display.visibleFrame.maxY)
+                let bandH = min(
+                    display.frame.height,
+                    max(menuBarThickness, max(rect.height, 24.0) + 16.0)
+                )
+                let topBand = ScreenRect(
+                    x: display.frame.minX,
+                    y: display.frame.maxY - bandH,
+                    width: display.frame.width,
+                    height: bandH
+                )
+                if let hit = rect.intersection(topBand),
+                   (hit.area / rect.area) >= 0.5,
+                   topBand.contains(x: rect.midX, y: rect.midY) {
+                    validCandidates.append((displayId: display.displayId, visibleArea: hit.area))
+                } else if (frameIntersection.area / rect.area) >= 0.5
+                            && display.frame.contains(x: rect.midX, y: rect.midY) {
+                    sawOutsideMenuBarBand = true
+                }
+            }
+        }
+
+        if !validCandidates.isEmpty {
+            let resolvedDisplayId: UInt32
+            if let preferredId = snapshot.windowScreenDisplayId,
+               validCandidates.contains(where: { $0.displayId == preferredId }) {
+                resolvedDisplayId = preferredId
+            } else {
+                let best = validCandidates.min { lhs, rhs in
+                    if abs(lhs.visibleArea - rhs.visibleArea) > 0.5 {
+                        return lhs.visibleArea > rhs.visibleArea
+                    }
+                    return lhs.displayId < rhs.displayId
+                }!
+                resolvedDisplayId = best.displayId
+            }
+            if let resolvedDisplay = displays.first(where: { $0.displayId == resolvedDisplayId }),
+               resolvedDisplay.hasEphemeralMenuBar {
+                // Pin stationary anchor right below the clicked icon so the popover never
+                // rides `NSStatusBarWindow` upward when the fullscreen/auto-hide menu bar retracts.
+                return .fallbackMenuBar(
+                    displayId: resolvedDisplayId,
+                    anchorRect: pinnedAnchorRect(for: rect),
+                    reason: .ephemeralMenuBar
+                )
+            }
+            return .statusItem(displayId: resolvedDisplayId, buttonRect: rect)
+        }
+
+        if sawNotchOcclusion {
+            return fallback(.notchOccluded)
+        }
+        if sawOutsideMenuBarBand {
+            return fallback(.outsideMenuBarBand)
+        }
+        return fallback(.offScreen)
+    }
+
+    /// Deterministic fallback display priority: `mouseDisplayId` > `isMain` > `isBuiltin` > lowest `displayId`.
+    public static func selectFallbackDisplay(
+        displays: [MenuBarDisplayDescriptor],
+        mouseDisplayId: UInt32?
+    ) -> MenuBarDisplayDescriptor? {
+        guard !displays.isEmpty else { return nil }
+        if let mouseId = mouseDisplayId,
+           let match = displays.first(where: { $0.displayId == mouseId }) {
+            return match
+        }
+        if let main = displays
+            .filter({ $0.isMain })
+            .min(by: { $0.displayId < $1.displayId }) {
+            return main
+        }
+        if let builtin = displays
+            .filter({ $0.isBuiltin })
+            .min(by: { $0.displayId < $1.displayId }) {
+            return builtin
+        }
+        return displays.min(by: { $0.displayId < $1.displayId })
+    }
+
+    /// Computes a 2x2 anchor rect at the bottom of the target display's top-right menu bar
+    /// area so an `NSPopover` anchored with `preferredEdge: .minY` drops cleanly inside the
+    /// display without clipping or overlapping a physical notch.
+    public static func fallbackAnchorRect(
+        on display: MenuBarDisplayDescriptor,
+        panelWidth: Double = 420.0
+    ) -> ScreenRect {
+        let menuBarBottomY: Double = {
+            if (display.frame.maxY - display.visibleFrame.maxY) > 0.5 {
+                return display.visibleFrame.maxY
+            }
+            if display.safeAreaTop > 0.0 {
+                return display.frame.maxY - display.safeAreaTop
+            }
+            return display.frame.maxY - 24.0
+        }()
+
+        let usableArea: ScreenRect = {
+            if display.hasNotch,
+               let topRight = display.auxiliaryTopRightArea,
+               topRight.width > 0.0 {
+                return topRight
+            }
+            return display.frame
+        }()
+
+        let anchorX: Double
+        if usableArea.width <= 32.0 {
+            anchorX = usableArea.midX
+        } else {
+            let desiredX = usableArea.maxX - panelWidth * 0.5 - 12.0
+            anchorX = min(max(desiredX, usableArea.minX + 16.0), usableArea.maxX - 16.0)
+        }
+
+        return ScreenRect(x: anchorX - 1.0, y: menuBarBottomY, width: 2.0, height: 2.0)
+    }
+
+    /// 2x2 stationary anchor rect positioned directly at the bottom-center of a visible
+    /// `NSStatusBarButton` so a floating menu-bar panel opens directly below the icon without
+    /// riding `NSStatusBarWindow` when an ephemeral fullscreen/auto-hide menu bar retracts.
+    public static func pinnedAnchorRect(for buttonRect: ScreenRect) -> ScreenRect {
+        ScreenRect(x: buttonRect.midX - 1.0, y: buttonRect.minY, width: 2.0, height: 2.0)
+    }
+
+    /// Computes the screen-space frame for a borderless floating menu-bar panel (Control Center
+    /// style) positioned directly beneath `anchorRect` on `hostDisplay`, horizontally centered on
+    /// `anchorRect.midX` and clamped inside the display's usable bounds (respecting side/bottom
+    /// Dock insets and display edges, including negative-coordinate secondary displays).
+    public static func panelFrame(
+        anchorRect: ScreenRect,
+        hostDisplay: MenuBarDisplayDescriptor,
+        panelWidth: Double = 420.0,
+        panelHeight: Double,
+        topGap: Double = 6.0,
+        edgeMargin: Double = 8.0
+    ) -> ScreenRect {
+        let safeW = max(1.0, panelWidth.isFinite ? panelWidth : 420.0)
+        let safeH = max(1.0, panelHeight.isFinite ? panelHeight : 460.0)
+        let gap = max(0.0, topGap.isFinite ? topGap : 6.0)
+        let margin = max(0.0, edgeMargin.isFinite ? edgeMargin : 8.0)
+
+        // Prefer `visibleFrame` horizontal bounds so a left/right Dock is never overlapped;
+        // fall back to full `frame` if `visibleFrame` is narrower than the panel.
+        let horizBounds: ScreenRect = (hostDisplay.visibleFrame.width >= safeW + margin * 2.0)
+            ? hostDisplay.visibleFrame
+            : hostDisplay.frame
+        let minX = horizBounds.minX + margin
+        let maxX = horizBounds.maxX - margin - safeW
+        let idealX = anchorRect.midX - safeW * 0.5
+        let clampedX: Double
+        if maxX >= minX {
+            clampedX = min(max(idealX, minX), maxX)
+        } else {
+            clampedX = horizBounds.minX
+        }
+
+        // Never let the floating panel intrude into the docked menu bar or physical notch.
+        // On notched MacBooks, `NSStatusBarButton` (~22pt tall) is vertically centered inside
+        // the ~37pt menu bar so `button.minY` sits ~9pt ABOVE `visibleFrame.maxY`. Clamping
+        // the anchor bottom to `menuBarBottomCeiling` keeps a crisp `topGap` below the actual
+        // bottom edge of both the menu bar and the notch housing on every display.
+        var menuBarBottomCeiling = hostDisplay.frame.maxY
+        if (hostDisplay.frame.maxY - hostDisplay.visibleFrame.maxY) > 0.5 {
+            menuBarBottomCeiling = min(menuBarBottomCeiling, hostDisplay.visibleFrame.maxY)
+        }
+        if hostDisplay.safeAreaTop.isFinite && hostDisplay.safeAreaTop > 0.0 {
+            menuBarBottomCeiling = min(menuBarBottomCeiling, hostDisplay.frame.maxY - hostDisplay.safeAreaTop)
+        }
+        let effectiveAnchorBottomY = min(anchorRect.minY, menuBarBottomCeiling)
+        let topY = effectiveAnchorBottomY - gap
+        let minBottomY = hostDisplay.visibleFrame.minY + margin
+        let maxAvailableH = max(120.0, topY - minBottomY)
+        let clampedH = min(safeH, maxAvailableH)
+        let originY = topY - clampedH
+
+        return ScreenRect(x: clampedX, y: originY, width: safeW, height: clampedH)
+    }
+
+    /// Computes a top-pinned resized frame when tab content height changes, keeping `minX`,
+    /// `width`, and `maxY` (the top edge below the menu bar) mathematically constant so switching
+    /// tabs never shifts the header/tab bar vertically or drifts horizontally.
+    public static func resizedPanelFrame(
+        currentFrame: ScreenRect,
+        newHeight: Double,
+        hostDisplay: MenuBarDisplayDescriptor?,
+        edgeMargin: Double = 8.0
+    ) -> ScreenRect {
+        let safeH = max(1.0, newHeight.isFinite ? newHeight : currentFrame.height)
+        let topY = currentFrame.maxY
+        let clampedH: Double
+        if let host = hostDisplay {
+            let margin = max(0.0, edgeMargin.isFinite ? edgeMargin : 8.0)
+            let maxAvailableH = max(120.0, topY - (host.visibleFrame.minY + margin))
+            clampedH = min(safeH, maxAvailableH)
+        } else {
+            clampedH = safeH
+        }
+        return ScreenRect(
+            x: currentFrame.minX,
+            y: topY - clampedH,
+            width: currentFrame.width,
+            height: clampedH
+        )
+    }
+
+    /// Checks whether a live `_NSPopoverWindow` frame is still anchored to `expectedAnchorRect`
+    /// on `hostDisplay` (catching AppKit top-left clamps, menu-bar retraction drift, and
+    /// cross-display drift).
+    public static func isPopoverFrameAnchored(
+        popoverFrame: ScreenRect,
+        expectedAnchorRect: ScreenRect,
+        hostDisplay: MenuBarDisplayDescriptor
+    ) -> Bool {
+        guard popoverFrame.isFinite,
+              popoverFrame.width >= 1.0,
+              popoverFrame.height >= 1.0,
+              expectedAnchorRect.isFinite,
+              hostDisplay.frame.isFinite else {
+            return false
+        }
+        guard hostDisplay.frame.contains(x: popoverFrame.midX, y: popoverFrame.midY) else {
+            return false
+        }
+        let horizontalTolerance = 24.0
+        guard expectedAnchorRect.midX >= popoverFrame.minX - horizontalTolerance,
+              expectedAnchorRect.midX <= popoverFrame.maxX + horizontalTolerance else {
+            return false
+        }
+        let verticalTolerance = 20.0
+        guard abs(popoverFrame.maxY - expectedAnchorRect.minY) <= verticalTolerance else {
+            return false
+        }
+        return true
+    }
+}
+
 public enum LogoAnimationMode: Equatable, Sendable {
     case idle
     case levitate
