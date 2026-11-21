@@ -127,6 +127,7 @@ class TestCrossLanguageParity(unittest.TestCase):
             "MenuBarAnchorState",
             "InstrumentMath",
             "TelemetryVisualMode",
+            "UpdateCheckerMachine",
         ]
         for sym in required_core_calls:
             self.assertIn(sym, app_sources, msg=f"Split-brain check failed: {sym} not wired into app layer")

@@ -64,7 +64,7 @@ Antigravity runs across multiple surfaces — the `agy` CLI in your terminal, An
 - **Notch Live Activity Wing & Customizable Status Bar** — Waiting sessions hold a clickable alert wing beside the hardware notch; Finished sessions announce for 5s and retract cleanly. Customize status bar readout (`Follow Tab`, `Today Cost`, `5h Quota`, `Live Sessions`, `Cost + 5h Quota`) via right-click or `⋯` menu
 - **Month navigation & durable archive** — browse historical months; local daily archive (`~/Library/Application Support/AGYMonitor/`) preserves stats even if old transcripts are cleaned up
 - **4 languages** — English, 简体中文, 繁體中文, 日本語
-- **Zero-permission Global Hotkey (`⌥⇧A`) & Auto-refresh (`⌘R`)** — Carbon hotkey toggle without Accessibility prompts, FSEvents file watching + 30-min timer + screen-wake observer
+- **Zero-permission Global Hotkey (`⌥⇧A`), Auto-refresh (`⌘R`), & Built-in Update Checker** — Carbon hotkey toggle without Accessibility prompts, FSEvents file watching + 30-min timer + screen-wake observer, plus daily zero-API-quota GitHub Releases checks with in-app update banner & one-time macOS notification
 - **Menu bar or Notch** — `LSUIElement=true` accessory app with no Dock icon
 
 ### Requirements
@@ -172,7 +172,7 @@ setup_signing.sh              ← optional one-time self-signed certificate setu
 fix_swift.sh                  ← Command Line Tools SwiftBridging modulemap workaround
 .github/workflows/build.yml   ← CI: plist lint → py_compile & unittest → swift test → DMG build
 AGENTS.md                     ← developer & coding-agent architecture contract
-Info.plist                    ← LSUIElement=true; single source of app version (1.5.2)
+Info.plist                    ← LSUIElement=true; single source of app version (1.6.0)
 ```
 
 ### On pricing accuracy
@@ -213,7 +213,7 @@ Antigravity 同时运行在多个入口：终端里的 `agy` CLI、Antigravity 2
 - **刘海灵动翼（Notch Live Wing）& 状态栏自定义** — 刘海模式下支持等待会话持久警示与完成后 5 秒自动收起；右键或 `⋯` 菜单可自定义状态栏指标（跟随当前标签 / 今日花费 / 5h 剩余配额 / 实时会话 / 花费 + 配额）
 - **月份导航 & 本地持久归档** — 自由翻阅历史月份；每日汇总自动归档至 `~/Library/Application Support/AGYMonitor/`（默认开启），清理旧日志后历史统计依然完整保留
 - **4 种语言** — English、简体中文、繁體中文、日本語
-- **免授权全局快捷键（`⌥⇧A`）& 智能自动刷新（`⌘R`）** — 内置 Carbon 全局热键（无需辅助功能权限）；FSEvents 监听本地目录变化 + 30 分钟定时器 + 唤醒刷新
+- **免授权全局快捷键（`⌥⇧A`）、智能自动刷新（`⌘R`）与版本更新提醒** — 内置 Carbon 全局热键（无需辅助功能权限）；FSEvents 监听本地目录变化 + 30 分钟定时器 + 唤醒刷新；每日免额度检查 GitHub Releases，支持应用内更新提示条与新版本一次性 macOS 系统通知
 - **纯粹菜单栏 / 刘海体验** — 无 Dock 图标；可在底部 **⋯** → **显示位置** → **刘海** 开启全屏友好的刘海模式（外接显示器亦支持合成刘海）
 
 ### 系统要求

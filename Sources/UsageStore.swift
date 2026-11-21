@@ -97,6 +97,10 @@ class UsageStore: ObservableObject {
 
     let sessionStore = SessionStore()
 
+    // MARK: App Updates (GitHub Releases + one-time system notification)
+
+    let updateService = UpdateService()
+
     // MARK: Plan / Quota & AI Credits ("Plan" tab)
 
     @Published var quotaState: QuotaPhase<OAuthUsage> = .noAccount
@@ -338,6 +342,26 @@ class UsageStore: ObservableObject {
 
         let initialToken = SubscriptionQuotaService.shared.hasOAuthToken
         applyQuotaEvent(.tokenPresenceChanged(initialToken))
+
+        updateService.languageProvider = { [weak self] in
+            self?.language ?? .en
+        }
+    }
+
+    func startUpdateChecking() {
+        updateService.start()
+    }
+
+    func stopUpdateChecking() {
+        updateService.stop()
+    }
+
+    func handleSystemWakeForUpdates() {
+        updateService.handleWake()
+    }
+
+    func checkForUpdatesManually() {
+        updateService.checkForUpdatesManually()
     }
 
     private func applyQuotaEvent(_ event: QuotaStateEvent<OAuthUsage>) {

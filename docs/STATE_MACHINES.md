@@ -100,6 +100,16 @@ This document serves as the single reference for **UX invariants**, **DX mainten
   - `TelemetryAnimationGate` + root `@Environment(\.telemetryReduceMotion)` enforce 0 Hz idle CPU across all `TimelineView`s with a single root `NSWorkspace` observer instead of per-row NotificationCenter fan-out.
   - `TabTransitionState` is the single source of truth for active tab / Time sub-tab (zero shadow `displayedTab`/`displayedRange`), using canonical full tab order so hiding `.subscription` slides `.backward` to `.cost`.
 
+### 8. GitHub Releases Update Checker & One-Time System Notification
+- **Core**: `Sources/Core_UpdateState.swift` — `UpdateCheckerMachine` (`UpdateCheckerState`, `UpdateCheckerEvent`, `UpdateCheckerEffect`, `UpdateCheckPhase`, `UpdateBannerDisplay`, `UpdateTiming`, `SemanticVersion`, `ReleaseInfo`, `UpdateReleaseParser`)
+- **Shell**: `Sources/UpdateService.swift`, `Sources/UsageStore.swift`, `Sources/AppDelegate.swift`, `Sources/Views.swift` (`UpdateBannerStrip`), `Sources/Views_Menus.swift`
+- **Tests**: `Tests/AGYCoreTests/UpdateStateTests.swift`
+- **Key Invariants**:
+  - Primary check uses a zero-API-quota `HEAD https://github.com/kuen54/AGYMonitor/releases/latest` 302 redirect capture (falling back to the GitHub REST API only if needed) and validates that all release & download URLs strictly match `https://github.com/kuen54/AGYMonitor/releases/...`.
+  - Automatic checks wait 10s after launch/wake and run at most once every 24h (retrying in 2h on transient failure without advancing `lastCheckAt`); automatic checking, up-to-date, and failures stay completely silent in-app.
+  - Each newly discovered version (`remote > current`, non-prerelease) posts a macOS `UNUserNotificationCenter` notification **at most once** across restarts (`notifiedVersion` persisted atomically in the reducer), while storing `knownRelease` orthogonally to transient check phases (and restoring from `cachedLatestTag` across restarts) so offline retries or manual check failures never flicker or wipe a known update banner until upgraded or skipped.
+  - Skipping a version hides the banner until either a newer version ships or the user manually triggers "Check for Updates…" (which un-skips that version). `UNUserNotificationCenter.current()` is strictly guarded to `.app` bundles with a `CFBundleIdentifier` so `docs/render_mockups.swift` and CLI runs never crash.
+
 ---
 
 ## Intentionally Stateless / Local Boundaries (Do NOT Extract to `AGYCore`)

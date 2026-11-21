@@ -191,6 +191,49 @@ struct OptionsMenu: NSViewRepresentable {
             clear.target = self
             menu.addItem(clear)
 
+            menu.addItem(.separator())
+
+            // Updates & version section
+            let updateState = store.updateService.state
+            if let available = updateState.availableUpdate {
+                let openUpdate = NSMenuItem(
+                    title: String(format: loc("updateMenuAvailableFmt"), available.version.displayTag),
+                    action: #selector(openAvailableUpdate),
+                    keyEquivalent: ""
+                )
+                openUpdate.target = self
+                menu.addItem(openUpdate)
+            }
+
+            let checkTitle = updateState.isChecking
+                ? loc("updateMenuChecking")
+                : loc("updateMenuCheck")
+            let checkUpdates = NSMenuItem(
+                title: checkTitle,
+                action: updateState.isChecking ? nil : #selector(checkForUpdates),
+                keyEquivalent: ""
+            )
+            checkUpdates.target = updateState.isChecking ? nil : self
+            checkUpdates.isEnabled = !updateState.isChecking
+            menu.addItem(checkUpdates)
+
+            let autoCheck = NSMenuItem(
+                title: loc("updateMenuAutoCheck"),
+                action: #selector(toggleAutoUpdateCheck),
+                keyEquivalent: ""
+            )
+            autoCheck.target = self
+            autoCheck.state = updateState.autoCheckEnabled ? .on : .off
+            menu.addItem(autoCheck)
+
+            let versionItem = NSMenuItem(
+                title: String(format: loc("updateMenuVersionFmt"), updateState.currentVersion.displayTag),
+                action: nil,
+                keyEquivalent: ""
+            )
+            versionItem.isEnabled = false
+            menu.addItem(versionItem)
+
             menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 4), in: sender)
         }
 
@@ -228,6 +271,18 @@ struct OptionsMenu: NSViewRepresentable {
 
         @objc func toggleArchive() {
             store.setArchiveHistoryLocally(!store.archiveHistoryLocally)
+        }
+
+        @objc func openAvailableUpdate() {
+            store.updateService.openReleasePage()
+        }
+
+        @objc func checkForUpdates() {
+            store.checkForUpdatesManually()
+        }
+
+        @objc func toggleAutoUpdateCheck() {
+            store.updateService.setAutoCheckEnabled(!store.updateService.state.autoCheckEnabled)
         }
 
         @objc func clearArchive() {
