@@ -59,9 +59,10 @@ Antigravity runs across multiple surfaces — the `agy` CLI in your terminal, An
   - **Week** — **24h Polar Chronometer** (00:00 meridian weekday index gate, 5+2 weekday/weekend split, click-to-pin rings, & live `NOW` radar ray) or Classic `Mon–Sun × 0–24h` traces
   - **Month** — **Monthly Elevation & 24h Diurnal Profile** (30-day stratified elevation bars vs `AVG` + aggregated 48-bin diurnal rhythm with cross-deck hover) or Classic 7-column calendar timeline
   - **Year** — **Marching-Squares Topographic Contour Field** with `Mon–Sun` weekday axis, honest `NOW` cutoff, `[H]` peaks, & 12-month elevation strip (or Classic 53×7 activity heatmap)
-- **Sessions** — **Agent Telemetry Radar** plotting workspace hubs, swarm worker links (`parentSessionId`), amber target-lock brackets on waiting sessions, and busy optical pulses — click any radar beacon or workspace row below (`↑↓` + `↵`) to jump straight to its terminal pane/tab (Otty, Apple Terminal, iTerm2, WezTerm, Ghostty, Kitty, Alacritty, Antigravity IDE)
+- **Sessions** — **Agent Telemetry Radar** plotting workspace hubs, swarm worker links (`parentSessionId`), live aggregated **Output TPS sparkline + readout** while working, amber target-lock brackets on waiting sessions, and per-session **Context Window remaining %** micro-meters with `/compact` warning badges — click any radar beacon or workspace row below (`↑↓` + `↵`) to jump straight to its terminal pane/tab (Otty, Apple Terminal, iTerm2, WezTerm, Ghostty, Kitty, Alacritty, Antigravity IDE)
 - **Plan & AI Credits** — dual **270° Orbital Phase Dials** with burn-rate pace vectors & deficit warning wedges across Antigravity's rolling buckets (**Gemini Models** and **Claude & Partner**) alongside weekly horizons, plan tier, and **Google One AI Credits** (`Prompt`, `Flow`, `Flex`)
-- **Notch Live Activity Wing & Customizable Status Bar** — Waiting sessions hold a clickable alert wing beside the hardware notch; Finished sessions announce for 5s and retract cleanly. Customize status bar readout (`Follow Tab`, `Today Cost`, `5h Quota`, `Live Sessions`, `Cost + 5h Quota`) via right-click or `⋯` menu
+- **Notch Live Activity Wing, Working Output TPS & Customizable Status Bar** — Waiting sessions hold a clickable alert wing beside the hardware notch; Finished sessions announce for 5s and retract cleanly; active busy turns display a compact **Output TPS sparkline + `t/s` readout** in the Notch right wing and Menu Bar (0% idle CPU when quiet). Customize status bar readout (`Follow Tab`, `Today Cost`, `5h Quota`, `Live Sessions`, `Cost + 5h Quota`) via right-click or `⋯ → Appearance`
+- **Specimen Card (`⌘E`), Instrument Tactile Haptics & Daily Blueprint Wallpaper** — Press `⌘E` to preview & export museum-grade `4:5` / `16:9` archival specimen posters (Polar Chronometer, Year Topography, cache grade & operator archetype) in your active theme; enjoy bespoke 5-tab Force Touch haptic feedback bound to Instrument mode, optional synthesized acoustic cockpit chimes, and auto-updating `00:00` topographic desktop wallpapers under `⋯ → Craft & Wallpaper`
 - **Month navigation & durable archive** — browse historical months; local daily archive (`~/Library/Application Support/AGYMonitor/`) preserves stats even if old transcripts are cleaned up
 - **4 languages** — English, 简体中文, 繁體中文, 日本語
 - **Zero-permission Global Hotkey (`⌥⇧A`), Auto-refresh (`⌘R`), & Built-in Update Checker** — Carbon hotkey toggle without Accessibility prompts, FSEvents file watching + 30-min timer + screen-wake observer, plus daily zero-API-quota GitHub Releases checks with in-app update banner & one-time macOS notification
@@ -172,7 +173,7 @@ setup_signing.sh              ← optional one-time self-signed certificate setu
 fix_swift.sh                  ← Command Line Tools SwiftBridging modulemap workaround
 .github/workflows/build.yml   ← CI: plist lint → py_compile & unittest → swift test → DMG build
 AGENTS.md                     ← developer & coding-agent architecture contract
-Info.plist                    ← LSUIElement=true; single source of app version (1.7.0)
+Info.plist                    ← LSUIElement=true; single source of app version (1.8.0)
 ```
 
 ### On pricing accuracy
@@ -208,9 +209,10 @@ Antigravity 同时运行在多个入口：终端里的 `agy` CLI、Antigravity 2
   - **周视图** — **24h 极坐标日晷**（`00:00` 顶轴环序刻度门、工作日/周末 `5+2` 断层、点击锁定单环与实时 `NOW` 扫频指针，或经典 `周一~周日 × 0–24h` 时间轴）
   - **月视图** — **30 天海拔剖面 + 24h 昼夜节律带**（全月每日时长海拔 vs 月均基线 + 48 档昼夜分布与双层联动悬停，或经典 7 列月历）
   - **年视图** — **Marching Squares 全年等高地形场**（`周一~周日` 纵轴、`NOW` 自然截断、`[H]` 高峰标注与 12 个月汇总海拔条，支持切回 53×7 GitHub 格子热力图）
-- **实时会话（Sessions）** — 顶部 **Agent 态势雷达** 按工作区聚簇展示节点与 Swarm 子 Agent 连线，等待确认会亮起琥珀目标锁定角标；下方按工作区列出会话标题与最新指令（支持 `↑↓` + `↵` 键盘导航，点击雷达信标或列表行均可直接跳转到 Otty / Terminal / iTerm2 / WezTerm / Antigravity IDE）
+- **实时会话（Sessions）** — 顶部 **Agent 态势雷达** 按工作区聚簇展示节点与 Swarm 子 Agent 连线，工作时实时显示聚合 **Output TPS 折线与速率**，等待确认亮起琥珀目标锁定角标；每条活跃会话内置 **Context Window 剩余百分比** 微型刻尺（低于 10% 亮出 `/compact` 提示），支持 `↑↓` + `↵` 或点击信标直达 Otty / Terminal / iTerm2 / WezTerm / Antigravity IDE
 - **套餐配额 & AI Credits（Plan）** — 双环 **270° 极坐标燃速罗盘** 与配速预警展示 Antigravity 滚动配额池（**Gemini Models**、**Claude & Partner**）的剩余百分比、7D 周配额、重置倒计时及 **Google One AI Credits**（`Prompt`、`Flow`、`Flex` 积分）
-- **刘海灵动翼（Notch Live Wing）& 状态栏自定义** — 刘海模式下支持等待会话持久警示与完成后 5 秒自动收起；右键或 `⋯` 菜单可自定义状态栏指标（跟随当前标签 / 今日花费 / 5h 剩余配额 / 实时会话 / 花费 + 配额）
+- **刘海灵动翼、实时 Output TPS & 状态栏自定义** — 刘海模式下支持等待会话持久警示、完成后 5 秒自动收起，并在 Agent 工作时于刘海右翼与菜单栏实时展示 **Output TPS 折线 + `t/s` 速率**（空闲自动收起，0% 闲时 CPU）；右键或 `⋯ → 外观与显示` 可自定义状态栏指标
+- **档案馆标本卡（`⌘E`）、5-Tab 仪器触控板震动 & 每日地形壁纸** — 按 `⌘E` 一键预览并复制/保存当前主题的 `4:5` / `16:9` 瑞士档案标本海报；与 `仪器风格` 强绑定的 5-Tab 专属 Force Touch 触觉反馈，以及 `⋯ → 工艺与壁纸` 中独立可开关的纯代码合成微声学提示音与每日 `00:00` 浮雕年等高线壁纸
 - **月份导航 & 本地持久归档** — 自由翻阅历史月份；每日汇总自动归档至 `~/Library/Application Support/AGYMonitor/`（默认开启），清理旧日志后历史统计依然完整保留
 - **4 种语言** — English、简体中文、繁體中文、日本語
 - **免授权全局快捷键（`⌥⇧A`）、智能自动刷新（`⌘R`）与版本更新提醒** — 内置 Carbon 全局热键（无需辅助功能权限）；FSEvents 监听本地目录变化 + 30 分钟定时器 + 唤醒刷新；每日免额度检查 GitHub Releases，支持应用内更新提示条与新版本一次性 macOS 系统通知

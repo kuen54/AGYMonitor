@@ -67,8 +67,9 @@ struct LanguageSwitcher: NSViewRepresentable {
 
 // MARK: - Options Menu
 
-/// Footer "⋯" menu: Display location, Theme preset, Status bar readout,
-/// Global Hotkey (⌥⇧A), and durable local archive toggle & clear.
+/// Footer "⋯" menu: 5-row top-level menu abstracting Specimen Card export,
+/// Appearance, Craft & Wallpaper, Data & Shortcuts, and Updates (plus a
+/// conditional top-level Update Available banner when a newer release exists).
 struct OptionsMenu: NSViewRepresentable {
     @ObservedObject var store: UsageStore
     let loc: Localizer
@@ -105,95 +106,31 @@ struct OptionsMenu: NSViewRepresentable {
 
         @objc func showMenu(_ sender: NSButton) {
             let menu = NSMenu()
+            menu.autoenablesItems = false
             menu.delegate = self
 
-            // Display location
-            let modeHeader = NSMenuItem(title: loc("displayModeHeader"), action: nil, keyEquivalent: "")
-            modeHeader.isEnabled = false
-            menu.addItem(modeHeader)
-            for mode in DisplayMode.allCases {
-                let item = NSMenuItem(title: mode.label(loc),
-                                      action: #selector(pickDisplayMode(_:)), keyEquivalent: "")
-                item.target = self
-                item.representedObject = mode.rawValue
-                item.state = store.displayMode == mode ? .on : .off
-                menu.addItem(item)
-            }
+            // 1. Primary Action: Export Specimen Card (⌘E)
+            let exportSpecimen = NSMenuItem(
+                title: loc("menuExportSpecimen"),
+                action: #selector(exportSpecimenCard),
+                keyEquivalent: "e"
+            )
+            exportSpecimen.keyEquivalentModifierMask = .command
+            exportSpecimen.target = self
+            menu.addItem(exportSpecimen)
             menu.addItem(.separator())
 
-            // Theme preset submenu
-            let themeSubItem = NSMenuItem(title: loc("themeHeader"), action: nil, keyEquivalent: "")
-            let themeMenu = NSMenu()
-            for preset in TelemetryThemePreset.allCases {
-                let item = NSMenuItem(title: preset.label(loc),
-                                      action: #selector(pickThemePreset(_:)), keyEquivalent: "")
-                item.target = self
-                item.representedObject = preset.rawValue
-                item.state = store.themePreset == preset ? .on : .off
-                themeMenu.addItem(item)
-            }
-            themeSubItem.submenu = themeMenu
-            menu.addItem(themeSubItem)
+            // 2. Appearance ▸
+            menu.addItem(makeSubmenuItem(title: loc("menuAppearance"), submenu: makeAppearanceSubmenu()))
 
-            // Visual style submenu (Instrument vs Classic)
-            let visualSubItem = NSMenuItem(title: loc("visualModeHeader"), action: nil, keyEquivalent: "")
-            let visualMenu = NSMenu()
-            for vMode in TelemetryVisualMode.allCases {
-                let item = NSMenuItem(title: vMode.label(loc),
-                                      action: #selector(pickVisualMode(_:)), keyEquivalent: "")
-                item.target = self
-                item.representedObject = vMode.rawValue
-                item.state = store.visualMode == vMode ? .on : .off
-                visualMenu.addItem(item)
-            }
-            visualSubItem.submenu = visualMenu
-            menu.addItem(visualSubItem)
+            // 3. Craft & Wallpaper ▸
+            menu.addItem(makeSubmenuItem(title: loc("menuCraftAndWallpaper"), submenu: makeCraftSubmenu()))
 
-            // Status bar readout submenu
-            let metricSubItem = NSMenuItem(title: loc("metricHeader"), action: nil, keyEquivalent: "")
-            let metricMenu = NSMenu()
-            for metric in MenuBarMetricPreference.allCases {
-                let item = NSMenuItem(title: metric.label(loc),
-                                      action: #selector(pickMetric(_:)), keyEquivalent: "")
-                item.target = self
-                item.representedObject = metric.rawValue
-                item.state = store.menuBarMetric == metric ? .on : .off
-                metricMenu.addItem(item)
-            }
-            metricSubItem.submenu = metricMenu
-            menu.addItem(metricSubItem)
-
-            // Global Hotkey toggle
-            let hk = NSMenuItem(title: loc("hotkeyToggle"),
-                                action: #selector(toggleHotkey), keyEquivalent: "")
-            hk.target = self
-            hk.state = store.globalHotkeyEnabled ? .on : .off
-            menu.addItem(hk)
+            // 4. Data & Shortcuts ▸
+            menu.addItem(makeSubmenuItem(title: loc("menuDataAndShortcuts"), submenu: makeDataSubmenu()))
             menu.addItem(.separator())
 
-            // Archive section
-            let toggle = NSMenuItem(title: loc("archiveToggle"),
-                                    action: #selector(toggleArchive), keyEquivalent: "")
-            toggle.target = self
-            toggle.state = store.archiveHistoryLocally ? .on : .off
-            menu.addItem(toggle)
-
-            let count = store.archivedDayCount
-            let noteTitle = count > 0 ? String(format: loc("archiveCount"), count) : loc("archiveNote")
-            let note = NSMenuItem(title: noteTitle, action: nil, keyEquivalent: "")
-            note.isEnabled = false
-            menu.addItem(note)
-
-            menu.addItem(.separator())
-
-            let clear = NSMenuItem(title: loc("archiveClear"),
-                                   action: #selector(clearArchive), keyEquivalent: "")
-            clear.target = self
-            menu.addItem(clear)
-
-            menu.addItem(.separator())
-
-            // Updates & version section
+            // 5. Conditional Update Available banner + Updates · vX.Y.Z ▸
             let updateState = store.updateService.state
             if let available = updateState.availableUpdate {
                 let openUpdate = NSMenuItem(
@@ -204,6 +141,216 @@ struct OptionsMenu: NSViewRepresentable {
                 openUpdate.target = self
                 menu.addItem(openUpdate)
             }
+
+            let updatesTitle = String(format: loc("menuUpdatesFmt"), updateState.currentVersion.displayTag)
+            menu.addItem(makeSubmenuItem(
+                title: updatesTitle,
+                submenu: makeUpdatesSubmenu(updateState: updateState)
+            ))
+
+            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 4), in: sender)
+        }
+
+        // MARK: - Submenu Builders
+
+        private func makeSubmenuItem(title: String, submenu: NSMenu) -> NSMenuItem {
+            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            item.submenu = submenu
+            return item
+        }
+
+        private func makeDisabledLabelItem(title: String) -> NSMenuItem {
+            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            return item
+        }
+
+        private func makeAppearanceSubmenu() -> NSMenu {
+            let menu = NSMenu()
+            menu.autoenablesItems = false
+
+            // Display location
+            menu.addItem(makeDisabledLabelItem(title: loc("displayModeHeader")))
+            for mode in DisplayMode.allCases {
+                let item = NSMenuItem(
+                    title: mode.label(loc),
+                    action: #selector(pickDisplayMode(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = mode.rawValue
+                item.state = store.displayMode == mode ? .on : .off
+                menu.addItem(item)
+            }
+            menu.addItem(.separator())
+
+            // Theme ▸
+            let themeMenu = NSMenu()
+            for preset in TelemetryThemePreset.allCases {
+                let item = NSMenuItem(
+                    title: preset.label(loc),
+                    action: #selector(pickThemePreset(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = preset.rawValue
+                item.state = store.themePreset == preset ? .on : .off
+                themeMenu.addItem(item)
+            }
+            menu.addItem(makeSubmenuItem(title: loc("themeHeader"), submenu: themeMenu))
+
+            // Visual Style ▸
+            let visualMenu = NSMenu()
+            for vMode in TelemetryVisualMode.allCases {
+                let item = NSMenuItem(
+                    title: vMode.label(loc),
+                    action: #selector(pickVisualMode(_:)),
+                    keyEquivalent: vMode == .instrument ? "i" : ""
+                )
+                if vMode == .instrument {
+                    item.keyEquivalentModifierMask = .command
+                }
+                item.target = self
+                item.representedObject = vMode.rawValue
+                item.state = store.visualMode == vMode ? .on : .off
+                visualMenu.addItem(item)
+            }
+            menu.addItem(makeSubmenuItem(title: loc("visualModeHeader"), submenu: visualMenu))
+
+            // Status Bar Readout ▸
+            let metricMenu = NSMenu()
+            for metric in MenuBarMetricPreference.allCases {
+                let item = NSMenuItem(
+                    title: metric.label(loc),
+                    action: #selector(pickMetric(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = metric.rawValue
+                item.state = store.menuBarMetric == metric ? .on : .off
+                metricMenu.addItem(item)
+            }
+            menu.addItem(makeSubmenuItem(title: loc("metricHeader"), submenu: metricMenu))
+
+            return menu
+        }
+
+        private func makeCraftSubmenu() -> NSMenu {
+            let menu = NSMenu()
+            menu.autoenablesItems = false
+            let craftPrefs = store.craftPreferences
+
+            let hapticsItem = NSMenuItem(
+                title: loc("craftHapticsToggle"),
+                action: #selector(toggleHaptics),
+                keyEquivalent: ""
+            )
+            hapticsItem.target = self
+            hapticsItem.state = craftPrefs.hapticsEnabled ? .on : .off
+            menu.addItem(hapticsItem)
+
+            if store.visualMode != .instrument {
+                menu.addItem(makeDisabledLabelItem(title: loc("craftHapticsInstrumentNote")))
+            }
+
+            let chimesItem = NSMenuItem(
+                title: loc("craftChimesToggle"),
+                action: #selector(toggleAcousticChimes),
+                keyEquivalent: ""
+            )
+            chimesItem.target = self
+            chimesItem.state = craftPrefs.acousticChimesEnabled ? .on : .off
+            menu.addItem(chimesItem)
+
+            menu.addItem(.separator())
+
+            let dailyWpItem = NSMenuItem(
+                title: loc("craftDailyWallpaperToggle"),
+                action: #selector(toggleDailyWallpaper),
+                keyEquivalent: ""
+            )
+            dailyWpItem.target = self
+            dailyWpItem.state = craftPrefs.dailyWallpaperEnabled ? .on : .off
+            menu.addItem(dailyWpItem)
+
+            let wpStyleMenu = NSMenu()
+            for style in BlueprintWallpaperStyle.allCases {
+                let title = (style == .darkMonolith) ? loc("craftWallpaperDark") : loc("craftWallpaperLight")
+                let item = NSMenuItem(
+                    title: title,
+                    action: #selector(pickWallpaperStyle(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = style.rawValue
+                item.state = craftPrefs.wallpaperStyle == style ? .on : .off
+                wpStyleMenu.addItem(item)
+            }
+            menu.addItem(makeSubmenuItem(title: loc("craftWallpaperStyleHeader"), submenu: wpStyleMenu))
+
+            let applyWpItem = NSMenuItem(
+                title: loc("craftWallpaperApplyNow"),
+                action: #selector(applyBlueprintWallpaperNow),
+                keyEquivalent: ""
+            )
+            applyWpItem.target = self
+            menu.addItem(applyWpItem)
+
+            let hasPreviousWallpaper = (craftPrefs.previousWallpaperPath != nil)
+            let restoreWpItem = NSMenuItem(
+                title: loc("craftWallpaperRestore"),
+                action: hasPreviousWallpaper ? #selector(restorePreviousWallpaper) : nil,
+                keyEquivalent: ""
+            )
+            restoreWpItem.target = hasPreviousWallpaper ? self : nil
+            restoreWpItem.isEnabled = hasPreviousWallpaper
+            menu.addItem(restoreWpItem)
+
+            return menu
+        }
+
+        private func makeDataSubmenu() -> NSMenu {
+            let menu = NSMenu()
+            menu.autoenablesItems = false
+
+            let hotkeyItem = NSMenuItem(
+                title: loc("hotkeyToggle"),
+                action: #selector(toggleHotkey),
+                keyEquivalent: ""
+            )
+            hotkeyItem.target = self
+            hotkeyItem.state = store.globalHotkeyEnabled ? .on : .off
+            menu.addItem(hotkeyItem)
+
+            menu.addItem(.separator())
+
+            let archiveToggle = NSMenuItem(
+                title: loc("archiveToggle"),
+                action: #selector(toggleArchive),
+                keyEquivalent: ""
+            )
+            archiveToggle.target = self
+            archiveToggle.state = store.archiveHistoryLocally ? .on : .off
+            menu.addItem(archiveToggle)
+
+            let count = store.archivedDayCount
+            let noteTitle = count > 0 ? String(format: loc("archiveCount"), count) : loc("archiveNote")
+            menu.addItem(makeDisabledLabelItem(title: noteTitle))
+
+            let clearItem = NSMenuItem(
+                title: loc("archiveClear"),
+                action: #selector(clearArchive),
+                keyEquivalent: ""
+            )
+            clearItem.target = self
+            menu.addItem(clearItem)
+
+            return menu
+        }
+
+        private func makeUpdatesSubmenu(updateState: UpdateCheckerState) -> NSMenu {
+            let menu = NSMenu()
+            menu.autoenablesItems = false
 
             let checkTitle = updateState.isChecking
                 ? loc("updateMenuChecking")
@@ -226,16 +373,15 @@ struct OptionsMenu: NSViewRepresentable {
             autoCheck.state = updateState.autoCheckEnabled ? .on : .off
             menu.addItem(autoCheck)
 
-            let versionItem = NSMenuItem(
-                title: String(format: loc("updateMenuVersionFmt"), updateState.currentVersion.displayTag),
-                action: nil,
-                keyEquivalent: ""
-            )
-            versionItem.isEnabled = false
-            menu.addItem(versionItem)
+            menu.addItem(.separator())
 
-            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 4), in: sender)
+            let versionTitle = String(format: loc("updateMenuVersionFmt"), updateState.currentVersion.displayTag)
+            menu.addItem(makeDisabledLabelItem(title: versionTitle))
+
+            return menu
         }
+
+        // MARK: - Actions
 
         @objc func pickDisplayMode(_ item: NSMenuItem) {
             if let raw = item.representedObject as? String,
@@ -267,6 +413,54 @@ struct OptionsMenu: NSViewRepresentable {
 
         @objc func toggleHotkey() {
             store.setGlobalHotkeyEnabled(!store.globalHotkeyEnabled)
+        }
+
+        @objc func exportSpecimenCard() {
+            notchVM?.releaseModalLock(.optionsMenu)
+            notchVM?.onRequestClose?()
+            let targetStore = store
+            Task { @MainActor in
+                SpecimenWindowController.shared.present(store: targetStore)
+            }
+        }
+
+        @MainActor @objc func toggleHaptics() {
+            let next = !store.craftPreferences.hapticsEnabled
+            store.setHapticsEnabled(next)
+            if next && store.visualMode == .instrument {
+                CraftEngine.shared.tickDetent(enabled: true)
+            } else if !next {
+                CraftEngine.shared.cancelPendingHapticCadence()
+            }
+        }
+
+        @objc func toggleAcousticChimes() {
+            let next = !store.craftPreferences.acousticChimesEnabled
+            store.setAcousticChimesEnabled(next)
+            if next {
+                Task { @MainActor in
+                    CraftEngine.shared.playCue(.turnDoneChord, enabled: true)
+                }
+            }
+        }
+
+        @objc func toggleDailyWallpaper() {
+            store.setDailyWallpaperEnabled(!store.craftPreferences.dailyWallpaperEnabled)
+        }
+
+        @objc func pickWallpaperStyle(_ item: NSMenuItem) {
+            if let raw = item.representedObject as? String,
+               let style = BlueprintWallpaperStyle(rawValue: raw) {
+                store.setWallpaperStyle(style)
+            }
+        }
+
+        @objc func applyBlueprintWallpaperNow() {
+            store.applyBlueprintWallpaperNow()
+        }
+
+        @objc func restorePreviousWallpaper() {
+            store.restorePreviousWallpaper()
         }
 
         @objc func toggleArchive() {

@@ -24,6 +24,7 @@ let package = Package(
                 "AGYLogo.swift",
                 "AITitleReader.swift",
                 "AppDelegate.swift",
+                "CraftEngine.swift",
                 "Formatters.swift",
                 "GlobalHotKey.swift",
                 "Localization.swift",
@@ -36,6 +37,7 @@ let package = Package(
                 "SessionJumper.swift",
                 "SessionMonitor.swift",
                 "SessionStore.swift",
+                "SpecimenExporter.swift",
                 "Theme.swift",
                 "UpdateService.swift",
                 "UsageArchive.swift",
@@ -52,7 +54,9 @@ let package = Package(
                 "Views_Menus.swift",
                 "Views_Plan.swift",
                 "Views_Session.swift",
+                "Views_Specimen.swift",
                 "Views_Time.swift",
+                "WallpaperGenerator.swift",
                 "main.swift",
             ],
             sources: [
@@ -75,6 +79,8 @@ let package = Package(
                 "Core_UpdateState.swift",
                 "Core_Telemetry.swift",
                 "Core_Instruments.swift",
+                "Core_LiveTelemetry.swift",
+                "Core_CraftState.swift",
             ]
         ),
         .testTarget(

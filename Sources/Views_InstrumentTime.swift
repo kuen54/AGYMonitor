@@ -342,6 +342,7 @@ struct PolarChronometerWeekChart: View {
     @Environment(\.telemetryStaticRender) private var isStaticRender
     @Environment(\.telemetryPanelVisible) private var isPanelVisible
     @Environment(\.telemetryReduceMotion) private var reduceMotion
+    @Environment(\.craftHapticsEnabled) private var hapticsEnabled
 
     private var monthPrefix: String {
         String(format: "%04d-%02d-", store.viewingYear, store.viewingMonth)
@@ -403,6 +404,7 @@ struct PolarChronometerWeekChart: View {
                 reduceMotion: reduceMotion,
                 isStaticRender: isStaticRender,
                 isPanelVisible: isPanelVisible,
+                hapticsEnabled: hapticsEnabled,
                 theme: theme
             )
 
@@ -444,6 +446,7 @@ private struct PolarChronometerInteractiveDeck: View {
     let reduceMotion: Bool
     let isStaticRender: Bool
     let isPanelVisible: Bool
+    var hapticsEnabled: Bool = false
     let theme: AGYTheme
 
     @State private var hoveredArc: PolarArc? = nil
@@ -719,6 +722,9 @@ private struct PolarChronometerInteractiveDeck: View {
                     )
                     PointingCursorCoordinator.shared.setPointing(hit != nil, token: "polar-dial-arc")
                     if hoveredArc != hit {
+                        if let nextDayIdx = hit?.dayIndex, nextDayIdx != hoveredArc?.dayIndex {
+                            CraftEngine.shared.perform(.chronometerCrown, enabled: hapticsEnabled && !isStaticRender)
+                        }
                         hoveredArc = hit
                     }
                     if hit != nil && hoveredDayKey != nil {
@@ -733,9 +739,15 @@ private struct PolarChronometerInteractiveDeck: View {
             }
             .onTapGesture {
                 if let h = hoveredArc {
-                    pinnedDayKey = (pinnedDayKey == h.dayKey) ? nil : h.dayKey
+                    let willPin = (pinnedDayKey != h.dayKey)
+                    pinnedDayKey = willPin ? h.dayKey : nil
+                    CraftEngine.shared.perform(
+                        willPin ? .chronometerPin : .chronometerUnpin,
+                        enabled: hapticsEnabled && !isStaticRender
+                    )
                 } else if pinnedDayKey != nil {
                     pinnedDayKey = nil
+                    CraftEngine.shared.perform(.chronometerUnpin, enabled: hapticsEnabled && !isStaticRender)
                 }
             }
             .onDisappear {
@@ -826,11 +838,19 @@ private struct PolarChronometerInteractiveDeck: View {
                     PointingCursorCoordinator.shared.setPointing(inside, token: "polar-ledger-\(idx)")
                     let next = inside ? key : (hoveredDayKey == key ? nil : hoveredDayKey)
                     if hoveredDayKey != next {
+                        if inside {
+                            CraftEngine.shared.perform(.chronometerCrown, enabled: hapticsEnabled && !isStaticRender)
+                        }
                         hoveredDayKey = next
                     }
                 }
                 .onTapGesture {
-                    pinnedDayKey = (pinnedDayKey == key) ? nil : key
+                    let willPin = (pinnedDayKey != key)
+                    pinnedDayKey = willPin ? key : nil
+                    CraftEngine.shared.perform(
+                        willPin ? .chronometerPin : .chronometerUnpin,
+                        enabled: hapticsEnabled && !isStaticRender
+                    )
                 }
                 .onDisappear {
                     PointingCursorCoordinator.shared.setPointing(false, token: "polar-ledger-\(idx)")
@@ -1888,6 +1908,7 @@ private struct YearContourInteractiveStage: View {
     let theme: AGYTheme
 
     @Environment(\.telemetryPanelVisible) private var isPanelVisible
+    @Environment(\.craftHapticsEnabled) private var hapticsEnabled
     @State private var hoveredDayKey: String? = nil
     @State private var hoverNormPos: Point2D? = nil
 
@@ -2019,6 +2040,13 @@ private struct YearContourInteractiveStage: View {
                                     let nextKey: String? = (resolvedKey?.hasPrefix(yearPrefix) == true) ? resolvedKey : nil
                                     if hoveredDayKey != nextKey {
                                         hoveredDayKey = nextKey
+                                        if let key = nextKey, (days[key] ?? 0) > 0 {
+                                            let isPeak = field.peaks.contains(where: { $0.dayKey == key })
+                                            CraftEngine.shared.perform(
+                                                isPeak ? .contourPeakLock : .contourRidgeStep,
+                                                enabled: hapticsEnabled
+                                            )
+                                        }
                                     }
                                 } else {
                                     if hoverNormPos != nil { hoverNormPos = nil }
@@ -2910,6 +2938,8 @@ struct MonthElevationInstrumentChart: View {
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
     @Environment(\.telemetryPanelVisible) private var isPanelVisible
+    @Environment(\.telemetryStaticRender) private var isStaticRender
+    @Environment(\.craftHapticsEnabled) private var hapticsEnabled
 
     private var monthPrefix: String { String(format: "%04d-%02d-", year, month) }
     private var todayKey: String { AppDate.dayKey(Date()) }
@@ -2989,6 +3019,7 @@ struct MonthElevationInstrumentChart: View {
                 weekdaySymbols: mondayFirstWeekdaySymbols(loc),
                 noDataLabel: loc("noData").uppercased(),
                 isPanelVisible: isPanelVisible,
+                hapticsEnabled: hapticsEnabled && !isStaticRender,
                 theme: theme
             )
 
@@ -3030,6 +3061,7 @@ private struct MonthElevationInteractiveDeck: View {
     let weekdaySymbols: [String]
     let noDataLabel: String
     let isPanelVisible: Bool
+    var hapticsEnabled: Bool = false
     let theme: AGYTheme
 
     @State private var hoveredDayIndex: Int? = nil
@@ -3157,6 +3189,14 @@ private struct MonthElevationInteractiveDeck: View {
                                 let idx = min(slots.count - 1, max(0, Int(floor((pt.x - plotRect.minX) / slotW))))
                                 if hoveredDayIndex != idx {
                                     hoveredDayIndex = idx
+                                    let slot = slots[idx]
+                                    if slot.seconds > 0 {
+                                        let isPeak = (idx == peakIndex)
+                                        CraftEngine.shared.perform(
+                                            isPeak ? .chronometerPin : .chronometerCrown,
+                                            enabled: hapticsEnabled
+                                        )
+                                    }
                                 }
                                 if hoveredBinIndex != nil {
                                     hoveredBinIndex = nil
@@ -3230,6 +3270,9 @@ private struct MonthElevationInteractiveDeck: View {
                                 let idx = min(profile.bins.count - 1, max(0, Int(floor((pt.x - plotRect.minX) / binW))))
                                 if hoveredBinIndex != idx {
                                     hoveredBinIndex = idx
+                                    if profile.bins[idx] > 0 {
+                                        CraftEngine.shared.perform(.chronometerUnpin, enabled: hapticsEnabled)
+                                    }
                                 }
                                 if hoveredDayIndex != nil {
                                     hoveredDayIndex = nil

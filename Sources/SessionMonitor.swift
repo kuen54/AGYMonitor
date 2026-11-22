@@ -61,6 +61,8 @@ struct SessionScan: Equatable {
     var targets: [String: SessionTarget] = [:]
     var titles: [String: String] = [:]
     var instructions: [String: String] = [:]
+    var contextSnapshots: [String: SessionContextSnapshot] = [:]
+    var liveTPS: LiveTPSSnapshot = .idle
 
     static let empty = SessionScan(sessions: [], labels: [:])
 }
@@ -108,6 +110,7 @@ final class SessionMonitor {
         let size: Int
         let mtime: TimeInterval
         let info: AITitleReader.SwarmCoordinatorInfo?
+        let activeWorkerIds: Set<String>
     }
     private var swarmCache: [String: SwarmCacheEntry] = [:]
 
@@ -137,6 +140,8 @@ final class SessionMonitor {
 
     // Done-unseen state (busy/waiting -> idle transition tracker)
     private var doneUnseenState = DoneUnseenState()
+    // Queue-confined live Output TPS tracker (pure AGYCore state machine)
+    private var tpsTracker = LiveTPSTracker()
 
     init(sessionsDir: String? = nil, projectsDir: URL? = nil,
          onChange: @escaping (SessionScan) -> Void) {
@@ -219,6 +224,7 @@ final class SessionMonitor {
         let effects = SessionMonitorLifecycleMachine.reduce(&lifecycle, event: event)
         if wasStarted && !lifecycle.isStarted {
             doneUnseenState.reset()
+            tpsTracker = LiveTPSTracker()
             lastScan = nil
         }
         syncPublishedLifecycleFlag()
@@ -409,6 +415,7 @@ final class SessionMonitor {
         //    and their working state rolls up into their coordinator session.
         var allSwarmWorkerIds = Set<String>()
         var swarmBusyCoordinators = Set<String>()
+        var busyWorkersByCoordinator: [String: Set<String>] = [:]
         var swarmTitles: [String: String] = [:]
 
         // Check swarm/members.json for any lock-held or metadata-known non-internal conversation
@@ -418,11 +425,14 @@ final class SessionMonitor {
         }
         for coordId in potentialCoordinators {
             if let swarm = cachedSwarmInfo(sessionId: coordId) {
-                allSwarmWorkerIds.formUnion(swarm.workerConversationIds)
-                if swarm.anyWorkerBusy {
+                allSwarmWorkerIds.formUnion(swarm.info.workerConversationIds)
+                if swarm.info.anyWorkerBusy {
                     swarmBusyCoordinators.insert(coordId)
                 }
-                if let t = swarm.title, !t.isEmpty {
+                if !swarm.activeWorkerIds.isEmpty {
+                    busyWorkersByCoordinator[coordId, default: []].formUnion(swarm.activeWorkerIds)
+                }
+                if let t = swarm.info.title, !t.isEmpty {
                     swarmTitles[coordId] = t
                 }
             }
@@ -432,6 +442,7 @@ final class SessionMonitor {
             allSwarmWorkerIds.insert(meta.id)
             if meta.notFullyIdle || meta.rawStatus == "CASCADE_RUN_STATUS_RUNNING" {
                 swarmBusyCoordinators.insert(meta.parentConversationId)
+                busyWorkersByCoordinator[meta.parentConversationId, default: []].insert(meta.id)
             }
         }
 
@@ -518,10 +529,14 @@ final class SessionMonitor {
             seenIds.insert(synthId)
         }
 
-        // 6. Resolve transcript summaries, live statuses, titles, instructions, and targets
+        // 6. Resolve transcript summaries, live statuses, titles, instructions, telemetry, and targets
         var builtSessions: [SessionInfo] = []
         var titles: [String: String] = [:]
         var instructions: [String: String] = [:]
+        var contextSnapshots: [String: SessionContextSnapshot] = [:]
+        var busyForTPS = Set<String>()
+        var samplesBySession: [String: [OutputTokenSample]] = [:]
+        var activeBusyWorkerIds = Set<String>()
         var liveIds = Set<String>()
 
         for c in candidates {
@@ -539,6 +554,34 @@ final class SessionMonitor {
                 transcriptFileMtime: txEntry?.mtime,
                 now: now
             )
+
+            // Live context window remaining % telemetry (from latest PLANNER_RESPONSE)
+            if let tailSummary = txEntry?.tailSummary,
+               let usedTokens = tailSummary.latestContextUsedTokens {
+                contextSnapshots[c.sessionId] = SessionContextSnapshot.make(
+                    model: tailSummary.latestModel ?? "",
+                    usedTokens: usedTokens,
+                    cacheHitRatio: tailSummary.latestCacheHitRatio
+                )
+            }
+
+            // Live output TPS samples for busy sessions + active swarm workers
+            if status == .busy {
+                busyForTPS.insert(c.sessionId)
+                if let samples = txEntry?.tailSummary.recentOutputSamples, !samples.isEmpty {
+                    samplesBySession[c.sessionId] = samples
+                }
+                if let workerIds = busyWorkersByCoordinator[c.sessionId], !workerIds.isEmpty {
+                    for workerId in workerIds where metaById[workerId]?.killed != true {
+                        activeBusyWorkerIds.insert(workerId)
+                        busyForTPS.insert(workerId)
+                        if let workerTx = readCachedTranscript(sessionId: workerId),
+                           !workerTx.tailSummary.recentOutputSamples.isEmpty {
+                            samplesBySession[workerId] = workerTx.tailSummary.recentOutputSamples
+                        }
+                    }
+                }
+            }
 
             // Title priority: annotation .pbtxt > summary Title (unless generic w/ swarm title) > swarm title > transcript title
             let annTitle = c.sessionId.hasPrefix("proc-") ? nil : cachedAnnotationTitle(sessionId: c.sessionId)
@@ -595,9 +638,10 @@ final class SessionMonitor {
             ))
         }
 
-        // Prune per-session caches
+        // Prune per-session caches (retain active busy swarm worker transcripts for stat-cache hits)
+        let retainedTranscriptIds = liveIds.union(activeBusyWorkerIds)
         if !transcriptCache.isEmpty {
-            transcriptCache = transcriptCache.filter { liveIds.contains($0.key) }
+            transcriptCache = transcriptCache.filter { retainedTranscriptIds.contains($0.key) }
         }
         if !annotationCache.isEmpty {
             annotationCache = annotationCache.filter { liveIds.contains($0.key) }
@@ -605,6 +649,12 @@ final class SessionMonitor {
         if !swarmCache.isEmpty {
             swarmCache = swarmCache.filter { potentialCoordinators.contains($0.key) }
         }
+
+        let liveTPS = tpsTracker.update(
+            busySessionIds: busyForTPS,
+            samplesBySession: samplesBySession,
+            now: now
+        )
 
         let unique = SessionLogic.dedupBySessionId(builtSessions)
         let ordered = unique.sorted { a, b in
@@ -618,7 +668,9 @@ final class SessionMonitor {
             labels: labels,
             targets: targets,
             titles: titles,
-            instructions: instructions
+            instructions: instructions,
+            contextSnapshots: contextSnapshots,
+            liveTPS: liveTPS
         )
     }
 
@@ -953,7 +1005,9 @@ final class SessionMonitor {
         return nil
     }
 
-    private func cachedSwarmInfo(sessionId: String) -> AITitleReader.SwarmCoordinatorInfo? {
+    private func cachedSwarmInfo(
+        sessionId: String
+    ) -> (info: AITitleReader.SwarmCoordinatorInfo, activeWorkerIds: Set<String>)? {
         let fm = FileManager.default
         let candidatePaths = AGYLocator.brainDirs(home: homeDir).map {
             AGYLocator.swarmMembersPath(brainDir: $0, conversationId: sessionId)
@@ -965,11 +1019,31 @@ final class SessionMonitor {
             return nil
         }
         if let hit = swarmCache[sessionId], hit.size == size, hit.mtime == mtime {
-            return hit.info
+            guard let info = hit.info else { return nil }
+            return (info, hit.activeWorkerIds)
         }
-        let info = AITitleReader.swarmInfo(sessionId: sessionId, home: homeDir)
-        swarmCache[sessionId] = SwarmCacheEntry(size: size, mtime: mtime, info: info)
-        return info
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let parsed = SessionLogic.parseSwarmMembersJSON(data) else {
+            swarmCache[sessionId] = SwarmCacheEntry(size: size, mtime: mtime, info: nil, activeWorkerIds: [])
+            return nil
+        }
+        let workers = parsed.members.filter { $0.role == "worker" && !$0.conversationId.isEmpty }
+        let workerIds = Set(workers.map(\.conversationId))
+        let nonMonitorWorkers = workers.filter { $0.name != "monitor" }
+        let anyBusy = SessionLogic.anySwarmWorkerBusy(nonMonitorWorkers)
+        let activeWorkerIds = Set(nonMonitorWorkers.filter { $0.isActivelyWorking }.map(\.conversationId))
+        let info = AITitleReader.SwarmCoordinatorInfo(
+            title: parsed.title,
+            anyWorkerBusy: anyBusy,
+            workerConversationIds: workerIds
+        )
+        swarmCache[sessionId] = SwarmCacheEntry(
+            size: size,
+            mtime: mtime,
+            info: info,
+            activeWorkerIds: activeWorkerIds
+        )
+        return (info, activeWorkerIds)
     }
 
     // MARK: - Jump Targeting

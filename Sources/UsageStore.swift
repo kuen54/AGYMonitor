@@ -89,6 +89,9 @@ class UsageStore: ObservableObject {
     /// Switchable chart visualization style: scientific Instruments (default) vs Classic.
     @Published var visualMode: TelemetryVisualMode = .instrument
 
+    /// Tactile haptics, acoustic cockpit chimes, and daily blueprint wallpaper preferences.
+    @Published var craftPreferences: CraftPreferences = .default
+
     /// Whether the popover or notch drawer is currently visible on screen.
     /// Gates all live panel animations (TimelineView) so hidden panels run at 0 Hz.
     @Published var isPanelVisible: Bool = false
@@ -340,6 +343,11 @@ class UsageStore: ObservableObject {
             visualMode = visual
         }
 
+        if let savedCraft = UserDefaults.standard.data(forKey: "craftPreferences"),
+           let decodedCraft = try? JSONDecoder().decode(CraftPreferences.self, from: savedCraft) {
+            craftPreferences = decodedCraft
+        }
+
         let initialToken = SubscriptionQuotaService.shared.hasOAuthToken
         applyQuotaEvent(.tokenPresenceChanged(initialToken))
 
@@ -482,6 +490,112 @@ class UsageStore: ObservableObject {
 
     func toggleVisualMode() {
         setVisualMode(visualMode.toggled)
+    }
+
+    // MARK: - Craft Preferences & Daily Blueprint Wallpaper
+
+    private func persistCraftPreferences() {
+        if let encoded = try? JSONEncoder().encode(craftPreferences) {
+            UserDefaults.standard.set(encoded, forKey: "craftPreferences")
+        }
+    }
+
+    func setHapticsEnabled(_ enabled: Bool) {
+        guard craftPreferences.hapticsEnabled != enabled else { return }
+        craftPreferences.hapticsEnabled = enabled
+        persistCraftPreferences()
+    }
+
+    func setAcousticChimesEnabled(_ enabled: Bool) {
+        guard craftPreferences.acousticChimesEnabled != enabled else { return }
+        craftPreferences.acousticChimesEnabled = enabled
+        persistCraftPreferences()
+    }
+
+    func setDailyWallpaperEnabled(_ enabled: Bool) {
+        guard craftPreferences.dailyWallpaperEnabled != enabled else { return }
+        craftPreferences.dailyWallpaperEnabled = enabled
+        persistCraftPreferences()
+        if enabled {
+            checkDailyWallpaperIfNeeded()
+        }
+    }
+
+    func setWallpaperStyle(_ style: BlueprintWallpaperStyle) {
+        guard craftPreferences.wallpaperStyle != style else { return }
+        craftPreferences.wallpaperStyle = style
+        persistCraftPreferences()
+        if craftPreferences.dailyWallpaperEnabled {
+            applyBlueprintWallpaperNow()
+        }
+    }
+
+    func applyBlueprintWallpaperNow() {
+        let now = Date()
+        let currentYear = AppDate.gregorian.component(.year, from: now)
+        let todayKey = AppDate.dayKey(now)
+
+        var mergedYearDays: [String: Int] = yearTimeCache[currentYear]
+            ?? (viewingTimeYear == currentYear ? yearTimeDays : nil)
+            ?? (archiveHistoryLocally ? archive.yearSeconds(year: currentYear) : [:])
+
+        if let td = currentTimeData?.days {
+            let yearPrefix = String(format: "%04d-", currentYear)
+            for (k, day) in td where k.hasPrefix(yearPrefix) && day.totalSeconds > 0 {
+                mergedYearDays[k] = max(mergedYearDays[k] ?? 0, day.totalSeconds)
+            }
+        }
+
+        if let prevPath = WallpaperGenerator.capturePreviousWallpaperPathIfNeeded(
+            existing: craftPreferences.previousWallpaperPath
+        ), craftPreferences.previousWallpaperPath == nil {
+            craftPreferences.previousWallpaperPath = prevPath
+            persistCraftPreferences()
+        }
+
+        let hasLoadedYearData = (yearTimeCache[currentYear] != nil)
+        let applied = WallpaperGenerator.generateAndApply(
+            yearDays: mergedYearDays,
+            year: currentYear,
+            style: craftPreferences.wallpaperStyle,
+            date: now
+        ) != nil
+
+        if applied && hasLoadedYearData {
+            craftPreferences.lastWallpaperDateKey = todayKey
+            persistCraftPreferences()
+        }
+
+        if !hasLoadedYearData {
+            loadYearTime(currentYear)
+        }
+    }
+
+    func restorePreviousWallpaper() {
+        guard let prevPath = craftPreferences.previousWallpaperPath,
+              !prevPath.isEmpty,
+              FileManager.default.fileExists(atPath: prevPath) else {
+            return
+        }
+        let url = URL(fileURLWithPath: prevPath)
+        _ = WallpaperGenerator.applyDesktopImage(url: url)
+        craftPreferences.dailyWallpaperEnabled = false
+        craftPreferences.lastWallpaperDateKey = nil
+        persistCraftPreferences()
+    }
+
+    func checkDailyWallpaperIfNeeded() {
+        let now = Date()
+        let todayKey = AppDate.dayKey(now)
+        guard DailyWallpaperGate.shouldRefresh(todayKey: todayKey, preferences: craftPreferences) else {
+            return
+        }
+        let currentYear = AppDate.gregorian.component(.year, from: now)
+        if yearTimeCache[currentYear] != nil {
+            applyBlueprintWallpaperNow()
+        } else {
+            loadYearTime(currentYear)
+        }
     }
 
     // MARK: - Live session monitoring (forwarded to sessionStore)
@@ -987,6 +1101,13 @@ class UsageStore: ObservableObject {
                     self.yearTimeDays = self.yearLoadPhase.value
                 }
                 self.syncActiveLoadingFlag()
+                let currentYear = AppDate.gregorian.component(.year, from: Date())
+                if clampedYear == currentYear, self.yearLoadPhase.value != nil {
+                    if self.yearTimeCache[currentYear] == nil {
+                        self.yearTimeCache[currentYear] = self.yearLoadPhase.value ?? [:]
+                    }
+                    self.checkDailyWallpaperIfNeeded()
+                }
             }
         }
     }

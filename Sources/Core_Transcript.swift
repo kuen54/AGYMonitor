@@ -116,6 +116,10 @@ public struct TranscriptSummary: Equatable, Sendable {
     public let lastModel: String?
     public let pendingToolNames: [String]
     public let isWaitingForQuestion: Bool
+    public var latestModel: String?
+    public var latestContextUsedTokens: Int?
+    public var latestCacheHitRatio: Double?
+    public var recentOutputSamples: [OutputTokenSample]
 
     public static let empty = TranscriptSummary(title: nil, instruction: nil)
 
@@ -127,16 +131,24 @@ public struct TranscriptSummary: Equatable, Sendable {
         lastStepAt: Date? = nil,
         lastModel: String? = nil,
         pendingToolNames: [String] = [],
-        isWaitingForQuestion: Bool = false
+        isWaitingForQuestion: Bool = false,
+        latestModel: String? = nil,
+        latestContextUsedTokens: Int? = nil,
+        latestCacheHitRatio: Double? = nil,
+        recentOutputSamples: [OutputTokenSample] = []
     ) {
         self.title = title
         self.instruction = instruction
         self.lastStepType = lastStepType
         self.lastStepStatus = lastStepStatus
         self.lastStepAt = lastStepAt
-        self.lastModel = lastModel
+        self.lastModel = lastModel ?? latestModel
         self.pendingToolNames = pendingToolNames
         self.isWaitingForQuestion = isWaitingForQuestion
+        self.latestModel = latestModel ?? lastModel
+        self.latestContextUsedTokens = latestContextUsedTokens
+        self.latestCacheHitRatio = latestCacheHitRatio
+        self.recentOutputSamples = recentOutputSamples
     }
 
     /// Derive `(SessionStatus, waitingFor)` from the transcript tail plus optional
@@ -195,6 +207,10 @@ public enum TranscriptParse {
         var instruction: String? = nil
         var lastStep: TranscriptStep? = nil
         var lastSeenModel: String? = nil
+        var latestPlannerModel: String? = nil
+        var latestContextUsedTokens: Int? = nil
+        var latestCacheHitRatio: Double? = nil
+        var outputSamplesByStep: [Int: OutputTokenSample] = [:]
         var activePlannerTools: [String] = []
         var activePlannerHasQuestion = false
         var completedToolOutputsAfterPlanner = 0
@@ -223,6 +239,26 @@ public enum TranscriptParse {
                     activePlannerHasQuestion = false
                     completedToolOutputsAfterPlanner = 0
                 case .plannerResponse:
+                    if let model = step.model, !model.isEmpty {
+                        latestPlannerModel = model
+                    }
+                    let usedTokens = step.inputTokens + step.cacheReadTokens + step.cacheWriteTokens + step.outputTokens
+                    if usedTokens > 0 {
+                        latestContextUsedTokens = usedTokens
+                        let promptDenom = step.inputTokens + step.cacheReadTokens
+                        if promptDenom > 0 {
+                            latestCacheHitRatio = Double(step.cacheReadTokens) / Double(promptDenom)
+                        } else {
+                            latestCacheHitRatio = nil
+                        }
+                    }
+                    if step.outputTokens > 0, let createdAt = step.createdAt {
+                        outputSamplesByStep[step.stepIndex] = OutputTokenSample(
+                            stepIndex: step.stepIndex,
+                            timestamp: createdAt.timeIntervalSince1970,
+                            outputTokens: step.outputTokens
+                        )
+                    }
                     if step.status == .error {
                         activePlannerTools = []
                         activePlannerHasQuestion = false
@@ -260,6 +296,13 @@ public enum TranscriptParse {
             && completedToolOutputsAfterPlanner < activePlannerTools.count
 
         let lastModel = lastStep?.model ?? lastSeenModel
+        let resolvedLatestModel = latestPlannerModel ?? lastModel
+
+        let sortedSamples = outputSamplesByStep.values.sorted { a, b in
+            if a.stepIndex != b.stepIndex { return a.stepIndex < b.stepIndex }
+            return a.timestamp < b.timestamp
+        }
+        let recentOutputSamples = Array(sortedSamples.suffix(12))
 
         return TranscriptSummary(
             title: cleaned(title),
@@ -269,7 +312,11 @@ public enum TranscriptParse {
             lastStepAt: lastStep?.createdAt,
             lastModel: lastModel,
             pendingToolNames: pendingTools,
-            isWaitingForQuestion: waitingForQuestion
+            isWaitingForQuestion: waitingForQuestion,
+            latestModel: resolvedLatestModel,
+            latestContextUsedTokens: latestContextUsedTokens,
+            latestCacheHitRatio: latestCacheHitRatio,
+            recentOutputSamples: recentOutputSamples
         )
     }
 
@@ -307,10 +354,10 @@ public enum TranscriptParse {
         let createdAt = AppDate.parseISO8601(obj["created_at"] as? String)
         let model = (obj["model"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        let inp = obj["input_tokens"] as? Int ?? 0
-        let out = obj["output_tokens"] as? Int ?? 0
-        let cr  = (obj["cache_read_tokens"] as? Int) ?? (obj["cache_read"] as? Int) ?? 0
-        let cw  = (obj["cache_write_tokens"] as? Int) ?? (obj["cache_write"] as? Int) ?? 0
+        let inp = max(0, obj["input_tokens"] as? Int ?? 0)
+        let out = max(0, obj["output_tokens"] as? Int ?? 0)
+        let cr  = max(0, (obj["cache_read_tokens"] as? Int) ?? (obj["cache_read"] as? Int) ?? 0)
+        let cw  = max(0, (obj["cache_write_tokens"] as? Int) ?? (obj["cache_write"] as? Int) ?? 0)
 
         var toolNames: [String] = []
         if let calls = obj["tool_calls"] as? [[String: Any]] {
