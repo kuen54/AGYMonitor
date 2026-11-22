@@ -36,6 +36,7 @@ let package = Package(
                 "QuotaService.swift",
                 "SessionJumper.swift",
                 "SessionMonitor.swift",
+                "SessionReplayService.swift",
                 "SessionStore.swift",
                 "SpecimenExporter.swift",
                 "Theme.swift",
@@ -54,6 +55,7 @@ let package = Package(
                 "Views_Menus.swift",
                 "Views_Plan.swift",
                 "Views_Session.swift",
+                "Views_SessionReplay.swift",
                 "Views_Specimen.swift",
                 "Views_Time.swift",
                 "WallpaperGenerator.swift",
@@ -81,6 +83,7 @@ let package = Package(
                 "Core_Instruments.swift",
                 "Core_LiveTelemetry.swift",
                 "Core_CraftState.swift",
+                "Core_Replay.swift",
             ]
         ),
         .testTarget(

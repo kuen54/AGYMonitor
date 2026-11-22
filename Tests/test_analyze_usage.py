@@ -101,7 +101,7 @@ class TestPython39CompatibilityAndMeta(unittest.TestCase):
     def test_python39_syntax_and_version(self) -> None:
         src = SCRIPT_PATH.read_text(encoding="utf-8")
         tree = ast.parse(src, filename=str(SCRIPT_PATH))
-        self.assertEqual(au.__version__, "1.8.0")
+        self.assertEqual(au.__version__, "1.9.0")
         self.assertEqual(
             au.MODEL_CLASSES,
             ("carbon", "argon", "neon", "hydrogen", "flash", "claude", "other"),

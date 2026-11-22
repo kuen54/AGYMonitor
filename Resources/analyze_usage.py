@@ -45,7 +45,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import urllib.parse
 import urllib.request
 
-__version__ = "1.8.0"
+__version__ = "1.9.0"
 
 # ---------------------------------------------------------------------------
 # Antigravity surfaces & cache paths

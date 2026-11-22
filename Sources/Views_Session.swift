@@ -18,6 +18,11 @@ private struct HostWindowProbe: NSViewRepresentable {
 
 // MARK: - Sessions Tab
 
+private enum SessionDeckMode: Equatable {
+    case live
+    case blackBox
+}
+
 struct SessionTabView: View {
     @ObservedObject var sessionStore: SessionStore
     var visualMode: TelemetryVisualMode = .instrument
@@ -28,9 +33,12 @@ struct SessionTabView: View {
     @Environment(\.agyTheme) private var theme
     @Environment(\.telemetryStaticRender) private var isStaticRender
     @Environment(\.telemetryPanelVisible) private var isPanelVisible
+    @Environment(\.craftHapticsEnabled) private var hapticsEnabled
 
+    @State private var deckMode: SessionDeckMode = .live
     @State private var deck = SessionDeckState()
     @State private var hoveredFilter: SessionStatusFilter? = nil
+    @State private var hoveredMode: SessionDeckMode? = nil
     @State private var hostWindow: NSWindow? = nil
     @State private var keyMonitor: Any? = nil
 
@@ -105,16 +113,37 @@ struct SessionTabView: View {
         )
     }
 
+    private func switchDeckMode(_ target: SessionDeckMode) {
+        guard deckMode != target else { return }
+        CraftEngine.shared.perform(.tabDetent, enabled: hapticsEnabled)
+        deckMode = target
+        if target == .blackBox {
+            sessionStore.loadReplayIndex()
+        }
+    }
+
+    private func openSessionReplay(_ sessionId: String) {
+        CraftEngine.shared.perform(.tabDetent, enabled: hapticsEnabled)
+        deckMode = .blackBox
+        sessionStore.loadReplayIndex()
+        sessionStore.selectReplayMission(sessionId)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            if allSessions.isEmpty {
+            filterStrip
+            HairlineRule(showCrosshairs: true)
+
+            if deckMode == .blackBox {
+                SessionReplayDeckView(
+                    sessionStore: sessionStore,
+                    isActiveMode: deckMode == .blackBox
+                )
+            } else if allSessions.isEmpty {
                 emptyState
                 HairlineRule(showCrosshairs: false)
                 colophonFooter
             } else {
-                filterStrip
-                HairlineRule(showCrosshairs: true)
-
                 if visualMode == .instrument {
                     AgentTelemetryRadarView(
                         sessions: allSessions,
@@ -142,7 +171,8 @@ struct SessionTabView: View {
                             group: group,
                             sessionStore: sessionStore,
                             selectedSessionId: deck.selectedSessionId,
-                            hoveredRadarSessionId: deck.hoveredSessionId
+                            hoveredRadarSessionId: deck.hoveredSessionId,
+                            onOpenReplay: { sid in openSessionReplay(sid) }
                         )
                         if idx < filteredGroups.count - 1 {
                             HairlineRule(showCrosshairs: true)
@@ -173,6 +203,7 @@ struct SessionTabView: View {
         .onChange(of: isPanelVisible) { visible in
             if !visible {
                 hoveredFilter = nil
+                hoveredMode = nil
                 dispatchDeck(.setHoveredSession(nil, visibleIds: orderedVisibleSessionIds))
             }
         }
@@ -190,71 +221,159 @@ struct SessionTabView: View {
             (.done,    loc("filterDone"),    doneCount,             theme.signalGreen),
         ]
 
-        return HStack(spacing: 4) {
-            ForEach(chips, id: \.kind) { item in
-                let isSelected = (deck.filter == item.kind)
-                let isHovered = (hoveredFilter == item.kind)
-                let squareColor = item.tint ?? theme.accent
-
-                HStack(spacing: 4.5) {
-                    if isSelected {
+        return HStack(spacing: 3) {
+            if deckMode == .live {
+                if allSessions.isEmpty {
+                    HStack(spacing: 5) {
                         Rectangle()
-                            .fill(squareColor)
+                            .fill(theme.inkMuted.opacity(0.45))
                             .frame(width: 4, height: 4)
-                            .rotationEffect(item.kind == .waiting ? .degrees(45) : .zero)
-                    } else if let dotTint = item.tint {
-                        Rectangle()
-                            .fill(dotTint.opacity(item.count > 0 ? 0.72 : 0.25))
-                            .frame(width: 3.5, height: 3.5)
-                            .rotationEffect(item.kind == .waiting ? .degrees(45) : .zero)
+                        Text(String(format: loc("liveTagFmt"), 0))
+                            .font(.system(size: 8.5, weight: .regular, design: .monospaced))
+                            .monospacedDigit()
+                            .tracking(0.65)
+                            .foregroundColor(theme.inkMuted)
                     }
+                } else {
+                    ForEach(chips, id: \.kind) { item in
+                        let isSelected = (deck.filter == item.kind)
+                        let isHovered = (hoveredFilter == item.kind)
+                        let squareColor = item.tint ?? theme.accent
 
-                    Text(item.label)
-                        .font(.system(size: 8.5, weight: isSelected ? .semibold : .regular, design: .monospaced))
-                        .tracking(0.7)
-                        .foregroundColor(
-                            isSelected
-                                ? theme.inkPrimary
-                                : (isHovered ? theme.inkPrimary.opacity(0.85) : theme.inkSecondary)
-                        )
+                        HStack(spacing: 4) {
+                            if isSelected {
+                                Rectangle()
+                                    .fill(squareColor)
+                                    .frame(width: 4, height: 4)
+                                    .rotationEffect(item.kind == .waiting ? .degrees(45) : .zero)
+                            } else if let dotTint = item.tint {
+                                Rectangle()
+                                    .fill(dotTint.opacity(item.count > 0 ? 0.72 : 0.25))
+                                    .frame(width: 3.5, height: 3.5)
+                                    .rotationEffect(item.kind == .waiting ? .degrees(45) : .zero)
+                            }
 
-                    Text("\(item.count)")
-                        .font(.system(size: 8.5, weight: isSelected ? .medium : .regular, design: .monospaced))
-                        .monospacedDigit()
-                        .foregroundColor(
-                            isSelected
-                                ? (item.kind == .waiting ? theme.signalAmber : theme.accent)
-                                : theme.inkMuted
+                            Text(item.label)
+                                .font(.system(size: 8.5, weight: isSelected ? .semibold : .regular, design: .monospaced))
+                                .tracking(0.55)
+                                .foregroundColor(
+                                    isSelected
+                                        ? theme.inkPrimary
+                                        : (isHovered ? theme.inkPrimary.opacity(0.85) : theme.inkSecondary)
+                                )
+
+                            Text("\(item.count)")
+                                .font(.system(size: 8.5, weight: isSelected ? .medium : .regular, design: .monospaced))
+                                .monospacedDigit()
+                                .foregroundColor(
+                                    isSelected
+                                        ? (item.kind == .waiting ? theme.signalAmber : theme.accent)
+                                        : theme.inkMuted
+                                )
+                        }
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 5)
+                        .background(
+                            ZStack(alignment: .bottom) {
+                                if isSelected {
+                                    Rectangle()
+                                        .fill(theme.surfaceRaised.opacity(theme.isDark ? 0.35 : 0.55))
+                                    Rectangle()
+                                        .fill(theme.accent)
+                                        .frame(height: 1.5)
+                                } else if isHovered {
+                                    Rectangle()
+                                        .fill(theme.surfaceRaised.opacity(0.32))
+                                }
+                            }
                         )
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .background(
-                    ZStack(alignment: .bottom) {
-                        if isSelected {
-                            Rectangle()
-                                .fill(theme.surfaceRaised.opacity(theme.isDark ? 0.35 : 0.55))
-                            Rectangle()
-                                .fill(theme.accent)
-                                .frame(height: 1.5)
-                        } else if isHovered {
-                            Rectangle()
-                                .fill(theme.surfaceRaised.opacity(0.32))
+                        .contentShape(Rectangle())
+                        .onHover { inside in
+                            hoveredFilter = inside ? item.kind : (hoveredFilter == item.kind ? nil : hoveredFilter)
+                        }
+                        .onTapGesture {
+                            dispatchDeck(.selectFilter(item.kind, visibleIds: visibleSessionIds(for: item.kind)))
                         }
                     }
-                )
-                .contentShape(Rectangle())
-                .onHover { inside in
-                    hoveredFilter = inside ? item.kind : (hoveredFilter == item.kind ? nil : hoveredFilter)
                 }
-                .onTapGesture {
-                    dispatchDeck(.selectFilter(item.kind, visibleIds: visibleSessionIds(for: item.kind)))
+            } else {
+                HStack(spacing: 5) {
+                    Rectangle()
+                        .fill(theme.accent)
+                        .frame(width: 4, height: 4)
+                    Text(loc("replayDeckHeaderTag"))
+                        .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
+                        .tracking(0.8)
+                        .foregroundColor(theme.inkPrimary)
+                        .lineLimit(1)
                 }
             }
-            Spacer(minLength: 0)
+
+            Spacer(minLength: 4)
+
+            deckModeToggle
+                .fixedSize()
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 5)
+    }
+
+    private var deckModeToggle: some View {
+        let items: [(mode: SessionDeckMode, label: String)] = [
+            (.live,     loc("sessionModeLive")),
+            (.blackBox, loc("sessionModeBlackBox")),
+        ]
+
+        return HStack(spacing: 0) {
+            ForEach(Array(items.enumerated()), id: \.offset) { idx, item in
+                let isSelected = (deckMode == item.mode)
+                let isHovered = (hoveredMode == item.mode)
+                let cursorToken = "session-deck-mode-\(idx)"
+
+                HStack(spacing: 3.5) {
+                    if item.mode == .blackBox {
+                        Rectangle()
+                            .fill(isSelected ? theme.accent : theme.inkMuted.opacity(0.5))
+                            .frame(width: 3.5, height: 3.5)
+                    }
+                    Text(item.label)
+                        .font(.system(size: 7.5, weight: isSelected ? .semibold : .regular, design: .monospaced))
+                        .tracking(0.55)
+                        .foregroundColor(
+                            isSelected
+                                ? theme.accent
+                                : (isHovered ? theme.inkPrimary : theme.inkSecondary)
+                        )
+                }
+                .padding(.horizontal, 6.5)
+                .padding(.vertical, 4)
+                .background(
+                    isSelected
+                        ? theme.accent.opacity(theme.isDark ? 0.18 : 0.11)
+                        : (isHovered ? theme.surfaceRaised.opacity(0.55) : Color.clear)
+                )
+                .contentShape(Rectangle())
+                .onHover { inside in
+                    hoveredMode = inside ? item.mode : (hoveredMode == item.mode ? nil : hoveredMode)
+                    PointingCursorCoordinator.shared.setPointing(inside, token: cursorToken)
+                }
+                .onDisappear {
+                    if hoveredMode == item.mode { hoveredMode = nil }
+                    PointingCursorCoordinator.shared.setPointing(false, token: cursorToken)
+                }
+                .onTapGesture {
+                    switchDeckMode(item.mode)
+                }
+
+                if idx == 0 {
+                    Rectangle()
+                        .fill(theme.hairlineStrong.opacity(0.75))
+                        .frame(width: 0.75, height: 12)
+                }
+            }
+        }
+        .background(theme.surface.opacity(theme.isDark ? 0.65 : 0.75))
+        .overlay(Rectangle().stroke(theme.hairlineStrong.opacity(0.80), lineWidth: 0.75))
     }
 
     // MARK: Precision Optical Alert Section (04.2)
@@ -292,7 +411,8 @@ struct SessionTabView: View {
                         sessionStore: sessionStore,
                         rowIndex: idx + 1,
                         workspacePrefix: wsLabel,
-                        isSelected: deck.selectedSessionId == session.sessionId || deck.hoveredSessionId == session.sessionId
+                        isSelected: deck.selectedSessionId == session.sessionId || deck.hoveredSessionId == session.sessionId,
+                        onOpenReplay: { sid in openSessionReplay(sid) }
                     )
                     if idx < waitingSessions.count - 1 {
                         Rectangle()
@@ -389,7 +509,7 @@ struct SessionTabView: View {
     private func installKeyMonitor() {
         guard keyMonitor == nil else { return }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            guard let hw = hostWindow, event.window === hw else { return event }
+            guard deckMode == .live, let hw = hostWindow, event.window === hw else { return event }
             let rawMods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             var mods = SessionKeyModifiers()
             if rawMods.contains(.command)    { mods.insert(.command) }
@@ -434,6 +554,7 @@ struct SessionGroupSection: View {
     @ObservedObject var sessionStore: SessionStore
     var selectedSessionId: String? = nil
     var hoveredRadarSessionId: String? = nil
+    var onOpenReplay: ((String) -> Void)? = nil
 
     @Environment(\.agyTheme) private var theme
 
@@ -462,7 +583,8 @@ struct SessionGroupSection: View {
                         session: session,
                         sessionStore: sessionStore,
                         rowIndex: idx + 1,
-                        isSelected: selectedSessionId == session.sessionId || hoveredRadarSessionId == session.sessionId
+                        isSelected: selectedSessionId == session.sessionId || hoveredRadarSessionId == session.sessionId,
+                        onOpenReplay: onOpenReplay
                     )
                     if idx < group.sessions.count - 1 {
                         Rectangle()
@@ -486,11 +608,13 @@ struct SessionRow: View {
     var rowIndex: Int? = nil
     var workspacePrefix: String? = nil
     var isSelected: Bool = false
+    var onOpenReplay: ((String) -> Void)? = nil
 
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
     @Environment(\.telemetryPanelVisible) private var isPanelVisible
     @State private var hovering = false
+    @State private var hoveringReplay = false
 
     private var isActiveHighlight: Bool { hovering || isSelected }
 
@@ -560,6 +684,37 @@ struct SessionRow: View {
                 }
             }
 
+            if let onOpenReplay = onOpenReplay {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.system(size: 8.5, weight: .medium))
+                    .foregroundColor(hoveringReplay ? theme.accent : (isActiveHighlight ? theme.inkSecondary : theme.inkMuted.opacity(0.32)))
+                    .frame(width: 16, height: 16)
+                    .background(
+                        hoveringReplay
+                            ? theme.accent.opacity(theme.isDark ? 0.18 : 0.11)
+                            : Color.clear
+                    )
+                    .overlay(
+                        Rectangle()
+                            .stroke(hoveringReplay ? theme.accent.opacity(0.65) : Color.clear, lineWidth: 0.65)
+                    )
+                    .contentShape(Rectangle())
+                    .help(loc("replaySessionHelp"))
+                    .onHover { inside in
+                        hoveringReplay = inside
+                        PointingCursorCoordinator.shared.setPointing(inside, token: "session-row-replay-\(session.sessionId)")
+                    }
+                    .onDisappear {
+                        hoveringReplay = false
+                        PointingCursorCoordinator.shared.setPointing(false, token: "session-row-replay-\(session.sessionId)")
+                    }
+                    .highPriorityGesture(
+                        TapGesture().onEnded {
+                            onOpenReplay(session.sessionId)
+                        }
+                    )
+            }
+
             Text(isActiveHighlight ? "↵" : "")
                 .font(.system(size: 9, weight: .medium, design: .monospaced))
                 .foregroundColor(focusTint)
@@ -583,13 +738,16 @@ struct SessionRow: View {
             PointingCursorCoordinator.shared.setPointing(inside, token: "session-row-\(session.sessionId)")
         }
         .onChange(of: isPanelVisible) { visible in
-            if !visible && hovering {
-                hovering = false
+            if !visible {
+                if hovering { hovering = false }
+                if hoveringReplay { hoveringReplay = false }
             }
         }
         .onDisappear {
             hovering = false
+            hoveringReplay = false
             PointingCursorCoordinator.shared.setPointing(false, token: "session-row-\(session.sessionId)")
+            PointingCursorCoordinator.shared.setPointing(false, token: "session-row-replay-\(session.sessionId)")
         }
         .onTapGesture { sessionStore.jump(session) }
     }
