@@ -155,7 +155,7 @@ public struct TokenFlowLayout: Equatable, Sendable {
     }
 }
 
-// MARK: - 3. Time: 24h Polar Chronometer & Year Marching Squares Contour Field
+// MARK: - 3. Time: 24h Polar Chronometer, Month Diurnal Profile & Year Contour Field
 
 public struct PolarArc: Equatable, Sendable {
     public let dayIndex: Int
@@ -179,6 +179,25 @@ public struct PolarArc: Equatable, Sendable {
         self.endAngle = endAngle
         self.interval = interval
         self.inMonth = inMonth
+    }
+}
+
+public struct MonthDiurnalProfile: Equatable, Sendable {
+    public let bins: [Double]
+    public let maxBinHours: Double
+    public let peakWindowStartBin: Int?
+    public let peakWindowEndBin: Int?
+
+    public init(
+        bins: [Double],
+        maxBinHours: Double,
+        peakWindowStartBin: Int?,
+        peakWindowEndBin: Int?
+    ) {
+        self.bins = bins
+        self.maxBinHours = maxBinHours
+        self.peakWindowStartBin = peakWindowStartBin
+        self.peakWindowEndBin = peakWindowEndBin
     }
 }
 
@@ -212,11 +231,18 @@ public struct ContourFieldResult: Equatable, Sendable {
     public let levels: [ContourLevel]
     public let peaks: [ContourPeak]
     public let maxHours: Double
+    public let cutoffNormX: Double?
 
-    public init(levels: [ContourLevel], peaks: [ContourPeak], maxHours: Double) {
+    public init(
+        levels: [ContourLevel],
+        peaks: [ContourPeak],
+        maxHours: Double,
+        cutoffNormX: Double? = nil
+    ) {
         self.levels = levels
         self.peaks = peaks
         self.maxHours = maxHours
+        self.cutoffNormX = cutoffNormX
     }
 }
 
@@ -647,26 +673,42 @@ public enum InstrumentMath {
         return out
     }
 
+    /// Radial distance for day ring `dayIndex` (0 = Mon ... 6 = Sun), supporting an optional
+    /// 5 + 2 weekday/weekend radial gap (`weekendGap`) between Fri (`dayIndex == 4`) and Sat (`dayIndex == 5`).
+    public static func polarRingRadius(
+        dayIndex: Int,
+        outerRadius: Double,
+        ringStep: Double,
+        weekendGap: Double = 0.0
+    ) -> Double {
+        let base = outerRadius - Double(dayIndex) * ringStep
+        return dayIndex >= 5 ? base - weekendGap : base
+    }
+
     public static func hitTestPolarArc(
         dx: Double,
         dy: Double,
         outerRadius: Double,
         ringStep: Double,
         ringCount: Int,
+        weekendGap: Double = 0.0,
         arcs: [PolarArc]
     ) -> PolarArc? {
         guard ringCount > 0, ringStep > 0 else { return nil }
         let r = hypot(dx, dy)
-        let minRadius = outerRadius - Double(ringCount - 1) * ringStep - ringStep * 0.48
-        let maxRadius = outerRadius + ringStep * 0.48
-        guard r >= minRadius, r <= maxRadius else { return nil }
+        let tolerance = ringStep * 0.55
 
         var matchedRing: Int? = nil
         var bestDist = Double.greatestFiniteMagnitude
         for idx in 0..<ringCount {
-            let ringR = outerRadius - Double(idx) * ringStep
+            let ringR = polarRingRadius(
+                dayIndex: idx,
+                outerRadius: outerRadius,
+                ringStep: ringStep,
+                weekendGap: weekendGap
+            )
             let d = abs(r - ringR)
-            if d <= ringStep * 0.48 && d < bestDist {
+            if d <= tolerance && d < bestDist {
                 bestDist = d
                 matchedRing = idx
             }
@@ -688,12 +730,128 @@ public enum InstrumentMath {
         }
     }
 
-    // MARK: 3b. Year Marching-Squares Isoline Field
+    // MARK: 3b. Month 24H Diurnal Profile
+
+    /// Distributes a single day's active intervals into `binCount` equal bins across `00:00..24:00`,
+    /// returning each bin's active hours in `0...(24.0 / Double(binCount))`.
+    public static func buildDayDiurnalBins(
+        intervals: [ActiveInterval],
+        binCount: Int = 48
+    ) -> [Double] {
+        guard binCount > 0 else { return [] }
+        var bins = Array(repeating: 0.0, count: binCount)
+        let binSec = 86400.0 / Double(binCount)
+        let binHoursCap = 24.0 / Double(binCount)
+
+        for iv in intervals {
+            guard iv.endSec > iv.startSec else { continue }
+            let s = max(0.0, min(86400.0, Double(iv.startSec)))
+            let e = max(s, min(86400.0, Double(iv.endSec)))
+            guard e > s else { continue }
+
+            let firstBin = max(0, min(binCount - 1, Int(floor(s / binSec))))
+            let lastBin = max(firstBin, min(binCount - 1, Int(ceil(e / binSec)) - 1))
+            for b in firstBin...lastBin {
+                let bStart = Double(b) * binSec
+                let bEnd = Double(b + 1) * binSec
+                let overlap = min(e, bEnd) - max(s, bStart)
+                if overlap > 0 {
+                    bins[b] = min(binHoursCap, bins[b] + overlap / 3600.0)
+                }
+            }
+        }
+        return bins
+    }
+
+    /// Aggregates all in-month days (`YYYY-MM-` prefix) into `binCount` diurnal bins (total active hours)
+    /// and locates the earliest contiguous `peakWindowBins` window with maximum total hours.
+    public static func buildMonthDiurnalProfile(
+        days: [String: DayTimeUsage],
+        year: Int,
+        month: Int,
+        binCount: Int = 48,
+        peakWindowBins: Int = 4
+    ) -> MonthDiurnalProfile {
+        guard binCount > 0 else {
+            return MonthDiurnalProfile(bins: [], maxBinHours: 0, peakWindowStartBin: nil, peakWindowEndBin: nil)
+        }
+        guard year >= 1, (1...12).contains(month) else {
+            return MonthDiurnalProfile(
+                bins: Array(repeating: 0.0, count: binCount),
+                maxBinHours: 0,
+                peakWindowStartBin: nil,
+                peakWindowEndBin: nil
+            )
+        }
+
+        let monthPrefix = String(format: "%04d-%02d-", year, month)
+        var bins = Array(repeating: 0.0, count: binCount)
+
+        for key in days.keys.sorted() where key.hasPrefix(monthPrefix) {
+            guard let usage = days[key] else { continue }
+            let dayBins = buildDayDiurnalBins(intervals: usage.intervals, binCount: binCount)
+            for b in 0..<binCount {
+                bins[b] += dayBins[b]
+            }
+        }
+
+        let maxBinHours = bins.max() ?? 0.0
+        guard maxBinHours > 0, peakWindowBins > 0, binCount >= peakWindowBins else {
+            return MonthDiurnalProfile(
+                bins: bins,
+                maxBinHours: maxBinHours,
+                peakWindowStartBin: nil,
+                peakWindowEndBin: nil
+            )
+        }
+
+        var bestStart: Int? = nil
+        var bestSum = -1.0
+        for start in 0...(binCount - peakWindowBins) {
+            var windowSum = 0.0
+            for b in start..<(start + peakWindowBins) {
+                windowSum += bins[b]
+            }
+            if bestStart == nil || windowSum > bestSum + 1e-12 {
+                bestSum = windowSum
+                bestStart = start
+            }
+        }
+
+        let peakStart = bestStart
+        let peakEnd = peakStart.map { $0 + peakWindowBins }
+        return MonthDiurnalProfile(
+            bins: bins,
+            maxBinHours: maxBinHours,
+            peakWindowStartBin: peakStart,
+            peakWindowEndBin: peakEnd
+        )
+    }
+
+    // MARK: 3c. Year Marching-Squares Isoline Field
+
+    /// Aggregate active hours into 12 calendar-month buckets (`index 0 = Jan ... index 11 = Dec`)
+    /// for `year`, ignoring other years, malformed keys, and non-positive durations.
+    public static func yearMonthlyHours(days: [String: Int], year: Int) -> [Double] {
+        var monthSecs = Array(repeating: 0, count: 12)
+        guard year >= 1 else { return Array(repeating: 0.0, count: 12) }
+        let yearPrefix = String(format: "%04d-", year)
+        for (key, sec) in days where sec > 0 && key.hasPrefix(yearPrefix) {
+            let parts = key.split(separator: "-")
+            if parts.count == 3,
+               let mo = Int(parts[1]), (1...12).contains(mo),
+               let day = Int(parts[2]), (1...31).contains(day) {
+                monthSecs[mo - 1] += sec
+            }
+        }
+        return monthSecs.map { Double($0) / 3600.0 }
+    }
 
     public static func buildYearContourField(
         days: [String: Int],
         year: Int,
-        levelCount: Int = 5
+        levelCount: Int = 5,
+        cutoffDayKey: String? = nil
     ) -> ContourFieldResult {
         guard let startMonday = TimeLogic.yearGridStartMonday(year: year), levelCount >= 1 else {
             return ContourFieldResult(levels: [], peaks: [], maxHours: 0)
@@ -702,14 +860,42 @@ public enum InstrumentMath {
         let colsRaw = 53
         let rowsRaw = 7
         let yearPrefix = String(format: "%04d-", year)
+        let finalDayKey = String(format: "%04d-12-31", year)
+
+        // Resolve optional in-year cutoff (e.g. today for the current year) when strictly before
+        // the final column or final day of the year.
+        let cutoffPos: (col: Int, row: Int)?
+        let activeCutoffKey: String?
+        if let rawCutoff = cutoffDayKey,
+           rawCutoff.hasPrefix(yearPrefix),
+           let pos = TimeLogic.gridPosition(dayKey: rawCutoff, startMonday: startMonday),
+           (pos.col < colsRaw - 1 || rawCutoff < finalDayKey) {
+            cutoffPos = pos
+            activeCutoffKey = rawCutoff
+        } else {
+            cutoffPos = nil
+            activeCutoffKey = nil
+        }
+
+        let cutoffNormX: Double? = cutoffPos.map { pos in
+            min(1.0, max(0.0, Double(pos.col + 1) / Double(colsRaw)))
+        }
+
+        func isFuture(col: Int, row: Int) -> Bool {
+            guard let pos = cutoffPos else { return false }
+            return col > pos.col || (col == pos.col && row > pos.row)
+        }
+
         var rawGrid = Array(repeating: Array(repeating: 0.0, count: colsRaw), count: rowsRaw)
         var rawKeys = Array(repeating: Array(repeating: "", count: colsRaw), count: rowsRaw)
         var maxRawHours = 0.0
 
         for row in 0..<rowsRaw {
             for col in 0..<colsRaw {
+                guard !isFuture(col: col, row: row) else { continue }
                 if let key = TimeLogic.dayKey(col: col, row: row, startMonday: startMonday),
                    key.hasPrefix(yearPrefix) {
+                    if let cutoffKey = activeCutoffKey, key > cutoffKey { continue }
                     rawKeys[row][col] = key
                     let hrs = Double(max(0, days[key] ?? 0)) / 3600.0
                     rawGrid[row][col] = hrs
@@ -719,14 +905,36 @@ public enum InstrumentMath {
         }
 
         guard maxRawHours > 0 else {
-            return ContourFieldResult(levels: [], peaks: [], maxHours: 0)
+            return ContourFieldResult(levels: [], peaks: [], maxHours: 0, cutoffNormX: cutoffNormX)
         }
 
-        // Upsample 2x in X (106 interior) and 4x in Y (27 interior) + 1-cell zero border pad
-        // -> 108×29 scalar field so Marching Squares contours form smooth closed topographic loops.
+        // Honest Neumann boundary extension at todayCol so Gaussian smoothing never creates
+        // an artificial drop-to-zero cliff against uncharted future dates.
+        if let pos = cutoffPos {
+            let tc = pos.col
+            let tr = pos.row
+            for r in (tr + 1)..<rowsRaw {
+                rawGrid[r][tc] = tc > 0 ? rawGrid[r][tc - 1] : rawGrid[r][tc]
+            }
+            if tc + 1 < colsRaw {
+                for r in 0..<rowsRaw {
+                    let edgeVal = rawGrid[r][tc]
+                    for c in (tc + 1)..<colsRaw {
+                        rawGrid[r][c] = edgeVal
+                    }
+                }
+            }
+        }
+
+        // Upsample 2x in X (106 interior) and 4x in Y (27 interior) + 1-cell zero border pad.
+        // When a cutoff is active, extend 12 Neumann buffer columns past innerCols before the
+        // far-right zero closing frame so late-year dates stay cliff-free while contour loops
+        // remain closed for scanline parity stippling inside [0, cutoffNormX].
         let innerCols = colsRaw * 2          // 106
+        let extraRightCols = (cutoffPos != nil) ? 12 : 0
+        let extInnerCols = innerCols + extraRightCols
         let innerRows = 27                   // 27 interior rows (29 with zero border)
-        let cols = innerCols + 2             // 108
+        let cols = extInnerCols + 2          // 108 (full year) or 120 (cutoff active)
         let rows = innerRows + 2             // 29
         var field = Array(repeating: Array(repeating: 0.0, count: cols), count: rows)
         let maxRawCol = Double(colsRaw - 1)
@@ -748,17 +956,32 @@ public enum InstrumentMath {
                 let bot = rawGrid[r1][c0] * (1.0 - fc) + rawGrid[r1][c1] * fc
                 field[yr + 1][xc + 1] = top * oneMinusFr + bot * fr
             }
+            if extraRightCols > 0 {
+                let rightEdge = field[yr + 1][innerCols]
+                for xc in innerCols..<extInnerCols {
+                    field[yr + 1][xc + 1] = rightEdge
+                }
+            }
         }
 
         // Three separable Gaussian-like smoothing passes keeping zero perimeter intact
         field = smoothField(field, passes: 3)
 
+        let chartedMaxC: Int = {
+            if let pos = cutoffPos {
+                return min(innerCols, (pos.col + 1) * 2)
+            }
+            return innerCols
+        }()
         var smoothPeak = 0.0
-        for row in field {
-            for v in row where v > smoothPeak { smoothPeak = v }
+        for r in 1..<(rows - 1) {
+            for c in 1...max(1, chartedMaxC) {
+                let v = field[r][c]
+                if v > smoothPeak { smoothPeak = v }
+            }
         }
         guard smoothPeak > 0.01 else {
-            return ContourFieldResult(levels: [], peaks: [], maxHours: maxRawHours)
+            return ContourFieldResult(levels: [], peaks: [], maxHours: maxRawHours, cutoffNormX: cutoffNormX)
         }
 
         let ratios: [Double] = (0..<levelCount).map { idx in
@@ -770,17 +993,27 @@ public enum InstrumentMath {
         var levels: [ContourLevel] = []
         for (idx, ratio) in ratios.enumerated() {
             let threshold = smoothPeak * ratio
-            let segs = marchingSquaresSegments(field: field, threshold: threshold)
+            let segs = marchingSquaresSegments(
+                field: field,
+                threshold: threshold,
+                innerCols: innerCols,
+                innerRows: innerRows,
+                clampMaxX: cutoffPos == nil
+            )
             levels.append(ContourLevel(level: idx, thresholdHours: threshold, segments: segs))
         }
 
-        // Pick up to 3 well-separated high-elevation peaks for cartographic `[H]` callouts
+        // Pick up to 3 well-separated high-elevation peaks strictly from charted days
         var candidates: [(col: Int, row: Int, hours: Double, key: String)] = []
         for r in 0..<rowsRaw {
             for c in 0..<colsRaw {
+                guard !isFuture(col: c, row: r) else { continue }
+                let key = rawKeys[r][c]
+                guard !key.isEmpty else { continue }
+                if let cutoffKey = activeCutoffKey, key > cutoffKey { continue }
                 let hrs = rawGrid[r][c]
                 guard hrs >= 0.5 else { continue }
-                candidates.append((c, r, hrs, rawKeys[r][c]))
+                candidates.append((c, r, hrs, key))
             }
         }
         candidates.sort { $0.hours > $1.hours }
@@ -795,7 +1028,12 @@ public enum InstrumentMath {
             }
         }
 
-        return ContourFieldResult(levels: levels, peaks: peaks, maxHours: maxRawHours)
+        return ContourFieldResult(
+            levels: levels,
+            peaks: peaks,
+            maxHours: maxRawHours,
+            cutoffNormX: cutoffNormX
+        )
     }
 
     private static func smoothField(_ input: [[Double]], passes: Int) -> [[Double]] {
@@ -821,16 +1059,23 @@ public enum InstrumentMath {
         return current
     }
 
-    private static func marchingSquaresSegments(field: [[Double]], threshold: Double) -> [Segment2D] {
+    private static func marchingSquaresSegments(
+        field: [[Double]],
+        threshold: Double,
+        innerCols: Int,
+        innerRows: Int,
+        clampMaxX: Bool
+    ) -> [Segment2D] {
         let rows = field.count
         let cols = field.first?.count ?? 0
         guard rows >= 2, cols >= 2 else { return [] }
 
-        let xDenom = Double(max(1, cols - 2))
-        let yDenom = Double(max(1, rows - 2))
+        let xDenom = Double(max(1, innerCols))
+        let yDenom = Double(max(1, innerRows))
 
         func normX(_ gridC: Double) -> Double {
-            min(1.0, max(0.0, (gridC - 0.5) / xDenom))
+            let raw = max(0.0, (gridC - 0.5) / xDenom)
+            return clampMaxX ? min(1.0, raw) : raw
         }
         func normY(_ gridR: Double) -> Double {
             min(1.0, max(0.0, (gridR - 0.5) / yDenom))

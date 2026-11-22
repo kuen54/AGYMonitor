@@ -9,9 +9,9 @@
     <td align="center"><img src="docs/plan.png" width="250" alt="Plan tab"/><br/><sub><b>Plan</b> — Dual 270° Orbital Phase dials with pace ray + Google One AI Credits</sub></td>
   </tr>
   <tr>
-    <td align="center"><img src="docs/time-week.png" width="250" alt="Time — week view"/><br/><sub><b>Time · Week</b> — 24h Polar Chronometer with 7 Mon–Sun rings &amp; live NOW ray</sub></td>
-    <td align="center"><img src="docs/time-month.png" width="250" alt="Time — month view"/><br/><sub><b>Time · Month</b> — per-week timeline cells with elevation wash</sub></td>
-    <td align="center"><img src="docs/time-year.png" width="250" alt="Time — year contour"/><br/><sub><b>Time · Year</b> — Marching-Squares Topographic Contour Field &amp; [H] peaks</sub></td>
+    <td align="center"><img src="docs/time-week.png" width="250" alt="Time — week view"/><br/><sub><b>Time · Week</b> — 24h Polar Chronometer with 00:00 meridian index, 5+2 split &amp; click-to-pin</sub></td>
+    <td align="center"><img src="docs/time-month.png" width="250" alt="Time — month view"/><br/><sub><b>Time · Month</b> — 30-day elevation profile + aggregated 24h diurnal rhythm</sub></td>
+    <td align="center"><img src="docs/time-year.png" width="250" alt="Time — year contour"/><br/><sub><b>Time · Year</b> — Honest Marching-Squares contours with Mon–Sun axis, NOW cutoff &amp; monthly totals</sub></td>
   </tr>
   <tr>
     <td align="center" colspan="3"><img src="docs/session.png" width="360" alt="Session tab"/><br/><sub><b>Sessions</b> — Agent Telemetry Radar (clickable nodes &amp; swarm links) + workspace groups</sub></td>
@@ -56,9 +56,9 @@ Antigravity runs across multiple surfaces — the `agy` CLI in your terminal, An
 - **7 Switchable Studio Themes (`⌘T`)** — `Monolith` (Cobalt × Slate), `Google` (Primary 4-Color Spectrum), `Polar` (Indigo × Orange), `Riso` (Pink × Cobalt), `Atelier` (Amber × Teal), `Heritage` (Pine × Gold), and `Telemetry` (Volt × Violet), weaving coordinated chromatic voices across every tab in Light, Dark, and Notch modes
 - **Cost & Tokens** — switch seamlessly between API-equivalent spend and token volume across Today / Week / Month, broken down by Antigravity model family (**Gemini Carbon**, **Gemini Argon**, **Gemini Neon**, **Gemini Hydrogen**, **Gemini Flash**, **Claude**, and **Other**)
 - **Time** — *when* you actually worked with Antigravity, computed from 10-minute gap-merged step timestamps:
-  - **Week** — **24h Polar Chronometer** (7 concentric Mon–Sun rings + live `NOW` radar ray) or Classic `Mon–Sun × 0–24h` traces
-  - **Month** — one timeline row per week of the month
-  - **Year** — **Marching-Squares Topographic Contour Field** with `[H]` peaks or Classic 53×7 activity heatmap
+  - **Week** — **24h Polar Chronometer** (00:00 meridian weekday index gate, 5+2 weekday/weekend split, click-to-pin rings, & live `NOW` radar ray) or Classic `Mon–Sun × 0–24h` traces
+  - **Month** — **Monthly Elevation & 24h Diurnal Profile** (30-day stratified elevation bars vs `AVG` + aggregated 48-bin diurnal rhythm with cross-deck hover) or Classic 7-column calendar timeline
+  - **Year** — **Marching-Squares Topographic Contour Field** with `Mon–Sun` weekday axis, honest `NOW` cutoff, `[H]` peaks, & 12-month elevation strip (or Classic 53×7 activity heatmap)
 - **Sessions** — **Agent Telemetry Radar** plotting workspace hubs, swarm worker links (`parentSessionId`), amber target-lock brackets on waiting sessions, and busy optical pulses — click any radar beacon or workspace row below (`↑↓` + `↵`) to jump straight to its terminal pane/tab (Otty, Apple Terminal, iTerm2, WezTerm, Ghostty, Kitty, Alacritty, Antigravity IDE)
 - **Plan & AI Credits** — dual **270° Orbital Phase Dials** with burn-rate pace vectors & deficit warning wedges across Antigravity's rolling buckets (**Gemini Models** and **Claude & Partner**) alongside weekly horizons, plan tier, and **Google One AI Credits** (`Prompt`, `Flow`, `Flex`)
 - **Notch Live Activity Wing & Customizable Status Bar** — Waiting sessions hold a clickable alert wing beside the hardware notch; Finished sessions announce for 5s and retract cleanly. Customize status bar readout (`Follow Tab`, `Today Cost`, `5h Quota`, `Live Sessions`, `Cost + 5h Quota`) via right-click or `⋯` menu
@@ -172,7 +172,7 @@ setup_signing.sh              ← optional one-time self-signed certificate setu
 fix_swift.sh                  ← Command Line Tools SwiftBridging modulemap workaround
 .github/workflows/build.yml   ← CI: plist lint → py_compile & unittest → swift test → DMG build
 AGENTS.md                     ← developer & coding-agent architecture contract
-Info.plist                    ← LSUIElement=true; single source of app version (1.6.0)
+Info.plist                    ← LSUIElement=true; single source of app version (1.7.0)
 ```
 
 ### On pricing accuracy
@@ -205,9 +205,9 @@ Antigravity 同时运行在多个入口：终端里的 `agy` CLI、Antigravity 2
 - **7 套可切换视觉主题（`⌘T` 循环切换）** — 内置 `Monolith`（钴蓝 × 石墨）、`Google`（经典四色光谱）、`Polar`（靛蓝 × 工程橙）、`Riso`（荧光粉 × 联邦蓝）、`Atelier`（琥珀 × 石油青）、`Heritage`（赛车绿 × 鎏金）与 `Telemetry`（酸绿 × 紫外），全 5 个 Tab 深度语义联动并自适应浅色/深色/刘海模式
 - **费用 & Tokens 双视图** — 支持切换今日/本周/本月汇总，按 Antigravity 模型家族拆分（**Gemini Carbon**、**Gemini Argon**、**Gemini Neon**、**Gemini Hydrogen**、**Gemini Flash**、**Claude** 与 **Other**）
 - **活跃时长（Time）** — 基于 10 分钟间隔合并算法还原你**何时**在使用 Antigravity：
-  - **周视图** — **24h 极坐标日晷**（周一至周日 7 圈同心轨道 + 实时 `NOW` 扫频指针，或经典 `周一~周日 × 0–24h` 时间轴）
-  - **月视图** — 按周分行展示整月时间轴与每日热度
-  - **年视图** — **Marching Squares 全年等高地形场**（自动标注 `[H]` 高峰时长，支持切回 53×7 GitHub 格子热力图）
+  - **周视图** — **24h 极坐标日晷**（`00:00` 顶轴环序刻度门、工作日/周末 `5+2` 断层、点击锁定单环与实时 `NOW` 扫频指针，或经典 `周一~周日 × 0–24h` 时间轴）
+  - **月视图** — **30 天海拔剖面 + 24h 昼夜节律带**（全月每日时长海拔 vs 月均基线 + 48 档昼夜分布与双层联动悬停，或经典 7 列月历）
+  - **年视图** — **Marching Squares 全年等高地形场**（`周一~周日` 纵轴、`NOW` 自然截断、`[H]` 高峰标注与 12 个月汇总海拔条，支持切回 53×7 GitHub 格子热力图）
 - **实时会话（Sessions）** — 顶部 **Agent 态势雷达** 按工作区聚簇展示节点与 Swarm 子 Agent 连线，等待确认会亮起琥珀目标锁定角标；下方按工作区列出会话标题与最新指令（支持 `↑↓` + `↵` 键盘导航，点击雷达信标或列表行均可直接跳转到 Otty / Terminal / iTerm2 / WezTerm / Antigravity IDE）
 - **套餐配额 & AI Credits（Plan）** — 双环 **270° 极坐标燃速罗盘** 与配速预警展示 Antigravity 滚动配额池（**Gemini Models**、**Claude & Partner**）的剩余百分比、7D 周配额、重置倒计时及 **Google One AI Credits**（`Prompt`、`Flow`、`Flex` 积分）
 - **刘海灵动翼（Notch Live Wing）& 状态栏自定义** — 刘海模式下支持等待会话持久警示与完成后 5 秒自动收起；右键或 `⋯` 菜单可自定义状态栏指标（跟随当前标签 / 今日花费 / 5h 剩余配额 / 实时会话 / 花费 + 配额）
