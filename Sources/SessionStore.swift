@@ -30,6 +30,19 @@ final class SessionStore: ObservableObject {
     /// Aggregated live output throughput across all busy sessions (+ active swarm workers).
     @Published var liveTPS: LiveTPSSnapshot = .idle
 
+    // MARK: Universal Session Black Box Replay (On-Demand, 0% Idle Overhead)
+
+    /// Recent Antigravity missions discovered across CLI, Desktop, and IDE.
+    @Published var replayMissions: [ReplayMissionSummary] = []
+    /// Currently selected mission conversation ID in the Black Box deck.
+    @Published var selectedReplayMissionId: String? = nil
+    /// Loaded multi-track timeline for `selectedReplayMissionId`.
+    @Published var activeReplay: ReplayTimeline? = nil
+    /// True while `loadReplayIndex` is scanning mission metadata off-main.
+    @Published var isReplayIndexLoading: Bool = false
+    /// True while `selectReplayMission` is parsing transcripts/board off-main.
+    @Published var isReplayTimelineLoading: Bool = false
+
     var liveCount: Int { sessions.count }
     var anyBusy: Bool { sessions.contains { $0.status == .busy } }
     var anyWaiting: Bool { sessions.contains { $0.status == .waiting } }
@@ -59,6 +72,12 @@ final class SessionStore: ObservableObject {
     private var jumpHintBanner = TransientBannerState()
     private var jumpHintClear: DispatchWorkItem?
 
+    private lazy var replayService = SessionReplayService()
+    private var replayIndexGeneration: Int = 0
+    private var replayTimelineGeneration: Int = 0
+    private var lastReplayIndexLoadedAt: Date? = nil
+    private static let replayIndexFreshnessWindowSec: TimeInterval = 5.0
+
     // MARK: Lifecycle
 
     func startMonitoring() { monitor.start() }
@@ -72,6 +91,75 @@ final class SessionStore: ObservableObject {
 
     /// Clear a single session's green "finished, unseen" dot on user engagement.
     func markSeen(_ sessionId: String) { monitor.markSeen(sessionId: sessionId) }
+
+    // MARK: Black Box Replay Actions
+
+    /// Scans recent missions off-main (deduplicating concurrent calls).
+    /// When `selectedReplayMissionId == nil` and missions are found, automatically selects `first.id`.
+    func loadReplayIndex(force: Bool = false) {
+        if !force {
+            if isReplayIndexLoading { return }
+            if !replayMissions.isEmpty,
+               let loadedAt = lastReplayIndexLoadedAt,
+               Date().timeIntervalSince(loadedAt) < Self.replayIndexFreshnessWindowSec {
+                if selectedReplayMissionId == nil, let first = replayMissions.first {
+                    selectReplayMission(first.id)
+                }
+                return
+            }
+        }
+
+        replayIndexGeneration += 1
+        let gen = replayIndexGeneration
+        isReplayIndexLoading = true
+        let liveIds = Set(sessions.map(\.sessionId))
+
+        replayService.listRecentMissionsAsync(liveSessionIds: liveIds) { [weak self] missions in
+            guard let self = self, self.replayIndexGeneration == gen else { return }
+            self.isReplayIndexLoading = false
+            self.lastReplayIndexLoadedAt = Date()
+            if self.replayMissions != missions {
+                self.replayMissions = missions
+            }
+            if self.selectedReplayMissionId == nil, let first = missions.first {
+                self.selectReplayMission(first.id)
+            } else if force, let currentId = self.selectedReplayMissionId {
+                self.selectReplayMission(currentId)
+            }
+        }
+    }
+
+    /// Selects `id` and loads its `ReplayTimeline` asynchronously via `SessionReplayService`.
+    /// Guarded by a monotonic generation counter so rapid stepping never overwrites newer selection.
+    func selectReplayMission(_ id: String) {
+        guard !id.isEmpty else { return }
+        replayTimelineGeneration += 1
+        let gen = replayTimelineGeneration
+        if selectedReplayMissionId != id {
+            selectedReplayMissionId = id
+        }
+        isReplayTimelineLoading = true
+
+        replayService.loadTimelineAsync(missionId: id) { [weak self] timeline in
+            guard let self = self,
+                  self.replayTimelineGeneration == gen,
+                  self.selectedReplayMissionId == id else {
+                return
+            }
+            self.isReplayTimelineLoading = false
+            if self.activeReplay != timeline {
+                self.activeReplay = timeline
+            }
+        }
+    }
+
+    /// Clears the active replay selection and invalidates any in-flight timeline loads.
+    func clearReplaySelection() {
+        replayTimelineGeneration += 1
+        selectedReplayMissionId = nil
+        activeReplay = nil
+        isReplayTimelineLoading = false
+    }
 
     /// Click-to-jump: focus/raise the terminal pane or Antigravity Desktop/IDE window.
     func jump(_ session: SessionInfo) {
