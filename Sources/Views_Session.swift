@@ -510,7 +510,7 @@ struct SessionRow: View {
             RadarStatusDot(kind: dotKind)
                 .accessibilityLabel(statusLabel)
 
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 2.5) {
                 HStack(spacing: 5.5) {
                     Text(titleText)
                         .font(.system(size: 11, weight: isWaiting ? .medium : .regular))
@@ -533,41 +533,31 @@ struct SessionRow: View {
                             .overlay(Rectangle().stroke(theme.hairline.opacity(0.80), lineWidth: 0.55))
                             .fixedSize()
                     }
+
+                    Spacer(minLength: 6)
+
+                    statusOrTimeBadge(isWaiting: isWaiting)
+                        .fixedSize()
                 }
 
-                Text(workspacePrefix.map { "\($0) · \(subtitleText)" } ?? subtitleText)
-                    .font(.system(size: 9.5, weight: .regular))
-                    .foregroundColor(theme.inkSecondary.opacity(0.86))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
+                HStack(spacing: 6) {
+                    Text(workspacePrefix.map { "\($0) · \(subtitleText)" } ?? subtitleText)
+                        .font(.system(size: 9.5, weight: .regular))
+                        .foregroundColor(theme.inkSecondary.opacity(0.86))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
 
-            Spacer(minLength: 4)
+                    Spacer(minLength: 6)
 
-            if isWaiting {
-                let tag = session.waitReason == .needsConfirmation ? loc("badgeConfirm") : loc("badgeInput")
-                Text("\(tag) ↗")
-                    .font(.system(size: 7.5, weight: .semibold, design: .monospaced))
-                    .tracking(0.45)
-                    .foregroundColor(theme.signalAmber)
-                    .padding(.horizontal, 5.5)
-                    .padding(.vertical, 2)
-                    .background(theme.signalAmber.opacity(theme.isDark ? 0.11 : 0.09))
-                    .overlay(Rectangle().stroke(theme.signalAmber.opacity(0.62), lineWidth: 0.75))
-            } else if dotKind == .doneUnseen {
-                Text(loc("badgeDone"))
-                    .font(.system(size: 7.5, weight: .medium, design: .monospaced))
-                    .tracking(0.45)
-                    .foregroundColor(theme.signalGreen)
-                    .padding(.horizontal, 4.5)
-                    .padding(.vertical, 1.5)
-                    .background(theme.signalGreen.opacity(theme.isDark ? 0.10 : 0.07))
-                    .overlay(Rectangle().stroke(theme.signalGreen.opacity(0.42), lineWidth: 0.65))
-            } else if let updated = session.updatedAt {
-                Text(timeAgo(Date(timeIntervalSince1970: updated / 1000), loc))
-                    .font(.system(size: 8, weight: .regular, design: .monospaced))
-                    .monospacedDigit()
-                    .foregroundColor(theme.inkMuted)
+                    if let ctx = sessionStore.contextSnapshots[session.sessionId] {
+                        SessionContextMicroMeter(
+                            snapshot: ctx,
+                            theme: theme,
+                            tooltipText: contextTooltip(ctx)
+                        )
+                        .fixedSize()
+                    }
+                }
             }
 
             Text(isActiveHighlight ? "↵" : "")
@@ -602,6 +592,56 @@ struct SessionRow: View {
             PointingCursorCoordinator.shared.setPointing(false, token: "session-row-\(session.sessionId)")
         }
         .onTapGesture { sessionStore.jump(session) }
+    }
+
+    @ViewBuilder
+    private func statusOrTimeBadge(isWaiting: Bool) -> some View {
+        if isWaiting {
+            let tag = session.waitReason == .needsConfirmation ? loc("badgeConfirm") : loc("badgeInput")
+            Text("\(tag) ↗")
+                .font(.system(size: 7.5, weight: .semibold, design: .monospaced))
+                .tracking(0.45)
+                .foregroundColor(theme.signalAmber)
+                .padding(.horizontal, 5.5)
+                .padding(.vertical, 2)
+                .background(theme.signalAmber.opacity(theme.isDark ? 0.11 : 0.09))
+                .overlay(Rectangle().stroke(theme.signalAmber.opacity(0.62), lineWidth: 0.75))
+        } else if dotKind == .doneUnseen {
+            Text(loc("badgeDone"))
+                .font(.system(size: 7.5, weight: .medium, design: .monospaced))
+                .tracking(0.45)
+                .foregroundColor(theme.signalGreen)
+                .padding(.horizontal, 4.5)
+                .padding(.vertical, 1.5)
+                .background(theme.signalGreen.opacity(theme.isDark ? 0.10 : 0.07))
+                .overlay(Rectangle().stroke(theme.signalGreen.opacity(0.42), lineWidth: 0.65))
+        } else if let updated = session.updatedAt {
+            Text(timeAgo(Date(timeIntervalSince1970: updated / 1000), loc))
+                .font(.system(size: 8, weight: .regular, design: .monospaced))
+                .monospacedDigit()
+                .foregroundColor(theme.inkMuted)
+        }
+    }
+
+    private func contextTooltip(_ ctx: SessionContextSnapshot) -> String {
+        let used = SessionContextMicroMeter.formatCompactTokens(ctx.usedTokens)
+        let window = SessionContextMicroMeter.formatCompactTokens(ctx.windowTokens)
+        if let hit = ctx.cacheHitRatio {
+            let hitPct = Int((hit * 100.0).rounded())
+            return String(
+                format: loc("contextRemainingHelpCacheFmt"),
+                used,
+                window,
+                ctx.remainingPercent,
+                hitPct
+            )
+        }
+        return String(
+            format: loc("contextRemainingHelpFmt"),
+            used,
+            window,
+            ctx.remainingPercent
+        )
     }
 
     private var surfaceCode: String? {
@@ -645,5 +685,106 @@ struct SessionRow: View {
         case .unknown:
             return loc("sessionRunning")
         }
+    }
+}
+
+// MARK: - Live Session Context Window Remaining Micro-Meter
+
+private struct SessionContextMicroMeter: View, Equatable {
+    let snapshot: SessionContextSnapshot
+    let theme: AGYTheme
+    let tooltipText: String
+
+    private var labelColor: Color {
+        switch snapshot.pressureLevel {
+        case .nominal:  return theme.inkSecondary
+        case .warning:  return theme.signalAmber
+        case .critical: return theme.signalRed
+        }
+    }
+
+    private var barColor: Color {
+        switch snapshot.pressureLevel {
+        case .nominal:  return theme.accentSecondary
+        case .warning:  return theme.signalAmber
+        case .critical: return theme.signalRed
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 4.5) {
+            if snapshot.needsCompactHint {
+                Text("/compact")
+                    .font(.system(size: 7, weight: .semibold, design: .monospaced))
+                    .tracking(0.25)
+                    .foregroundColor(theme.signalRed)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(theme.signalRed.opacity(theme.isDark ? 0.14 : 0.10))
+                    .overlay(Rectangle().stroke(theme.signalRed.opacity(0.55), lineWidth: 0.65))
+            }
+
+            Canvas { context, size in
+                let w = size.width
+                let h = size.height
+                guard w > 1, h > 0.5 else { return }
+
+                // Base hairline track
+                context.fill(
+                    Path(CGRect(x: 0, y: 0, width: w, height: h)),
+                    with: .color(theme.hairline.opacity(theme.isDark ? 0.88 : 0.72))
+                )
+
+                // Remaining ratio fill
+                let ratio = CGFloat(min(1.0, max(0.0, snapshot.remainingRatio)))
+                if ratio > 0 {
+                    let fillW = min(w, max(1.5, w * ratio))
+                    context.fill(
+                        Path(CGRect(x: 0, y: 0, width: fillW, height: h)),
+                        with: .color(barColor)
+                    )
+                }
+
+                // 4-segment Swiss calibration notches (25% / 50% / 75%)
+                var notches = Path()
+                for idx in 1...3 {
+                    let x = (w * CGFloat(idx) / 4.0).rounded(.toNearestOrAwayFromZero)
+                    notches.move(to: CGPoint(x: x, y: 0))
+                    notches.addLine(to: CGPoint(x: x, y: h))
+                }
+                context.stroke(
+                    notches,
+                    with: .color(theme.canvas.opacity(theme.isDark ? 0.85 : 0.92)),
+                    lineWidth: 0.65
+                )
+            }
+            .frame(width: 28, height: 3.5)
+
+            Text("CTX \(snapshot.remainingPercent)%")
+                .font(.system(size: 7.5, weight: snapshot.pressureLevel == .nominal ? .regular : .semibold, design: .monospaced))
+                .monospacedDigit()
+                .tracking(0.3)
+                .foregroundColor(labelColor)
+        }
+        .help(tooltipText)
+    }
+
+    static func formatCompactTokens(_ count: Int) -> String {
+        let c = max(0, count)
+        if c >= 1_000_000 {
+            let m = Double(c) / 1_000_000.0
+            if abs(m - m.rounded()) < 0.05 {
+                return "\(Int(m.rounded()))M"
+            }
+            return String(format: "%.1fM", locale: Locale(identifier: "en_US_POSIX"), m)
+        }
+        if c >= 1_000 {
+            let k = Double(c) / 1_000.0
+            if c >= 100_000 || abs(k - k.rounded()) < 0.05 {
+                return "\(Int(k.rounded()))K"
+            }
+            return String(format: "%.1fK", locale: Locale(identifier: "en_US_POSIX"), k)
+        }
+        return "\(c)"
     }
 }

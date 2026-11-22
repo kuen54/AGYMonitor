@@ -16,6 +16,9 @@ struct OrbitalPlanDeck: View {
 
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
+    @Environment(\.telemetryPanelVisible) private var isPanelVisible
+    @Environment(\.craftHapticsEnabled) private var hapticsEnabled
+    @State private var hoveredWeeklyIndex: Int? = nil
 
     private var hasWeekly: Bool {
         !geminiWeeklyLimits.isEmpty || !claudeWeeklyLimits.isEmpty
@@ -152,6 +155,26 @@ struct OrbitalPlanDeck: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 9)
+                .background(
+                    hoveredWeeklyIndex == idx
+                        ? theme.surfaceRaised.opacity(theme.isDark ? 0.20 : 0.32)
+                        : Color.clear
+                )
+                .contentShape(Rectangle())
+                .onHover { inside in
+                    if inside {
+                        if hoveredWeeklyIndex != idx {
+                            hoveredWeeklyIndex = idx
+                            let isDeficitOrCritical = (pace?.isOverPaceWarning == true) || remaining < 30
+                            CraftEngine.shared.perform(
+                                isDeficitOrCritical ? .orbitalDeficitWarn : .creditsTick,
+                                enabled: hapticsEnabled
+                            )
+                        }
+                    } else if hoveredWeeklyIndex == idx {
+                        hoveredWeeklyIndex = nil
+                    }
+                }
 
                 if idx < items.count - 1 {
                     Rectangle().fill(theme.hairline.opacity(0.85)).frame(width: 1)
@@ -159,6 +182,14 @@ struct OrbitalPlanDeck: View {
             }
         }
         .fixedSize(horizontal: false, vertical: true)
+        .onChange(of: isPanelVisible) { visible in
+            if !visible && hoveredWeeklyIndex != nil {
+                hoveredWeeklyIndex = nil
+            }
+        }
+        .onDisappear {
+            hoveredWeeklyIndex = nil
+        }
     }
 }
 
@@ -177,7 +208,10 @@ private struct OrbitalQuotaDial: View {
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
     @Environment(\.telemetryStaticRender) private var telemetryStaticRender
+    @Environment(\.telemetryPanelVisible) private var isPanelVisible
     @Environment(\.telemetryReduceMotion) private var reduceMotion
+    @Environment(\.craftHapticsEnabled) private var hapticsEnabled
+    @State private var isHovered = false
 
     private let dialWidth: CGFloat = 152
     private let dialHeight: CGFloat = 132
@@ -346,6 +380,32 @@ private struct OrbitalQuotaDial: View {
         .padding(.horizontal, 14)
         .padding(.top, 11)
         .padding(.bottom, 10)
+        .background(
+            isHovered
+                ? theme.surfaceRaised.opacity(theme.isDark ? 0.20 : 0.32)
+                : Color.clear
+        )
+        .contentShape(Rectangle())
+        .onHover { inside in
+            if isHovered != inside {
+                isHovered = inside
+                if inside {
+                    let isDeficitOrCritical = (currentPace?.isOverPaceWarning == true) || remaining < 30
+                    CraftEngine.shared.perform(
+                        isDeficitOrCritical ? .orbitalDeficitWarn : .orbitalDialInspect,
+                        enabled: hapticsEnabled
+                    )
+                }
+            }
+        }
+        .onChange(of: isPanelVisible) { visible in
+            if !visible && isHovered {
+                isHovered = false
+            }
+        }
+        .onDisappear {
+            isHovered = false
+        }
     }
 }
 

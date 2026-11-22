@@ -36,6 +36,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var displayModeCancellable: AnyCancellable?
     private let hotKeyManager = GlobalHotKeyManager()
     private var hotkeyCancellable: AnyCancellable?
+    private var acousticCancellable: AnyCancellable?
+    private var wallpaperRefreshCancellable: AnyCancellable?
 
     // Menu-bar floating panel anchor validation, placement, dismiss monitors, and host display
     // height metrics (backed by `MenuBarAnchorResolver` & `PopoverAnchorSessionState`).
@@ -45,6 +47,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var panelDismissObservers: [NSObjectProtocol] = []
     private var menuTrackingObservers: [NSObjectProtocol] = []
     private var screenParametersObserver: NSObjectProtocol?
+    private var calendarDayObserver: NSObjectProtocol?
+
+    private struct AcousticSessionKey: Equatable {
+        let waitingIds: Set<String>
+        let doneUnseenIds: Set<String>
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Initialize presentation state synchronously from persisted preferences so zero
@@ -142,27 +150,81 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self?.reconcileMenuBarPanelForScreenChange()
         }
 
-        // Observe current month data + tab changes to update menu bar title.
+        // Midnight calendar day change: refresh Daily Blueprint Wallpaper without polling timers.
+        calendarDayObserver = center.addObserver(
+            forName: .NSCalendarDayChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.store.checkDailyWallpaperIfNeeded()
+        }
+
+        // Observe current month data + tab changes + live working TPS to update menu bar title.
         // Always shows current month regardless of which month is being viewed.
         // CombineLatest4 is Combine's max arity — extra signals are chained below.
+        let liveTPSSignal = store.sessionStore.$liveTPS
+            .map { tps -> String? in
+                guard tps.isWorking, tps.currentTPS >= 1.0 else { return nil }
+                return LiveTPSTracker.formatCompactTPS(tps.currentTPS)
+            }
+            .removeDuplicates()
         let sessionMenuSignal = store.sessionStore.$sessions
             .map { sessions -> String in
                 "\(sessions.count)|\(sessions.contains { $0.status == .busy })|\(sessions.contains { $0.status == .waiting })"
             }
             .removeDuplicates()
+            .combineLatest(liveTPSSignal)
         cancellable = Publishers.CombineLatest4(
             store.$currentMonthData, store.$selectedTab, store.$language, store.$subscriptionQuota)
             .combineLatest(store.$today, store.$menuBarMetric, store.$timeTodaySeconds)
             .combineLatest(sessionMenuSignal)
             .receive(on: RunLoop.main)
-            .sink { [weak self] _, _ in
+            .sink { [weak self] _, sessionPair in
                 guard let self = self, self.store.canDisplayMenuBarValue else { return }
-                let value = self.store.menuBarValue
+                let baseValue = self.store.menuBarValue
+                let value = sessionPair.1.map { "\(baseValue) · \($0)" } ?? baseValue
                 self.menuBarAnchor.updateValue(value)
                 if self.menuBarModel.text != self.menuBarAnchor.displayedText {
                     self.menuBarModel.text = self.menuBarAnchor.displayedText
                 }
             }
+
+        // Acoustic cockpit chimes: edge-triggered on newly waiting or newly completed sessions.
+        acousticCancellable = Publishers.CombineLatest(
+            store.sessionStore.$sessions,
+            store.sessionStore.$doneUnseen
+        )
+        .map { sessions, doneUnseen in
+            AcousticSessionKey(
+                waitingIds: Set(sessions.filter { $0.status == .waiting }.map(\.sessionId)),
+                doneUnseenIds: doneUnseen
+            )
+        }
+        .removeDuplicates()
+        .receive(on: RunLoop.main)
+        .sink { [weak self] key in
+            guard let self = self else { return }
+            let enabled = self.store.craftPreferences.acousticChimesEnabled
+            MainActor.assumeIsolated {
+                CraftEngine.shared.handleSessionTransition(
+                    waitingIds: key.waitingIds,
+                    doneUnseenIds: key.doneUnseenIds,
+                    enabled: enabled
+                )
+            }
+        }
+
+        // Daily Blueprint Wallpaper: trigger once initial usage or year data lands (gated by
+        // `DailyWallpaperGate.shouldRefresh` so repeat ticks on the same day are O(1) no-ops).
+        wallpaperRefreshCancellable = Publishers.CombineLatest(
+            store.$lastUpdate,
+            store.$yearTimeDays.map { $0 != nil }.removeDuplicates()
+        )
+        .receive(on: RunLoop.main)
+        .sink { [weak self] lastUpdate, hasYearData in
+            guard let self = self, lastUpdate != nil || hasYearData else { return }
+            self.store.checkDailyWallpaperIfNeeded()
+        }
 
         // Load cached data instantly, then refresh in background
         store.loadCacheForCurrentMonth()
@@ -746,6 +808,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         cancellable?.cancel(); cancellable = nil
         displayModeCancellable?.cancel(); displayModeCancellable = nil
         hotkeyCancellable?.cancel(); hotkeyCancellable = nil
+        acousticCancellable?.cancel(); acousticCancellable = nil
+        wallpaperRefreshCancellable?.cancel(); wallpaperRefreshCancellable = nil
         closeMenuBarPanel(animated: false)
         for obs in menuTrackingObservers {
             NotificationCenter.default.removeObserver(obs)
@@ -754,6 +818,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if let obs = screenParametersObserver {
             NotificationCenter.default.removeObserver(obs)
             screenParametersObserver = nil
+        }
+        if let obs = calendarDayObserver {
+            NotificationCenter.default.removeObserver(obs)
+            calendarDayObserver = nil
         }
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         DistributedNotificationCenter.default().removeObserver(self)
@@ -766,6 +834,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func onWake(_ note: Notification) {
         dispatchBrainWatcher(.wakeReceived)
         store.handleSystemWakeForUpdates()
+        store.checkDailyWallpaperIfNeeded()
     }
 
     @objc private func handleStatusItemClick() {
@@ -859,7 +928,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(metricSubItem)
         menu.addItem(.separator())
 
-        // 5. Hotkey, Updates, Refresh & Quit
+        // 5. Specimen Export, Hotkey, Updates, Refresh & Quit
+        let specimenItem = NSMenuItem(
+            title: loc("menuExportSpecimen"),
+            action: #selector(contextExportSpecimen),
+            keyEquivalent: "e"
+        )
+        specimenItem.keyEquivalentModifierMask = [.command]
+        specimenItem.target = self
+        menu.addItem(specimenItem)
+        menu.addItem(.separator())
+
         let hkItem = NSMenuItem(title: loc("hotkeyToggle"), action: #selector(contextToggleHotkey), keyEquivalent: "")
         hkItem.target = self
         hkItem.state = store.globalHotkeyEnabled ? .on : .off
@@ -936,6 +1015,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard let raw = sender.representedObject as? String,
               let metric = MenuBarMetricPreference(rawValue: raw) else { return }
         store.setMenuBarMetric(metric)
+    }
+
+    @objc private func contextExportSpecimen() {
+        MainActor.assumeIsolated {
+            SpecimenWindowController.shared.present(store: store)
+        }
     }
 
     @objc private func contextToggleHotkey() {

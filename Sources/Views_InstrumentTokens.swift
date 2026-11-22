@@ -24,6 +24,7 @@ struct TokensInstrumentView: View {
     @Environment(\.agyTheme) private var theme
     @Environment(\.telemetryStaticRender) private var isStaticRender
     @Environment(\.telemetryReduceMotion) private var reduceMotion
+    @Environment(\.craftHapticsEnabled) private var hapticsEnabled
     @Namespace private var scopeNamespace
     @State private var hoveredScope: UsagePeriodScope? = nil
 
@@ -201,6 +202,7 @@ struct TokensInstrumentView: View {
                 }
                 .onTapGesture {
                     guard binding.wrappedValue != item.scope else { return }
+                    CraftEngine.shared.perform(.tabDetent, enabled: hapticsEnabled)
                     withAnimation(scopeAnimation) {
                         binding.wrappedValue = item.scope
                     }
@@ -290,6 +292,7 @@ struct FoldedTokenFlowChart: View {
     @Environment(\.agyTheme) private var theme
     @Environment(\.telemetryStaticRender) private var isStaticRender
     @Environment(\.telemetryPanelVisible) private var isPanelVisible
+    @Environment(\.craftHapticsEnabled) private var hapticsEnabled
     /// Mutually exclusive model-vs-channel focus arbiter so header, left column,
     /// canvas, and right column can never disagree on precedence.
     @State private var flowFocus: TokenFlowFocus<TokenChannel> = .none
@@ -571,9 +574,13 @@ struct FoldedTokenFlowChart: View {
                     ids: leftNodeIds,
                     maxDistance: 12.0
                 )
+                let prevModel = flowFocus.modelId
                 flowFocus.setModel(hit)
                 if focusedModelId != flowFocus.modelId {
                     focusedModelId = flowFocus.modelId
+                }
+                if let nextModel = flowFocus.modelId, nextModel != prevModel {
+                    CraftEngine.shared.perform(.tokenStreamLock, enabled: hapticsEnabled)
                 }
             case .ended:
                 flowFocus.setModel(nil)
@@ -653,9 +660,13 @@ struct FoldedTokenFlowChart: View {
                     maxDistance: 12.0
                 )
                 let hitChannel = hitId.flatMap { Self.channelFromNodeId($0) }
+                let prevChannel = flowFocus.channel
                 flowFocus.setChannel(hitChannel)
                 if focusedModelId != flowFocus.modelId {
                     focusedModelId = flowFocus.modelId
+                }
+                if let nextChannel = flowFocus.channel, nextChannel != prevChannel {
+                    CraftEngine.shared.perform(.tokenStreamLock, enabled: hapticsEnabled)
                 }
             case .ended:
                 flowFocus.setChannel(nil)
@@ -1386,6 +1397,7 @@ struct TokenDensityMatrix: View {
     @Environment(\.agyTheme) private var theme
     @Environment(\.telemetryStaticRender) private var isStaticRender
     @Environment(\.telemetryPanelVisible) private var isPanelVisible
+    @Environment(\.craftHapticsEnabled) private var hapticsEnabled
     @State private var inspection = ChartInspectionState<String, Int>(scope: "")
 
     private var inspectionScope: String { "\(year)-\(month)" }
@@ -1614,6 +1626,16 @@ struct TokenDensityMatrix: View {
                         inspection.syncScope(inspectionScope)
                         if inspection.target != day {
                             inspection.setTarget(day)
+                            let idx = day - 1
+                            let val = (idx >= 0 && idx < snapshot.values.count) ? snapshot.values[idx] : 0
+                            if val > 0 {
+                                let activeRidge = focusedRidge ?? ridge
+                                let isPeak = activeRidge.peakValue > 0 && activeRidge.peakIndex == idx
+                                CraftEngine.shared.perform(
+                                    isPeak ? .tokenMatrixPeak : .tokenMatrixCell,
+                                    enabled: hapticsEnabled
+                                )
+                            }
                         }
                     case .ended:
                         if inspection.target != nil {

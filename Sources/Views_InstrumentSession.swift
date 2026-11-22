@@ -23,6 +23,7 @@ struct AgentTelemetryRadarView: View {
     @Environment(\.telemetryStaticRender) private var isStaticRender
     @Environment(\.telemetryPanelVisible) private var isPanelVisible
     @Environment(\.telemetryReduceMotion) private var reduceMotion
+    @Environment(\.craftHapticsEnabled) private var hapticsEnabled
 
     private let radarHeight: CGFloat = 152
 
@@ -48,20 +49,46 @@ struct AgentTelemetryRadarView: View {
         .padding(.horizontal, 14)
         .padding(.top, 10)
         .padding(.bottom, 10)
+        .onChange(of: selectedSessionId) { nextId in
+            guard let id = nextId,
+                  hoveredSessionId != id,
+                  let matched = sessions.first(where: { $0.sessionId == id }) else { return }
+            let cue: InstrumentHapticCue = (matched.status == .waiting)
+                ? .radarAlertLock
+                : .radarBeaconLock
+            CraftEngine.shared.perform(cue, enabled: hapticsEnabled)
+        }
     }
 
     @ViewBuilder
     private func headerRow(layout: SessionRadarLayout) -> some View {
+        let liveTPS = sessionStore.liveTPS
+
         HStack(spacing: 5) {
             Text("04.1")
                 .font(.system(size: 8, weight: .semibold, design: .monospaced))
                 .foregroundColor(theme.accent.opacity(0.9))
+                .fixedSize()
             Text(loc("agentRadarTitle"))
                 .font(.system(size: 8, weight: .regular, design: .monospaced))
                 .tracking(0.8)
                 .foregroundColor(theme.inkSecondary)
+                .lineLimit(1)
 
             Spacer(minLength: 4)
+
+            if liveTPS.isWorking {
+                RadarLiveTPSReadout(
+                    snapshot: liveTPS,
+                    theme: theme,
+                    tooltipText: liveTPSTooltip(liveTPS)
+                )
+                .fixedSize()
+
+                Rectangle()
+                    .fill(theme.hairlineStrong.opacity(0.75))
+                    .frame(width: 0.75, height: 8)
+            }
 
             if let hid = hoveredSessionId,
                let node = layout.nodes.first(where: { $0.id == hid }) {
@@ -71,13 +98,24 @@ struct AgentTelemetryRadarView: View {
                     .monospacedDigit()
                     .foregroundColor(node.session.status == .waiting ? theme.signalAmber : theme.accent)
                     .lineLimit(1)
+                    .truncationMode(.tail)
             } else {
                 Text(String(format: "%02d HUBS · %02d NODES", layout.hubs.count, layout.nodes.count))
                     .font(.system(size: 8, weight: .regular, design: .monospaced))
                     .monospacedDigit()
                     .foregroundColor(theme.inkMuted)
+                    .fixedSize()
             }
         }
+    }
+
+    private func liveTPSTooltip(_ snapshot: LiveTPSSnapshot) -> String {
+        let cur = LiveTPSTracker.formatCompactTPS(snapshot.currentTPS)
+        let peak = LiveTPSTracker.formatCompactTPS(snapshot.peakTPS)
+        if snapshot.peakTPS >= 0.5 {
+            return "\(loc("liveTpsHelp")) · \(cur) (\(loc("peakTag")) \(peak))"
+        }
+        return "\(loc("liveTpsHelp")) · \(cur)"
     }
 
     private struct RadarNodeKey: Hashable {
@@ -208,6 +246,12 @@ struct AgentTelemetryRadarView: View {
                             let hitId = hit?.id
                             if hoveredSessionId != hitId {
                                 hoveredSessionId = hitId
+                                if let hitNode = hit {
+                                    let cue: InstrumentHapticCue = (hitNode.session.status == .waiting)
+                                        ? .radarAlertLock
+                                        : .radarBeaconLock
+                                    CraftEngine.shared.perform(cue, enabled: hapticsEnabled)
+                                }
                             }
                             PointingCursorCoordinator.shared.setPointing(hitId != nil, token: "session-radar")
                         case .ended:
@@ -226,6 +270,7 @@ struct AgentTelemetryRadarView: View {
                             nodes: interactiveNodes,
                             maxRadius: 20.0
                         ) {
+                            CraftEngine.shared.perform(.radarJumpEngage, enabled: hapticsEnabled)
                             sessionStore.jump(hit.session)
                         }
                     }
@@ -1177,6 +1222,132 @@ private struct RadarActiveTargetOverlay: View {
                 len: 3.8,
                 color: highlightColor,
                 lineWidth: 0.95
+            )
+        }
+    }
+}
+
+// MARK: - Radar Header Live Output TPS Oscilloscope Micro-Sparkline
+
+private struct RadarLiveTPSReadout: View, Equatable {
+    let snapshot: LiveTPSSnapshot
+    let theme: AGYTheme
+    let tooltipText: String
+
+    private var formattedTPS: String {
+        LiveTPSTracker.formatCompactTPS(snapshot.currentTPS)
+    }
+
+    var body: some View {
+        HStack(spacing: 4) {
+            RadarTPSSparklineCanvas(
+                samples: snapshot.sparkline,
+                accent: theme.accent,
+                hairline: theme.hairline,
+                isDark: theme.isDark
+            )
+            .frame(width: 36, height: 12)
+
+            Text(formattedTPS)
+                .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                .monospacedDigit()
+                .foregroundColor(theme.accent)
+        }
+        .help(tooltipText)
+    }
+}
+
+private struct RadarTPSSparklineCanvas: View, Equatable {
+    let samples: [Double]
+    let accent: Color
+    let hairline: Color
+    let isDark: Bool
+
+    var body: some View {
+        Canvas { context, size in
+            let cw = size.width
+            let ch = size.height
+            guard cw > 4, ch > 4 else { return }
+
+            let padX: CGFloat = 1.5
+            let padTop: CGFloat = 1.5
+            let padBottom: CGFloat = 1.5
+            let baseY = ch - padBottom
+            let plotH = max(1.0, baseY - padTop)
+            let plotW = max(1.0, cw - padX * 2.0)
+
+            // Crisp oscilloscope zero-baseline hairline
+            var baseline = Path()
+            baseline.move(to: CGPoint(x: padX, y: baseY))
+            baseline.addLine(to: CGPoint(x: cw - padX, y: baseY))
+            context.stroke(
+                baseline,
+                with: .color(hairline.opacity(isDark ? 0.72 : 0.60)),
+                lineWidth: 0.5
+            )
+
+            guard !samples.isEmpty else { return }
+
+            let maxVal = max(samples.max() ?? 0.0, 1.0)
+            let points: [CGPoint]
+            if samples.count == 1 {
+                let norm = CGFloat(min(1.0, max(0.0, samples[0] / maxVal)))
+                let y = baseY - norm * plotH
+                points = [
+                    CGPoint(x: padX + plotW * 0.5, y: y),
+                    CGPoint(x: cw - padX, y: y),
+                ]
+            } else {
+                let denom = CGFloat(samples.count - 1)
+                points = samples.enumerated().map { idx, val in
+                    let x = padX + (CGFloat(idx) / denom) * plotW
+                    let norm = CGFloat(min(1.0, max(0.0, val / maxVal)))
+                    let y = baseY - norm * plotH
+                    return CGPoint(x: x, y: y)
+                }
+            }
+
+            guard let first = points.first, let last = points.last else { return }
+
+            var linePath = Path()
+            linePath.move(to: first)
+            for pt in points.dropFirst() {
+                linePath.addLine(to: pt)
+            }
+
+            var fillPath = linePath
+            fillPath.addLine(to: CGPoint(x: last.x, y: baseY))
+            fillPath.addLine(to: CGPoint(x: first.x, y: baseY))
+            fillPath.closeSubpath()
+
+            context.fill(
+                fillPath,
+                with: .linearGradient(
+                    Gradient(colors: [
+                        accent.opacity(isDark ? 0.24 : 0.16),
+                        accent.opacity(0.02),
+                    ]),
+                    startPoint: CGPoint(x: 0, y: padTop),
+                    endPoint: CGPoint(x: 0, y: baseY)
+                )
+            )
+
+            context.stroke(
+                linePath,
+                with: .color(accent),
+                style: StrokeStyle(lineWidth: 1.0, lineCap: .round, lineJoin: .round)
+            )
+
+            // Live oscilloscope endpoint dot + faint optical halo
+            let haloR: CGFloat = 2.4
+            let dotR: CGFloat = 1.25
+            context.fill(
+                Path(ellipseIn: CGRect(x: last.x - haloR, y: last.y - haloR, width: haloR * 2, height: haloR * 2)),
+                with: .color(accent.opacity(isDark ? 0.30 : 0.20))
+            )
+            context.fill(
+                Path(ellipseIn: CGRect(x: last.x - dotR, y: last.y - dotR, width: dotR * 2, height: dotR * 2)),
+                with: .color(accent)
             )
         }
     }

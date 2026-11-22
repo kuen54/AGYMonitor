@@ -181,6 +181,10 @@ struct CompactNotchView: View {
             wingButton(wing)
                 .padding(.leading, Self.innerPad)
                 .padding(.trailing, Self.outerPad)
+        } else if sessionStore.liveTPS.isWorking && sessionStore.liveTPS.currentTPS >= 0.5 {
+            workingTPSBlock(sessionStore.liveTPS)
+                .padding(.leading, Self.innerPad)
+                .padding(.trailing, Self.outerPad)
         } else {
             Text(store.menuBarValue)
                 .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
@@ -191,6 +195,25 @@ struct CompactNotchView: View {
                 .padding(.leading, Self.innerPad)
                 .padding(.trailing, Self.outerPad)
         }
+    }
+
+    private func workingTPSBlock(_ tps: LiveTPSSnapshot) -> some View {
+        HStack(spacing: 5) {
+            NotchTPSSparkline(
+                values: tps.sparkline,
+                peak: tps.peakTPS,
+                accent: darkTheme.accent
+            )
+            .frame(width: 24, height: 11)
+            Text(LiveTPSTracker.formatCompactTPS(tps.currentTPS))
+                .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                .monospacedDigit()
+                .foregroundColor(sessionStore.anyWaiting ? darkTheme.signalAmber : darkTheme.inkPrimary)
+                .lineLimit(1)
+                .frame(minWidth: 44, alignment: .trailing)
+                .fixedSize()
+        }
+        .fixedSize()
     }
 
     private func wingButton(_ wing: NotchWingKind) -> some View {
@@ -220,6 +243,89 @@ struct CompactNotchView: View {
         .onTapGesture {
             vm.onTapWing?(wing.sessionId)
         }
+    }
+}
+
+// MARK: - Mini Working Output TPS Sparkline (OLED-black, zero timers)
+
+private struct NotchTPSSparkline: View, Equatable {
+    let values: [Double]
+    let peak: Double
+    let accent: Color
+
+    var body: some View {
+        Canvas { ctx, size in
+            let w = size.width
+            let h = size.height
+            guard w > 4, h > 4 else { return }
+
+            let leftX: CGFloat = 1.0
+            let rightX: CGFloat = w - 2.0
+            let topY: CGFloat = 2.0
+            let bottomY: CGFloat = h - 1.5
+            let plotH = max(1.0, bottomY - topY)
+
+            let sanitized = values.map { $0.isFinite ? max(0.0, $0) : 0.0 }
+            let scaleMax = max(peak.isFinite ? peak : 0.0, sanitized.max() ?? 0.0, 1.0)
+
+            let points: [CGPoint]
+            if sanitized.count >= 2 {
+                let spanX = max(1.0, rightX - leftX)
+                let denom = CGFloat(sanitized.count - 1)
+                points = sanitized.enumerated().map { idx, val in
+                    let norm = min(1.0, max(0.0, val / scaleMax))
+                    let x = leftX + (CGFloat(idx) / denom) * spanX
+                    let y = bottomY - CGFloat(norm) * plotH
+                    return CGPoint(x: x, y: y)
+                }
+            } else if let single = sanitized.first {
+                let norm = min(1.0, max(0.0, single / scaleMax))
+                let tipY = bottomY - CGFloat(norm) * plotH
+                points = [
+                    CGPoint(x: leftX, y: bottomY - plotH * 0.15),
+                    CGPoint(x: rightX, y: tipY),
+                ]
+            } else {
+                points = [
+                    CGPoint(x: leftX, y: bottomY),
+                    CGPoint(x: rightX, y: topY + plotH * 0.4),
+                ]
+            }
+
+            guard let first = points.first, let last = points.last else { return }
+
+            var line = Path()
+            line.move(to: first)
+            for pt in points.dropFirst() {
+                line.addLine(to: pt)
+            }
+
+            var fill = line
+            fill.addLine(to: CGPoint(x: last.x, y: bottomY))
+            fill.addLine(to: CGPoint(x: first.x, y: bottomY))
+            fill.closeSubpath()
+
+            ctx.fill(
+                fill,
+                with: .linearGradient(
+                    Gradient(colors: [accent.opacity(0.28), accent.opacity(0.0)]),
+                    startPoint: CGPoint(x: 0, y: topY),
+                    endPoint: CGPoint(x: 0, y: bottomY)
+                )
+            )
+            ctx.stroke(
+                line,
+                with: .color(accent),
+                style: StrokeStyle(lineWidth: 1.25, lineCap: .round, lineJoin: .round)
+            )
+
+            // Subtle live tip dot + soft halo
+            let haloRect = CGRect(x: last.x - 2.3, y: last.y - 2.3, width: 4.6, height: 4.6)
+            ctx.fill(Path(ellipseIn: haloRect), with: .color(accent.opacity(0.32)))
+            let dotRect = CGRect(x: last.x - 1.25, y: last.y - 1.25, width: 2.5, height: 2.5)
+            ctx.fill(Path(ellipseIn: dotRect), with: .color(accent))
+        }
+        .allowsHitTesting(false)
     }
 }
 

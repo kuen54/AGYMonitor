@@ -22,6 +22,7 @@ struct CostInstrumentView: View {
     @Environment(\.agyTheme) private var theme
     @Environment(\.telemetryStaticRender) private var isStaticRender
     @Environment(\.telemetryReduceMotion) private var reduceMotion
+    @Environment(\.craftHapticsEnabled) private var hapticsEnabled
     @Namespace private var scopeNamespace
     @State private var hoveredScope: UsagePeriodScope? = nil
 
@@ -201,6 +202,7 @@ struct CostInstrumentView: View {
                 }
                 .onTapGesture {
                     guard binding.wrappedValue != item.scope else { return }
+                    CraftEngine.shared.perform(.costStrataShift, enabled: hapticsEnabled)
                     withAnimation(scopeAnimation) {
                         binding.wrappedValue = item.scope
                     }
@@ -306,6 +308,7 @@ struct TopographicRidgeChart: View {
     @Environment(\.agyTheme) private var theme
     @Environment(\.telemetryStaticRender) private var isStaticRender
     @Environment(\.telemetryPanelVisible) private var isPanelVisible
+    @Environment(\.craftHapticsEnabled) private var hapticsEnabled
     @State private var inspection = ChartInspectionState<String, Int>(scope: "")
 
     private var inspectionScope: String { "\(year)-\(month)" }
@@ -440,6 +443,12 @@ struct TopographicRidgeChart: View {
                                 inspection.syncScope(inspectionScope)
                                 if inspection.target != nextDay {
                                     inspection.setTarget(nextDay)
+                                    let activeRidge = focusedRidge ?? ridge
+                                    let isPeak = activeRidge.peakValue > 0 && activeRidge.peakIndex == (nextDay - 1)
+                                    CraftEngine.shared.perform(
+                                        isPeak ? .costRidgePeak : .costRidgeDay,
+                                        enabled: hapticsEnabled
+                                    )
                                 }
                             case .ended:
                                 if inspection.target != nil {
@@ -1118,6 +1127,7 @@ struct BoreholeModelSection: View {
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
     @Environment(\.telemetryStaticRender) private var isStaticRender
+    @Environment(\.craftHapticsEnabled) private var hapticsEnabled
     @State private var focusState = ModelFocusState()
 
     private var visibleModels: [ModelUsage] {
@@ -1384,6 +1394,9 @@ struct BoreholeModelSection: View {
                 let nextFocus = focusState.effectiveFocusedId
                 if focusedModelId != nextFocus {
                     focusedModelId = nextFocus
+                    if nextFocus != nil {
+                        CraftEngine.shared.perform(.costStrataShift, enabled: hapticsEnabled)
+                    }
                 }
             case .ended:
                 if focusState.columnHoveredId != nil {
@@ -1680,6 +1693,9 @@ struct BoreholeModelSection: View {
             let nextFocus = focusState.effectiveFocusedId
             if focusedModelId != nextFocus {
                 focusedModelId = nextFocus
+                if nextFocus != nil {
+                    CraftEngine.shared.perform(.costStrataShift, enabled: hapticsEnabled)
+                }
             }
         }
     }

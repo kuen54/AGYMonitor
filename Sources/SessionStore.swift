@@ -25,6 +25,10 @@ final class SessionStore: ObservableObject {
     @Published var anyDoneUnseen: Bool = false
     /// Exact sessionIds that finished a turn unseen (cleared per-row on click).
     @Published var doneUnseen: Set<String> = []
+    /// sessionId → live context window usage & remaining ratio snapshot.
+    @Published var contextSnapshots: [String: SessionContextSnapshot] = [:]
+    /// Aggregated live output throughput across all busy sessions (+ active swarm workers).
+    @Published var liveTPS: LiveTPSSnapshot = .idle
 
     var liveCount: Int { sessions.count }
     var anyBusy: Bool { sessions.contains { $0.status == .busy } }
@@ -47,6 +51,8 @@ final class SessionStore: ObservableObject {
         if self.instructions != scan.instructions { self.instructions = scan.instructions }
         if self.anyDoneUnseen != scan.anyDoneUnseen { self.anyDoneUnseen = scan.anyDoneUnseen }
         if self.doneUnseen != scan.doneUnseenIds { self.doneUnseen = scan.doneUnseenIds }
+        if self.contextSnapshots != scan.contextSnapshots { self.contextSnapshots = scan.contextSnapshots }
+        if self.liveTPS != scan.liveTPS { self.liveTPS = scan.liveTPS }
     }
 
     private let jumper = SessionJumper()

@@ -577,22 +577,36 @@ final class NotchController: NSObject {
     /// When Live Wing is active on the right shoulder, restrict hover-to-open to
     /// the left wing + physical notch so clicking the right action pill never
     /// races with openDwell expanding the whole panel.
+    /// When idle or showing the working Output TPS wing (`activeWing == nil`),
+    /// expand the hover band to include the full compact pill width so hovering
+    /// over the widened TPS sparkline + readout reliably opens the notch.
     private func hoverRect(_ inst: NotchInstance) -> NSRect {
         let base = hoverRect(inst.screen)
-        guard inst.vm.activeWing != nil, !state(for: inst).isOpen else { return base }
-        let wingMinX = min(base.minX, closedWingRect(inst).minX)
-        let rightLimit = inst.screen.screen.frame.midX + inst.screen.closedNotchSize.width / 2 + 8
-        let trimmedWidth = max(40, rightLimit - wingMinX)
-        return NSRect(x: wingMinX, y: base.minY, width: trimmedWidth, height: base.height)
+        guard !state(for: inst).isOpen else { return base }
+        let pillRect = closedWingRect(inst)
+        if inst.vm.activeWing != nil {
+            let wingMinX = min(base.minX, pillRect.minX)
+            let rightLimit = inst.screen.screen.frame.midX + inst.screen.closedNotchSize.width / 2 + 8
+            let trimmedWidth = max(40, rightLimit - wingMinX)
+            return NSRect(x: wingMinX, y: base.minY, width: trimmedWidth, height: base.height)
+        }
+        let screenFrame = inst.screen.screen.frame
+        let minX = max(screenFrame.minX, min(base.minX, pillRect.minX))
+        let maxX = min(screenFrame.maxX, max(base.maxX, pillRect.maxX))
+        return NSRect(x: minX, y: base.minY, width: max(base.width, maxX - minX), height: base.height)
     }
 
     private func closedWingRect(_ inst: NotchInstance) -> NSRect {
         let f = inst.screen.screen.frame
-        let size = inst.vm.geometry.contentSize(isOpen: false)
-        guard size.width > 1, size.height > 1 else { return hoverRect(inst.screen) }
-        let centerX = f.midX + CGFloat(inst.vm.geometry.compactGapOffset)
-        return NSRect(x: centerX - CGFloat(size.width) / 2, y: f.maxY - CGFloat(size.height),
-                      width: CGFloat(size.width), height: CGFloat(size.height))
+        let measured = inst.vm.geometry.contentSize(isOpen: false)
+        guard measured.width > 1, measured.height > 1 else { return hoverRect(inst.screen) }
+        let notchW = max(8, inst.screen.closedNotchSize.width)
+        let pillH = max(24, inst.screen.closedNotchSize.height)
+        let leftW = CGFloat(inst.vm.geometry.leftWingWidth)
+        let rightW = CGFloat(inst.vm.geometry.rightWingWidth)
+        let width = leftW + notchW + rightW
+        let minX = f.midX - notchW / 2 - leftW
+        return NSRect(x: minX, y: f.maxY - pillH, width: width, height: pillH)
     }
 
     private func contentRect(_ inst: NotchInstance) -> NSRect {

@@ -13,6 +13,7 @@ struct TelemetryStepper: View {
     let onIncrement: () -> Void
 
     @Environment(\.agyTheme) private var theme
+    @Environment(\.craftHapticsEnabled) private var hapticsEnabled
     @State private var hoverLeft = false
     @State private var hoverRight = false
 
@@ -26,7 +27,12 @@ struct TelemetryStepper: View {
                 .contentShape(Rectangle())
                 .opacity(canDecrement ? 1 : 0.3)
                 .onHover { hoverLeft = $0 }
-                .onTapGesture { if canDecrement { onDecrement() } }
+                .onTapGesture {
+                    if canDecrement {
+                        CraftEngine.shared.perform(.tabDetent, enabled: hapticsEnabled)
+                        onDecrement()
+                    }
+                }
 
             Text(label)
                 .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
@@ -42,7 +48,12 @@ struct TelemetryStepper: View {
                 .contentShape(Rectangle())
                 .opacity(canIncrement ? 1 : 0.3)
                 .onHover { hoverRight = $0 }
-                .onTapGesture { if canIncrement { onIncrement() } }
+                .onTapGesture {
+                    if canIncrement {
+                        CraftEngine.shared.perform(.tabDetent, enabled: hapticsEnabled)
+                        onIncrement()
+                    }
+                }
         }
     }
 }
@@ -130,6 +141,9 @@ struct PopoverView: View {
     private var loc: Localizer { Localizer(language: store.language) }
     private var isNotch: Bool { store.displayMode == .notch }
     private var allowsPanelHeightAnimation: Bool { isNotch && !isStaticRender }
+    private var instrumentHapticsEnabled: Bool {
+        !isStaticRender && store.visualMode == .instrument && store.craftPreferences.hapticsEnabled
+    }
     private var theme: AGYTheme {
         AGYTheme(preset: store.themePreset, colorScheme: colorScheme, isNotch: isNotch)
     }
@@ -253,6 +267,9 @@ struct PopoverView: View {
             }
         )
         .onChange(of: store.selectedTab) { nextTab in
+            if store.isPanelVisible {
+                CraftEngine.shared.perform(.tabDetent, enabled: instrumentHapticsEnabled)
+            }
             var nextTransition = tabTransition
             nextTransition.transition(to: nextTab, in: Self.canonicalTabOrder)
             let nextKey = PanelHeightKey.make(store: store, tabOverride: nextTab)
@@ -273,8 +290,35 @@ struct PopoverView: View {
                 heightState = nextHeight
             }
         }
-        .onChange(of: store.visualMode) { _ in syncPanelHeightKey() }
-        .onChange(of: store.timeRange) { _ in syncPanelHeightKey() }
+        .onChange(of: store.visualMode) { nextMode in
+            syncPanelHeightKey()
+            if nextMode == .instrument {
+                if store.isPanelVisible {
+                    CraftEngine.shared.perform(
+                        .modeEngage,
+                        enabled: !isStaticRender && store.craftPreferences.hapticsEnabled
+                    )
+                }
+            } else {
+                CraftEngine.shared.cancelPendingHapticCadence()
+            }
+        }
+        .onChange(of: store.craftPreferences.hapticsEnabled) { enabled in
+            if !enabled {
+                CraftEngine.shared.cancelPendingHapticCadence()
+            }
+        }
+        .onChange(of: store.themePreset) { _ in
+            if store.isPanelVisible {
+                CraftEngine.shared.perform(.modeEngage, enabled: instrumentHapticsEnabled)
+            }
+        }
+        .onChange(of: store.timeRange) { _ in
+            syncPanelHeightKey()
+            if store.isPanelVisible && store.selectedTab == .time {
+                CraftEngine.shared.perform(.tabDetent, enabled: instrumentHapticsEnabled)
+            }
+        }
         .onChange(of: store.viewingMonth) { _ in syncPanelHeightKey() }
         .onChange(of: store.viewingYear) { _ in syncPanelHeightKey() }
         .onReceive(
@@ -294,6 +338,7 @@ struct PopoverView: View {
         .environment(\.agyTheme, theme)
         .environment(\.telemetryPanelVisible, store.isPanelVisible)
         .environment(\.telemetryReduceMotion, reduceMotion)
+        .environment(\.craftHapticsEnabled, instrumentHapticsEnabled)
     }
 
     private func syncPanelHeightKey() {
@@ -518,7 +563,7 @@ struct PopoverView: View {
                     .foregroundColor(theme.inkSecondary)
             }
 
-            Text("· ⌘R · ⌘T · ⌘I")
+            Text("· ⌘R · ⌘T · ⌘I · ⌘E")
                 .font(.system(size: 8.5, weight: .medium, design: .monospaced))
                 .foregroundColor(theme.inkMuted)
         }
@@ -538,6 +583,10 @@ struct PopoverView: View {
             Button("") { store.refresh(force: true) }.keyboardShortcut("r", modifiers: .command)
             Button("") { store.cycleThemePreset() }.keyboardShortcut("t", modifiers: .command)
             Button("") { store.toggleVisualMode() }.keyboardShortcut("i", modifiers: .command)
+            Button("") {
+                onClose?()
+                SpecimenWindowController.shared.present(store: store)
+            }.keyboardShortcut("e", modifiers: .command)
             Button("") { onClose?() }.keyboardShortcut(.escape, modifiers: [])
         }
         .frame(width: 0, height: 0)
