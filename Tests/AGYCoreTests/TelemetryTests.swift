@@ -308,4 +308,40 @@ struct TelemetryTests {
         #expect(stripped[0].label == "a")
         #expect(stripped[0].sessions.map(\.sessionId) == ["busy-1"])
     }
+
+    @Test("CurrencyFormatting formats 1..7+ digits without whitespace or NBSP and groups thousands cleanly")
+    func currencyFormattingTabularParts() {
+        let cases: [(Double, String, String, String, String)] = [
+            (0.0,        "$",  "0",         ".00", "$0.00"),
+            (5.5,        "$",  "5",         ".50", "$5.50"),
+            (42.10,      "$",  "42",        ".10", "$42.10"),
+            (276.42,     "$",  "276",       ".42", "$276.42"),
+            (999.99,     "$",  "999",       ".99", "$999.99"),
+            (999.994,    "$",  "999",       ".99", "$999.99"),
+            (999.996,    "$",  "1,000",     ".00", "$1,000.00"),
+            (1000.0,     "$",  "1,000",     ".00", "$1,000.00"),
+            (1577.55,    "$",  "1,577",     ".55", "$1,577.55"),
+            (12345.67,   "$",  "12,345",    ".67", "$12,345.67"),
+            (1234567.89, "$",  "1,234,567", ".89", "$1,234,567.89"),
+            (-0.0,       "$",  "0",         ".00", "$0.00"),
+            (-0.001,     "$",  "0",         ".00", "$0.00"),
+            (-42.10,     "-$", "42",        ".10", "-$42.10"),
+            (-1577.55,   "-$", "1,577",     ".55", "-$1,577.55"),
+            (.nan,       "$",  "0",         ".00", "$0.00"),
+            (.infinity,  "$",  "0",         ".00", "$0.00"),
+            (-.infinity, "$",  "0",         ".00", "$0.00"),
+        ]
+
+        for (value, expectedPrefix, expectedWhole, expectedFraction, expectedFormatted) in cases {
+            let parts = CurrencyFormatting.tabularParts(for: value)
+            #expect(parts.prefix == expectedPrefix)
+            #expect(parts.whole == expectedWhole)
+            #expect(parts.fraction == expectedFraction)
+            #expect(parts.formatted == expectedFormatted)
+            #expect(CurrencyFormatting.formatTabular(value) == expectedFormatted)
+            // Regression guard: ICU en_US_POSIX currency style previously injected U+00A0 NBSP for >= 1000.
+            #expect(parts.whole.rangeOfCharacter(from: .whitespacesAndNewlines) == nil)
+            #expect(parts.formatted.rangeOfCharacter(from: .whitespacesAndNewlines) == nil)
+        }
+    }
 }

@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 
 /// App version, single-sourced from Info.plist (CFBundleShortVersionString).
-let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "2.0.0"
+let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "2.0.1"
 
 /// UI-facing subset of QuotaFetchResult (shared with AGYCore `CoreQuotaError`).
 typealias QuotaError = CoreQuotaError

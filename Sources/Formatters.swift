@@ -11,19 +11,7 @@ func formatCost(_ value: Double) -> String {
 
 /// Tabular two-decimal currency formatting for Hero readouts and aligned model ledgers.
 func formatCostTabular(_ value: Double) -> String {
-    let v = value.isFinite ? value : 0
-    if abs(v) >= 1000 {
-        let f = NumberFormatter()
-        f.numberStyle = .currency
-        f.currencySymbol = "$"
-        f.minimumFractionDigits = 2
-        f.maximumFractionDigits = 2
-        f.locale = Locale(identifier: "en_US_POSIX")
-        if let formatted = f.string(from: NSNumber(value: v)) {
-            return formatted
-        }
-    }
-    return String(format: "$%.2f", v)
+    CurrencyFormatting.formatTabular(value)
 }
 
 /// Explicit-sign rounded integer percentage (e.g. "+18%", "-12%", "0%").

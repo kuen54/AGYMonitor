@@ -278,6 +278,9 @@ struct SessionTabView: View {
 
     // MARK: De-Slabbed Hairline Filter Index Strip
 
+    private static let filterStripContentHeight: CGFloat = 20
+    private static let deckModeSegmentHeight: CGFloat = 17
+
     private var filterStrip: some View {
         let chips: [(kind: SessionStatusFilter, label: String, count: Int, tint: Color?)] = [
             (.all,     loc("filterAll"),     allSessions.count,     nil),
@@ -298,6 +301,7 @@ struct SessionTabView: View {
                             .monospacedDigit()
                             .tracking(0.65)
                             .foregroundColor(theme.inkMuted)
+                            .lineLimit(1)
                     }
                 } else {
                     ForEach(chips, id: \.kind) { item in
@@ -326,6 +330,7 @@ struct SessionTabView: View {
                                         ? theme.inkPrimary
                                         : (isHovered ? theme.inkPrimary.opacity(0.85) : theme.inkSecondary)
                                 )
+                                .lineLimit(1)
 
                             Text("\(item.count)")
                                 .font(.system(size: 8.5, weight: isSelected ? .medium : .regular, design: .monospaced))
@@ -335,9 +340,10 @@ struct SessionTabView: View {
                                         ? (item.kind == .waiting ? theme.signalAmber : theme.accent)
                                         : theme.inkMuted
                                 )
+                                .lineLimit(1)
                         }
                         .padding(.horizontal, 6)
-                        .padding(.vertical, 5)
+                        .frame(height: Self.filterStripContentHeight)
                         .background(
                             ZStack(alignment: .bottom) {
                                 if isSelected {
@@ -381,6 +387,7 @@ struct SessionTabView: View {
             deckModeToggle
                 .fixedSize()
         }
+        .frame(height: Self.filterStripContentHeight)
         .padding(.horizontal, 14)
         .padding(.vertical, 5)
     }
@@ -411,9 +418,10 @@ struct SessionTabView: View {
                                 ? theme.accent
                                 : (isHovered ? theme.inkPrimary : theme.inkSecondary)
                         )
+                        .lineLimit(1)
                 }
                 .padding(.horizontal, 6.5)
-                .padding(.vertical, 4)
+                .frame(height: Self.deckModeSegmentHeight)
                 .background(
                     isSelected
                         ? theme.accent.opacity(theme.isDark ? 0.18 : 0.11)
