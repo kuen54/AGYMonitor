@@ -68,10 +68,13 @@ public enum AppPresentationEvent: Equatable, Sendable {
 public enum AppPresentationEffect: Equatable, Sendable {
     case startNotchController
     case stopNotchController
+    /// Toggles `NSStatusItem` & `MenuBarAnchorState` visibility only; never closes the
+    /// floating menu-bar panel (`.closePopover` is the sole authority for panel dismissal).
     case setStatusItemVisible(Bool)
     case setMenuBarLogoActive(Bool)
-    case setPopoverAnimates(Bool)
+    /// Opens the floating menu-bar panel (animation is owned by `MenuBarPanelMachine`).
     case openPopover
+    /// Dismisses the floating menu-bar panel cleanly without duplicating visibility toggles.
     case closePopover
     case showStatusContextMenu
     case revealNotch
@@ -106,12 +109,12 @@ public enum AppPresentationMachine {
                 effects.append(.setStatusItemVisible(true))
 
             case .notch:
-                effects.append(.setMenuBarLogoActive(false))
-                effects.append(.setStatusItemVisible(false))
                 if state.popoverOpen {
                     state.popoverOpen = false
                     effects.append(.closePopover)
                 }
+                effects.append(.setMenuBarLogoActive(false))
+                effects.append(.setStatusItemVisible(false))
                 if !state.isNotchControllerRunning {
                     state.isNotchControllerRunning = true
                     effects.append(.startNotchController)
@@ -125,22 +128,20 @@ public enum AppPresentationMachine {
 
         case .popoverShown:
             state.popoverOpen = true
-            var effects: [AppPresentationEffect] = [.setPopoverAnimates(false)]
             if state.isPanelVisible != prevVisible {
-                effects.append(.syncPanelVisibility(state.isPanelVisible))
+                return [.syncPanelVisibility(state.isPanelVisible)]
             }
-            return effects
+            return []
 
         case .popoverClosed:
             state.popoverOpen = false
-            var effects: [AppPresentationEffect] = []
             // Crucially, if we already switched to `.notch` and the notch is open,
             // `state.isPanelVisible` remains `true` so a delayed popover close never
             // stomps the notch's active session-monitor / animation visibility.
             if state.isPanelVisible != prevVisible {
-                effects.append(.syncPanelVisibility(state.isPanelVisible))
+                return [.syncPanelVisibility(state.isPanelVisible)]
             }
-            return effects
+            return []
 
         case .notchOpenChanged(let open):
             // Ignore late teardown notifications if notch controller is no longer active.
@@ -176,7 +177,6 @@ public enum AppPresentationMachine {
                     .setMenuBarLogoActive(true),
                 ]
                 if !state.popoverOpen {
-                    effects.append(.setPopoverAnimates(true))
                     effects.append(.openPopover)
                 }
                 return effects
@@ -187,18 +187,12 @@ public enum AppPresentationMachine {
             case .notch:
                 return [.toggleNotch]
             case .menubar:
-                if state.popoverOpen {
-                    return [.closePopover]
-                }
-                return [.setPopoverAnimates(true), .openPopover]
+                return state.popoverOpen ? [.closePopover] : [.openPopover]
             }
 
         case .statusItemLeftClicked:
             guard state.surface == .menubar else { return [] }
-            if state.popoverOpen {
-                return [.closePopover]
-            }
-            return [.setPopoverAnimates(true), .openPopover]
+            return state.popoverOpen ? [.closePopover] : [.openPopover]
 
         case .statusItemRightClicked:
             guard state.surface == .menubar else { return [] }

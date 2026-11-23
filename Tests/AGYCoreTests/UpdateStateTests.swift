@@ -381,4 +381,91 @@ struct UpdateStateTests {
         let allowed = UpdateCheckerMachine.reduce(&state, event: .manualCheckRequested(now: t0.addingTimeInterval(3.5)))
         #expect(allowed.contains(.performFetch(generation: 2, trigger: .manual)))
     }
+
+    @Test("isManualChecking is true ONLY during manual checks so silent background checks never disable context menu")
+    func isManualCheckingDistinguishesAutomaticVsManual() {
+        let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+        var state = UpdateCheckerState(currentVersion: SemanticVersion(major: 1, minor: 5, patch: 2))
+        #expect(!state.isChecking)
+        #expect(!state.isManualChecking)
+
+        // Start & trigger automatic background check
+        _ = UpdateCheckerMachine.reduce(&state, event: .start(now: t0))
+        _ = UpdateCheckerMachine.reduce(&state, event: .periodicTick(now: t0))
+        #expect(state.isChecking)
+        #expect(!state.isManualChecking) // MUST stay false for automatic background check!
+
+        // Complete automatic check
+        _ = UpdateCheckerMachine.reduce(
+            &state,
+            event: .checkCompleted(generation: 1, result: .noReleaseFound, now: t0)
+        )
+        #expect(!state.isChecking)
+        #expect(!state.isManualChecking)
+
+        // Manual check flips BOTH isChecking and isManualChecking true
+        _ = UpdateCheckerMachine.reduce(&state, event: .manualCheckRequested(now: t0))
+        #expect(state.isChecking)
+        #expect(state.isManualChecking)
+
+        // Stop cancels manual check and resets isManualChecking
+        _ = UpdateCheckerMachine.reduce(&state, event: .stop)
+        #expect(!state.isChecking)
+        #expect(!state.isManualChecking)
+    }
+
+    @Test("isAllowedReleaseURL and SemanticVersion reject traversal, encoded segments, userinfo/port, and malicious build metadata")
+    func releaseURLAndBuildMetadataHardening() {
+        // Valid release & asset URLs
+        #expect(UpdateReleaseParser.isAllowedReleaseURL("https://github.com/kuen54/AGYMonitor/releases/tag/v2.0.0"))
+        #expect(UpdateReleaseParser.isAllowedReleaseURL("https://github.com/kuen54/AGYMonitor/releases/download/v2.0.0/AGYMonitor.dmg"))
+        #expect(UpdateReleaseParser.isAllowedReleaseURL("https://github.com/kuen54/AGYMonitor/releases/latest"))
+
+        // Reject bare /releases without trailing subpath, userinfo, and explicit port
+        #expect(!UpdateReleaseParser.isAllowedReleaseURL("https://github.com/kuen54/AGYMonitor/releases"))
+        #expect(!UpdateReleaseParser.isAllowedReleaseURL("https://github.com/kuen54/AGYMonitor/releases/"))
+        #expect(!UpdateReleaseParser.isAllowedReleaseURL("https://user@github.com/kuen54/AGYMonitor/releases/tag/v2.0.0"))
+        #expect(!UpdateReleaseParser.isAllowedReleaseURL("https://user:pass@github.com/kuen54/AGYMonitor/releases/tag/v2.0.0"))
+        #expect(!UpdateReleaseParser.isAllowedReleaseURL("https://github.com:443/kuen54/AGYMonitor/releases/tag/v2.0.0"))
+        #expect(!UpdateReleaseParser.isAllowedReleaseURL("https://github.com:8443/kuen54/AGYMonitor/releases/tag/v2.0.0"))
+
+        // Reject dot segments, percent-encoded dot/slash/backslash, and backslashes
+        #expect(!UpdateReleaseParser.isAllowedReleaseURL("https://github.com/kuen54/AGYMonitor/releases/tag/../../evil/repo"))
+        #expect(!UpdateReleaseParser.isAllowedReleaseURL("https://github.com/kuen54/AGYMonitor/releases/./tag/v2.0.0"))
+        #expect(!UpdateReleaseParser.isAllowedReleaseURL("https://github.com/kuen54/AGYMonitor/releases/%2e%2e/evil"))
+        #expect(!UpdateReleaseParser.isAllowedReleaseURL("https://github.com/kuen54/AGYMonitor/releases/%2E%2E/evil"))
+        #expect(!UpdateReleaseParser.isAllowedReleaseURL("https://github.com/kuen54/AGYMonitor/releases/tag/v2.0.0%2f..%2fevil"))
+        #expect(!UpdateReleaseParser.isAllowedReleaseURL("https://github.com/kuen54/AGYMonitor/releases/tag/v2.0.0%2F.."))
+        #expect(!UpdateReleaseParser.isAllowedReleaseURL("https://github.com/kuen54/AGYMonitor/releases/tag/v2.0.0%5cevil"))
+        #expect(!UpdateReleaseParser.isAllowedReleaseURL("https://github.com/kuen54/AGYMonitor/releases/tag/v2.0.0%5Cevil"))
+        #expect(!UpdateReleaseParser.isAllowedReleaseURL("https://github.com/kuen54/AGYMonitor/releases/tag/v2.0.0\\evil"))
+
+        // Valid SemVer + build metadata
+        #expect(SemanticVersion.parse("v2.0.0+20261123") == SemanticVersion(major: 2, minor: 0, patch: 0))
+        #expect(SemanticVersion.parse("2.0.0+exp.sha.5114f85-rc1") == SemanticVersion(major: 2, minor: 0, patch: 0))
+        #expect(UpdateReleaseParser.releasePageURLString(forTag: "v2.0.0+20261123") == "https://github.com/kuen54/AGYMonitor/releases/tag/v2.0.0+20261123")
+
+        // Reject empty or malicious + build metadata tags
+        #expect(SemanticVersion.parse("2.0.0+") == nil)
+        #expect(SemanticVersion.parse("v2.0.0+../../evil/repo") == nil)
+        #expect(SemanticVersion.parse("v2.0.0+foo/bar") == nil)
+        #expect(SemanticVersion.parse("v2.0.0+a..b") == nil)
+        #expect(SemanticVersion.parse("v2.0.0+.leading") == nil)
+        #expect(SemanticVersion.parse("v2.0.0+trailing.") == nil)
+        #expect(SemanticVersion.parse("v2.0.0+has space") == nil)
+        #expect(SemanticVersion.parse("v2.0.0+a?b=c") == nil)
+        #expect(SemanticVersion.parse("v2.0.0+a#frag") == nil)
+        #expect(UpdateReleaseParser.releasePageURLString(forTag: "v2.0.0+../../evil") == nil)
+
+        // Malicious tag_name in GitHub JSON or cachedLatestTag is rejected cleanly
+        let maliciousJSON = #"{"tag_name":"v2.0.0+../../../attacker/repo","draft":false,"prerelease":false}"#.data(using: .utf8)!
+        #expect(UpdateReleaseParser.parseGitHubReleaseJSON(maliciousJSON) == nil)
+
+        let cachedMalicious = UpdateCheckerState(
+            currentVersion: SemanticVersion(major: 1, minor: 9, patch: 0),
+            cachedLatestTag: "v2.0.0+../../../attacker/repo"
+        )
+        #expect(cachedMalicious.availableUpdate == nil)
+        #expect(cachedMalicious.phase == .idle)
+    }
 }

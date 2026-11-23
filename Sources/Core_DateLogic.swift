@@ -119,6 +119,65 @@ public enum AppDate {
         return t.isEmpty || t.hasPrefix("0001-") || t.hasPrefix("0000-")
     }
 
+    /// Pure Gregorian month-length lookup (28–31) without Calendar allocation.
+    private static func gregorianDaysInMonth(year: Int, month: Int) -> Int {
+        switch month {
+        case 1, 3, 5, 7, 8, 10, 12: return 31
+        case 4, 6, 9, 11:           return 30
+        case 2:
+            let isLeap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+            return isLeap ? 29 : 28
+        default:
+            return 0
+        }
+    }
+
+    /// Strict validator for `"YYYY-MM"` month keys:
+    /// exactly 7 ASCII bytes, year in `1970...9998`, month in `1...12`.
+    public static func isValidMonthKey(_ key: String) -> Bool {
+        let bytes = Array(key.utf8)
+        guard bytes.count == 7, bytes[4] == 45 else { return false } // '-'
+        func digit(_ idx: Int) -> Int? {
+            let b = bytes[idx]
+            guard b >= 48 && b <= 57 else { return nil }
+            return Int(b - 48)
+        }
+        guard let y0 = digit(0), let y1 = digit(1), let y2 = digit(2), let y3 = digit(3),
+              let m0 = digit(5), let m1 = digit(6) else {
+            return false
+        }
+        let year = y0 * 1000 + y1 * 100 + y2 * 10 + y3
+        let month = m0 * 10 + m1
+        return (1970...9998).contains(year) && (1...12).contains(month)
+    }
+
+    /// Strict validator for `"YYYY-MM-DD"` day keys:
+    /// exactly 10 ASCII bytes, year in `1970...9998`, month in `1...12`,
+    /// valid Gregorian calendar day for that `(year, month)`, and not a sentinel.
+    public static func isValidDayKey(_ key: String) -> Bool {
+        guard !isSentinelDayKey(key) else { return false }
+        let bytes = Array(key.utf8)
+        guard bytes.count == 10, bytes[4] == 45, bytes[7] == 45 else { return false } // '-'
+        func digit(_ idx: Int) -> Int? {
+            let b = bytes[idx]
+            guard b >= 48 && b <= 57 else { return nil }
+            return Int(b - 48)
+        }
+        guard let y0 = digit(0), let y1 = digit(1), let y2 = digit(2), let y3 = digit(3),
+              let m0 = digit(5), let m1 = digit(6),
+              let d0 = digit(8), let d1 = digit(9) else {
+            return false
+        }
+        let year = y0 * 1000 + y1 * 100 + y2 * 10 + y3
+        let month = m0 * 10 + m1
+        let day = d0 * 10 + d1
+        guard (1970...9998).contains(year), (1...12).contains(month) else {
+            return false
+        }
+        let maxDay = gregorianDaysInMonth(year: year, month: month)
+        return day >= 1 && day <= maxDay
+    }
+
     /// Thread-safe RFC3339 / ISO-8601 parser supporting:
     /// - UTC `"Z"` and numeric offsets (`"+08:00"`, `"-05:30"`, `"+0800"`)
     /// - 0 to 9+ fractional digits (Go `time.RFC3339Nano` emits up to 9 digits,

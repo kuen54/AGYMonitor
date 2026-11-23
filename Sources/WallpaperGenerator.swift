@@ -1,6 +1,9 @@
 import AppKit
 import CoreGraphics
+import CoreText
 import Foundation
+import ImageIO
+import UniformTypeIdentifiers
 
 // MARK: - Daily Blueprint Wallpaper Generator
 
@@ -18,74 +21,140 @@ enum WallpaperGenerator {
         return URL(fileURLWithPath: dirPath, isDirectory: true)
     }
 
-    static func isManagedWallpaperURL(_ url: URL, home: String = NSHomeDirectory()) -> Bool {
-        let managedDir = wallpaperDirectoryURL(home: home).standardizedFileURL.path
-        let candidate = url.standardizedFileURL.path
-        let filename = url.lastPathComponent
-        return candidate.hasPrefix(managedDir) && filename.hasPrefix("agy-blueprint-")
+    static func fileExists(atPath path: String) -> Bool {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        return FileManager.default.fileExists(atPath: trimmed)
     }
 
-    /// Captures the user's current non-AGYMonitor wallpaper path once before first overwrite.
+    static func isManagedWallpaperURL(_ url: URL, home: String = NSHomeDirectory()) -> Bool {
+        let directoryURL = wallpaperDirectoryURL(home: home)
+        return BlueprintWallpaperPath.isManagedPath(
+            url.standardizedFileURL.path,
+            directoryPath: directoryURL.standardizedFileURL.path
+        )
+    }
+
+    /// Captures the user's current non-AGYMonitor wallpaper path once before overwrite.
+    /// Validates any existing saved path still exists and is not a managed AGY wallpaper;
+    /// if missing or managed, captures the active screen's current desktop image path.
     static func capturePreviousWallpaperPathIfNeeded(
-        existing: String?,
+        existingSavedPath: String?,
         home: String = NSHomeDirectory()
     ) -> String? {
-        if let existing = existing, !existing.isEmpty {
-            return existing
+        let dirPath = wallpaperDirectoryURL(home: home).standardizedFileURL.path
+        if let saved = existingSavedPath?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !saved.isEmpty,
+           !BlueprintWallpaperPath.isManagedPath(saved, directoryPath: dirPath),
+           fileExists(atPath: saved) {
+            return saved
         }
         guard let screen = NSScreen.main ?? NSScreen.screens.first,
               let currentURL = NSWorkspace.shared.desktopImageURL(for: screen),
-              !isManagedWallpaperURL(currentURL, home: home) else {
+              !isManagedWallpaperURL(currentURL, home: home),
+              fileExists(atPath: currentURL.path) else {
             return nil
         }
         return currentURL.path
     }
 
     /// Computes capped Retina pixel dimensions matching the main display's real aspect ratio.
-    static func targetPixelSize() -> (width: Int, height: Int) {
-        let screen = NSScreen.main ?? NSScreen.screens.first
-        let frame = screen?.frame.size ?? CGSize(width: 1512, height: 982)
-        let scale = max(1.0, screen?.backingScaleFactor ?? 2.0)
+    /// Pure CoreGraphics (no `NSScreen` access) so it is safe to call off the main thread.
+    static func targetPixelSize(maxPixelWidth: Int = 3456) -> (width: Int, height: Int) {
+        let displayID = CGMainDisplayID()
+        let rawW: CGFloat
+        let rawH: CGFloat
+        if let mode = CGDisplayCopyDisplayMode(displayID),
+           mode.pixelWidth > 0, mode.pixelHeight > 0 {
+            rawW = CGFloat(mode.pixelWidth)
+            rawH = CGFloat(mode.pixelHeight)
+        } else {
+            let pw = CGDisplayPixelsWide(displayID)
+            let ph = CGDisplayPixelsHigh(displayID)
+            if pw > 0, ph > 0 {
+                rawW = CGFloat(pw)
+                rawH = CGFloat(ph)
+            } else {
+                rawW = 3024
+                rawH = 1964
+            }
+        }
 
-        var w = max(1280, frame.width * scale)
-        var h = max(720, frame.height * scale)
+        var w = max(1280, rawW.isFinite ? rawW : 3024)
+        var h = max(720, rawH.isFinite ? rawH : 1964)
 
+        let longCap = CGFloat(max(1280, min(maxPixelWidth, Int(maxLongEdge))))
+        let shortCap = min(maxShortEdge, longCap)
         let scaleFactor = min(
             1.0,
-            min(maxLongEdge / max(w, h), maxShortEdge / min(w, h))
+            min(longCap / max(w, h), shortCap / min(w, h))
         )
         w = (w * scaleFactor).rounded()
         h = (h * scaleFactor).rounded()
 
-        // Ensure even dimensions for crisp pixel alignment.
-        let iw = max(1280, Int(w) & ~1)
-        let ih = max(720, Int(h) & ~1)
+        // Ensure even dimensions for crisp pixel alignment (guarded against non-finite values).
+        let clampedW = w.isFinite ? min(max(1280, w), maxLongEdge) : 1280
+        let clampedH = h.isFinite ? min(max(720, h), maxShortEdge) : 720
+        let iw = max(1280, Int(clampedW) & ~1)
+        let ih = max(720, Int(clampedH) & ~1)
         return (iw, ih)
     }
 
-    /// Renders, saves, prunes, and applies the blueprint wallpaper. Returns the written file URL.
-    @discardableResult
-    static func generateAndApply(
-        yearDays: [String: Int],
+    /// Pure off-main-thread-safe CoreGraphics render + atomic PNG write + pruning (5 files).
+    /// Accepts `[String: Double]` day-seconds values and returns the written PNG file URL.
+    static func renderBlueprintPNG(
+        days: [String: Double],
         year: Int,
         style: BlueprintWallpaperStyle,
-        date: Date = Date(),
+        dateKey: String,
+        maxPixelWidth: Int = 3456,
         home: String = NSHomeDirectory()
     ) -> URL? {
-        let (width, height) = targetPixelSize()
-        let todayKey = AppDate.dayKey(date)
-        let currentYear = AppDate.gregorian.component(.year, from: date)
-        let cutoffKey: String? = (year == currentYear) ? todayKey : nil
-        let dayOfYear = AppDate.gregorian.ordinality(of: .day, in: .year, for: date) ?? 1
+        var intDays: [String: Int] = [:]
+        intDays.reserveCapacity(days.count)
+        let maxDaySeconds = 86_400.0 * 366.0
+        for (k, v) in days {
+            guard v.isFinite else { continue }
+            let clamped = min(max(0.0, v), maxDaySeconds).rounded()
+            intDays[k] = Int(clamped)
+        }
+        return renderBlueprintPNG(
+            days: intDays,
+            year: year,
+            style: style,
+            dateKey: dateKey,
+            maxPixelWidth: maxPixelWidth,
+            home: home
+        )
+    }
 
+    /// Pure off-main-thread-safe CoreGraphics render + atomic PNG write + pruning (5 files).
+    /// Accepts `[String: Int]` day-seconds values and returns the written PNG file URL.
+    static func renderBlueprintPNG(
+        days: [String: Int],
+        year: Int,
+        style: BlueprintWallpaperStyle,
+        dateKey: String,
+        maxPixelWidth: Int = 3456,
+        home: String = NSHomeDirectory()
+    ) -> URL? {
+        let (width, height) = targetPixelSize(maxPixelWidth: maxPixelWidth)
         let yearPrefix = String(format: "%04d-", year)
-        let totalSeconds = yearDays.reduce(0) { acc, pair in
+        let trimmedKey = dateKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let effectiveDateKey = trimmedKey.isEmpty ? AppDate.dayKey(Date()) : trimmedKey
+        let cutoffKey: String? = effectiveDateKey.hasPrefix(yearPrefix) ? effectiveDateKey : nil
+        let dayOrdinal = dayOfYear(for: effectiveDateKey)
+
+        let totalSeconds = days.reduce(0) { acc, pair in
             pair.key.hasPrefix(yearPrefix) ? acc + max(0, pair.value) : acc
         }
-        let totalHours = Int((Double(totalSeconds) / 3600.0).rounded())
+        let totalHoursRaw = (Double(totalSeconds) / 3600.0).rounded()
+        let totalHours = totalHoursRaw.isFinite
+            ? Int(min(max(0.0, totalHoursRaw), Double(Int.max / 2)))
+            : 0
 
         let field = InstrumentMath.buildYearContourField(
-            days: yearDays,
+            days: days,
             year: year,
             levelCount: 12,
             cutoffDayKey: cutoffKey
@@ -96,10 +165,14 @@ enum WallpaperGenerator {
             height: height,
             field: field,
             year: year,
-            dayOfYear: dayOfYear,
+            dayOfYear: dayOrdinal,
             totalHours: totalHours,
             style: style
         ) else {
+            return nil
+        }
+
+        guard let pngData = encodePNGData(from: cgImage) else {
             return nil
         }
 
@@ -107,35 +180,29 @@ enum WallpaperGenerator {
         let fm = FileManager.default
         try? fm.createDirectory(at: dirURL, withIntermediateDirectories: true, attributes: nil)
 
-        // Avoid macOS skipping desktop reload when overwriting the exact same path on the same day.
-        let baseName = "agy-blueprint-\(todayKey)-\(style.rawValue)"
-        var fileURL = dirURL.appendingPathComponent("\(baseName).png")
-        let activeScreenURLs: Set<String> = Set(
-            NSScreen.screens.compactMap { NSWorkspace.shared.desktopImageURL(for: $0)?.standardizedFileURL.path }
-        )
-        if activeScreenURLs.contains(fileURL.standardizedFileURL.path) {
-            let comps = AppDate.gregorian.dateComponents([.hour, .minute, .second], from: date)
-            let stamp = String(format: "%02d%02d%02d", comps.hour ?? 0, comps.minute ?? 0, comps.second ?? 0)
-            fileURL = dirURL.appendingPathComponent("\(baseName)-\(stamp).png")
-        }
+        // Unique millisecond + UUID suffix guarantees same-second repeat applies never collide
+        // on disk or hit macOS's identical-URL desktop-reload skip.
+        let nowMsRaw = (Date().timeIntervalSince1970 * 1000.0).rounded()
+        let ms: Int64 = nowMsRaw.isFinite
+            ? Int64(min(max(0.0, nowMsRaw), Double(Int64.max / 2)))
+            : 0
+        let token = UUID().uuidString.prefix(8).lowercased()
+        let fileName = "agy-blueprint-\(effectiveDateKey)-\(style.rawValue)-\(ms)-\(token).png"
+        let fileURL = dirURL.appendingPathComponent(fileName)
 
-        let rep = NSBitmapImageRep(cgImage: cgImage)
-        guard let pngData = rep.representation(using: .png, properties: [:]) else {
-            return nil
-        }
         do {
             try pngData.write(to: fileURL, options: .atomic)
         } catch {
             return nil
         }
 
-        let applied = applyDesktopImage(url: fileURL)
         pruneOldWallpapers(in: dirURL, keepingURL: fileURL)
-        return applied ? fileURL : nil
+        return fileURL
     }
 
+    /// Main-thread desktop wallpaper application across all connected `NSScreen` instances.
     @discardableResult
-    static func applyDesktopImage(url: URL) -> Bool {
+    static func applyDesktopImage(at url: URL) -> Bool {
         let screens = NSScreen.screens
         guard !screens.isEmpty else { return false }
         let options: [NSWorkspace.DesktopImageOptionKey: Any] = [
@@ -154,6 +221,69 @@ enum WallpaperGenerator {
         return anySucceeded
     }
 
+    /// Compatibility overload forwarding to `applyDesktopImage(at:)`.
+    @discardableResult
+    static func applyDesktopImage(url: URL) -> Bool {
+        applyDesktopImage(at: url)
+    }
+
+    /// Renders, saves, prunes, and applies the blueprint wallpaper. Returns the written file URL.
+    @discardableResult
+    static func generateAndApply(
+        yearDays: [String: Int],
+        year: Int,
+        style: BlueprintWallpaperStyle,
+        date: Date = Date(),
+        home: String = NSHomeDirectory()
+    ) -> URL? {
+        let todayKey = AppDate.dayKey(date)
+        guard let fileURL = renderBlueprintPNG(
+            days: yearDays,
+            year: year,
+            style: style,
+            dateKey: todayKey,
+            home: home
+        ) else {
+            return nil
+        }
+        return applyDesktopImage(at: fileURL) ? fileURL : nil
+    }
+
+    private static func dayOfYear(for dateKey: String) -> Int {
+        let parts = dateKey.split(separator: "-")
+        if parts.count == 3,
+           let y = Int(parts[0]),
+           let m = Int(parts[1]),
+           let d = Int(parts[2]) {
+            var comps = DateComponents()
+            comps.year = y
+            comps.month = m
+            comps.day = d
+            if let parsed = AppDate.gregorian.date(from: comps),
+               let ord = AppDate.gregorian.ordinality(of: .day, in: .year, for: parsed) {
+                return ord
+            }
+        }
+        return AppDate.gregorian.ordinality(of: .day, in: .year, for: Date()) ?? 1
+    }
+
+    private static func encodePNGData(from cgImage: CGImage) -> Data? {
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(
+            data as CFMutableData,
+            UTType.png.identifier as CFString,
+            1,
+            nil
+        ) else {
+            return nil
+        }
+        CGImageDestinationAddImage(destination, cgImage, nil)
+        guard CGImageDestinationFinalize(destination) else {
+            return nil
+        }
+        return data as Data
+    }
+
     private static func pruneOldWallpapers(in dirURL: URL, keepingURL: URL) {
         let fm = FileManager.default
         guard let items = try? fm.contentsOfDirectory(
@@ -162,8 +292,10 @@ enum WallpaperGenerator {
             options: [.skipsHiddenFiles]
         ) else { return }
 
+        let dirPath = dirURL.standardizedFileURL.path
         let managed = items.filter {
-            $0.lastPathComponent.hasPrefix("agy-blueprint-") && $0.pathExtension.lowercased() == "png"
+            BlueprintWallpaperPath.isManagedPath($0.standardizedFileURL.path, directoryPath: dirPath)
+                && $0.pathExtension.lowercased() == "png"
         }
         guard managed.count > maxRetainedFiles else { return }
 
@@ -188,7 +320,7 @@ enum WallpaperGenerator {
         }
     }
 
-    // MARK: - CoreGraphics Swiss Architectural Renderer
+    // MARK: - CoreGraphics Swiss Architectural Renderer (100% Thread-Safe)
 
     private struct Palette {
         let bg: CGColor
@@ -202,8 +334,8 @@ enum WallpaperGenerator {
         let stipple: CGColor
         let futureHatch: CGColor
         let datumLine: CGColor
-        let stampPrimary: NSColor
-        let stampMuted: NSColor
+        let stampPrimary: CGColor
+        let stampMuted: CGColor
         let isDark: Bool
     }
 
@@ -227,8 +359,8 @@ enum WallpaperGenerator {
                 stipple: rgba(0x53 / 255.0, 0x81 / 255.0, 0xFF / 255.0, 0.22),
                 futureHatch: rgba(1.0, 1.0, 1.0, 0.055),
                 datumLine: rgba(0x8A / 255.0, 0xA4 / 255.0, 0xD6 / 255.0, 0.34),
-                stampPrimary: NSColor(srgbRed: 0.92, green: 0.94, blue: 0.98, alpha: 0.56),
-                stampMuted: NSColor(srgbRed: 0.58, green: 0.63, blue: 0.74, alpha: 0.42),
+                stampPrimary: rgba(0.92, 0.94, 0.98, 0.56),
+                stampMuted: rgba(0.58, 0.63, 0.74, 0.42),
                 isDark: true
             )
 
@@ -245,11 +377,45 @@ enum WallpaperGenerator {
                 stipple: rgba(0x24 / 255.0, 0x46 / 255.0, 0xFF / 255.0, 0.16),
                 futureHatch: rgba(0.08, 0.09, 0.12, 0.055),
                 datumLine: rgba(0x4B / 255.0, 0x5E / 255.0, 0x88 / 255.0, 0.36),
-                stampPrimary: NSColor(srgbRed: 0.09, green: 0.10, blue: 0.13, alpha: 0.56),
-                stampMuted: NSColor(srgbRed: 0.34, green: 0.37, blue: 0.44, alpha: 0.45),
+                stampPrimary: rgba(0.09, 0.10, 0.13, 0.56),
+                stampMuted: rgba(0.34, 0.37, 0.44, 0.45),
                 isDark: false
             )
         }
+    }
+
+    private static func agyLogoCGPath(in rect: CGRect) -> CGPath {
+        let box = AGYLogo.normalizedBox
+        guard box.width > 0, box.height > 0, rect.width > 0, rect.height > 0 else {
+            return CGMutablePath()
+        }
+        let scale = min(rect.width / box.width, rect.height / box.height)
+        let ox = rect.minX + (rect.width - box.width * scale) / 2.0
+        let oy = rect.minY + (rect.height - box.height * scale) / 2.0
+        func pt(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
+            CGPoint(
+                x: ox + (x - box.minX) * scale,
+                y: oy + (box.maxY - y) * scale
+            )
+        }
+        let path = CGMutablePath()
+        for cmd in AGYLogo.commands {
+            switch cmd {
+            case let .move(x, y):
+                path.move(to: pt(x, y))
+            case let .line(x, y):
+                path.addLine(to: pt(x, y))
+            case let .curve(x, y, c1x, c1y, c2x, c2y):
+                path.addCurve(
+                    to: pt(x, y),
+                    control1: pt(c1x, c1y),
+                    control2: pt(c2x, c2y)
+                )
+            case .close:
+                path.closeSubpath()
+            }
+        }
+        return path
     }
 
     private static func renderWallpaperCGImage(
@@ -300,7 +466,7 @@ enum WallpaperGenerator {
         }
 
         // 2. Subtle architectural drafting grid (minor + major lines + `+` reticles)
-        let majorStep = (128.0 * scale).rounded()
+        let majorStep = max(16.0, (128.0 * scale).rounded())
         let minorStep = majorStep * 0.25
         let originX = (w.truncatingRemainder(dividingBy: majorStep)) * 0.5
         let originY = (h.truncatingRemainder(dividingBy: majorStep)) * 0.5
@@ -544,7 +710,7 @@ enum WallpaperGenerator {
             ctx.clip(to: futureRect)
             ctx.setStrokeColor(pal.futureHatch)
             ctx.setLineWidth(max(1.0, 1.0 * scale))
-            let step = 16.0 * scale
+            let step = max(4.0, 16.0 * scale)
             var hx = futureRect.minX - futureRect.height
             while hx < futureRect.maxX {
                 ctx.move(to: CGPoint(x: hx, y: futureRect.minY))
@@ -564,52 +730,58 @@ enum WallpaperGenerator {
             ctx.restoreGState()
         }
 
-        // 6. Quiet bottom-right archival stamp + AGY vector mark
+        // 6. Quiet bottom-right archival stamp + AGY vector mark (pure CoreText + CoreGraphics)
         let stampText = String(format: "AGY // %04d TOPOGRAPHY · DAY %03d · %d HRS", year, dayOfYear, totalHours)
-        let nsCtx = NSGraphicsContext(cgContext: ctx, flipped: false)
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = nsCtx
-
         let fontSize = max(12.0, 14.5 * scale)
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedSystemFont(ofSize: fontSize, weight: .medium),
-            .foregroundColor: pal.stampPrimary,
-            .kern: 1.6 * scale,
+        let ctFont = CTFontCreateUIFontForLanguage(.userFixedPitch, fontSize, nil)
+            ?? CTFontCreateWithName("Menlo-Regular" as CFString, fontSize, nil)
+        let ctAttrs: [CFString: Any] = [
+            kCTFontAttributeName: ctFont,
+            kCTForegroundColorAttributeName: pal.stampPrimary,
+            kCTKernAttributeName: NSNumber(value: Double(1.6 * scale)),
         ]
-        let attrStr = NSAttributedString(string: stampText, attributes: attrs)
-        let textSize = attrStr.size()
+        let cfStr = CFAttributedStringCreate(kCFAllocatorDefault, stampText as CFString, ctAttrs as CFDictionary)!
+        let line = CTLineCreateWithAttributedString(cfStr)
+        var ascent: CGFloat = 0
+        var descent: CGFloat = 0
+        var leading: CGFloat = 0
+        let textWidth = CGFloat(CTLineGetTypographicBounds(line, &ascent, &descent, &leading))
+        let textHeight = ascent + descent
+
         let marginRight = 72.0 * scale
         let marginBottom = 92.0 * scale
-        let textOrigin = CGPoint(x: w - marginRight - textSize.width, y: marginBottom)
-        attrStr.draw(at: textOrigin)
+        let textOriginX = w - marginRight - textWidth
+        let baselineY = marginBottom + descent
+
+        ctx.saveGState()
+        ctx.textMatrix = .identity
+        ctx.textPosition = CGPoint(x: textOriginX, y: baselineY)
+        CTLineDraw(line, ctx)
 
         // Small AGY logo mark directly left of the stamp text
         let logoSize = fontSize * 1.15
-        let logoRect = NSRect(
-            x: textOrigin.x - logoSize - 10.0 * scale,
-            y: textOrigin.y + (textSize.height - logoSize) * 0.5,
+        let logoRect = CGRect(
+            x: textOriginX - logoSize - 10.0 * scale,
+            y: marginBottom + (textHeight - logoSize) * 0.5,
             width: logoSize,
             height: logoSize
         )
-        let logoPath = AGYLogo.nsBezierPath(in: logoRect)
-        NSColor(
-            srgbRed: pal.contourPeak.r,
-            green: pal.contourPeak.g,
-            blue: pal.contourPeak.b,
-            alpha: pal.isDark ? 0.72 : 0.68
-        ).setFill()
-        logoPath.fill()
+        let logoPath = agyLogoCGPath(in: logoRect)
+        ctx.setFillColor(CGColor(
+            colorSpace: colorSpace,
+            components: [pal.contourPeak.r, pal.contourPeak.g, pal.contourPeak.b, pal.isDark ? 0.72 : 0.68]
+        )!)
+        ctx.addPath(logoPath)
+        ctx.fillPath()
 
         // Delicate hairline rule under the stamp
-        let ruleY = textOrigin.y - 7.0 * scale
-        let rulePath = NSBezierPath()
-        rulePath.move(to: NSPoint(x: logoRect.minX, y: ruleY))
-        rulePath.line(to: NSPoint(x: w - marginRight, y: ruleY))
-        rulePath.lineWidth = max(1.0, 1.0 * scale)
-        pal.stampMuted.setStroke()
-        rulePath.stroke()
-
-        NSGraphicsContext.restoreGraphicsState()
+        let ruleY = marginBottom - 7.0 * scale
+        ctx.setStrokeColor(pal.stampMuted)
+        ctx.setLineWidth(max(1.0, 1.0 * scale))
+        ctx.move(to: CGPoint(x: logoRect.minX, y: ruleY))
+        ctx.addLine(to: CGPoint(x: w - marginRight, y: ruleY))
+        ctx.strokePath()
+        ctx.restoreGState()
 
         return ctx.makeImage()
     }

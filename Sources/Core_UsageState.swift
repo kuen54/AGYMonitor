@@ -91,6 +91,11 @@ public struct HistoricalMonthBundle: Equatable, Sendable {
     }
 }
 
+public enum RefreshQueueCompletion: Equatable, Sendable {
+    case idle
+    case runFollowUp(force: Bool)
+}
+
 public struct RefreshQueueState: Equatable, Sendable {
     public private(set) var isInFlight: Bool = false
     public private(set) var currentForce: Bool = false
@@ -98,6 +103,11 @@ public struct RefreshQueueState: Equatable, Sendable {
     public private(set) var pendingForce: Bool = false
 
     public init() {}
+
+    /// True when a forced follow-up refresh is already queued behind the active scan.
+    /// Callers can check this (or use `phaseForIntermediateResult`) to avoid flashing
+    /// `.loaded` / `.failed` for a single frame before the follow-up scan begins.
+    public var hasPendingFollowUp: Bool { pendingFollowUp }
 
     /// Request a refresh. Manual `force: true` (`⌘R`) arriving while an automatic scan
     /// is in flight queues a forced follow-up rather than being silently dropped.
@@ -116,6 +126,14 @@ public struct RefreshQueueState: Equatable, Sendable {
         return (false, false)
     }
 
+    /// Returns `.loading(cached: resultPhase.value)` when a follow-up refresh is already queued,
+    /// keeping the UI in a smooth loading state instead of flashing `.loaded` -> `.loading`.
+    public func phaseForIntermediateResult<Value: Equatable & Sendable>(
+        _ resultPhase: LoadPhase<Value>
+    ) -> LoadPhase<Value> {
+        pendingFollowUp ? resultPhase.transitioningToLoading() : resultPhase
+    }
+
     public mutating func complete() -> (shouldRunFollowUp: Bool, followUpForce: Bool) {
         if pendingFollowUp {
             let nextForce = pendingForce
@@ -128,6 +146,12 @@ public struct RefreshQueueState: Equatable, Sendable {
         isInFlight = false
         currentForce = false
         return (false, false)
+    }
+
+    /// Typed alternative to `complete()` returning `.idle` or `.runFollowUp(force:)`.
+    public mutating func completeAction() -> RefreshQueueCompletion {
+        let next = complete()
+        return next.shouldRunFollowUp ? .runFollowUp(force: next.followUpForce) : .idle
     }
 
     public mutating func reset() {
@@ -161,9 +185,16 @@ public struct MonthNavigationState: Equatable, Sendable {
     }
 
     public func isViewingCurrentMonth(now: Date = Date()) -> Bool {
-        let cal = AppDate.gregorian
-        return viewingYear == cal.component(.year, from: now)
-            && viewingMonth == cal.component(.month, from: now)
+        Self.isCurrentMonth(year: viewingYear, month: viewingMonth, now: now)
+    }
+
+    /// True iff `(year, month)` matches the Gregorian wall-clock current month at `now`.
+    public static func isCurrentMonth(year: Int, month: Int, now: Date = Date()) -> Bool {
+        SnapshotFreshnessPolicy.isFreshCurrentMonthFetch(
+            fetchedYear: year,
+            fetchedMonth: month,
+            now: now
+        )
     }
 
     public mutating func setViewing(year: Int, month: Int, now: Date = Date()) {
@@ -335,6 +366,41 @@ public struct ArchiveSweepGate: Equatable, Sendable {
 // MARK: - Historical Disk Snapshot Completeness & Year Bounds
 
 public enum SnapshotFreshnessPolicy {
+
+    /// Canonical `"YYYY-MM"` key for `(year, month)`.
+    public static func yearMonthKey(year: Int, month: Int) -> String {
+        String(format: "%04d-%02d", year, month)
+    }
+
+    /// Canonical `"YYYY-MM"` key for `now` using `AppDate.gregorian`.
+    public static func currentYearMonthKey(now: Date = Date()) -> String {
+        let cal = AppDate.gregorian
+        return yearMonthKey(
+            year: cal.component(.year, from: now),
+            month: cal.component(.month, from: now)
+        )
+    }
+
+    /// True iff a current-month fetch started for `(fetchedYear, fetchedMonth)` still matches
+    /// the Gregorian wall-clock current month at `now`. Prevents a scan started at 23:59 on the
+    /// last day of a month from overwriting `currentMonthData` after midnight rollover.
+    public static func isFreshCurrentMonthFetch(
+        fetchedYear: Int,
+        fetchedMonth: Int,
+        now: Date = Date()
+    ) -> Bool {
+        let cal = AppDate.gregorian
+        return fetchedYear == cal.component(.year, from: now)
+            && fetchedMonth == cal.component(.month, from: now)
+    }
+
+    /// String-key (`"YYYY-MM"`) overload of `isFreshCurrentMonthFetch`.
+    public static func isFreshCurrentMonthFetch(
+        fetchedYearMonth: String,
+        now: Date = Date()
+    ) -> Bool {
+        fetchedYearMonth == currentYearMonthKey(now: now)
+    }
 
     /// A cached `YYYY-MM.json` snapshot is complete for a historical month ONLY if it was
     /// written at or after the first instant of the FOLLOWING month (`YYYY-(MM+1)-01 00:00`).

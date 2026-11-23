@@ -76,24 +76,34 @@ final class SessionReplayService {
     }
 
     /// Synchronously loads and builds a full `ReplayTimeline` for `missionId` (LRU-cached by mtime stamp).
-    func loadTimeline(missionId: String) -> ReplayTimeline? {
-        guard !missionId.isEmpty else { return nil }
+    /// When `isCurrent` is supplied and returns `false`, bails out before SQLite/JSONL reads and returns `nil`.
+    func loadTimeline(
+        missionId: String,
+        isCurrent: (@Sendable () -> Bool)? = nil
+    ) -> ReplayTimeline? {
+        guard AGYLocator.isSafeConversationId(missionId), isCurrent?() ?? true else { return nil }
         return queue.sync {
-            buildAndCacheTimeline(missionId: missionId)
+            buildAndCacheTimeline(missionId: missionId, isCurrent: isCurrent)
         }
     }
 
     /// Asynchronously loads a full `ReplayTimeline` off-main and delivers on main thread.
+    /// When `isCurrent` is supplied and returns `false`, superseded parses bail out early and return `nil`.
     func loadTimelineAsync(
         missionId: String,
+        isCurrent: (@Sendable () -> Bool)? = nil,
         completion: @escaping (ReplayTimeline?) -> Void
     ) {
-        guard !missionId.isEmpty else {
+        guard AGYLocator.isSafeConversationId(missionId), isCurrent?() ?? true else {
             DispatchQueue.main.async { completion(nil) }
             return
         }
         queue.async { [weak self] in
-            let timeline = self?.buildAndCacheTimeline(missionId: missionId)
+            guard let self = self, isCurrent?() ?? true else {
+                DispatchQueue.main.async { completion(nil) }
+                return
+            }
+            let timeline = self.buildAndCacheTimeline(missionId: missionId, isCurrent: isCurrent)
             DispatchQueue.main.async {
                 completion(timeline)
             }
@@ -159,15 +169,19 @@ final class SessionReplayService {
 
     // MARK: - 1. Multi-Surface Metadata Indexing
 
-    private func loadAllConversationRecords() -> [String: ConversationRecord] {
+    private func loadAllConversationRecords(
+        isCurrent: (@Sendable () -> Bool)? = nil
+    ) -> [String: ConversationRecord] {
+        guard isCurrent?() ?? true else { return [:] }
         let fm = FileManager.default
-        let roots = AGYLocator.surfaceRoots(home: homeDir, envDataDir: envDataDir)
+        let dbEntries = AGYLocator.conversationSummariesDBPaths(home: homeDir, envDataDir: envDataDir)
         var merged: [String: ConversationRecord] = [:]
 
-        for root in roots {
+        for entry in dbEntries {
+            guard isCurrent?() ?? true else { return [:] }
+            let root = (entry.path as NSString).deletingLastPathComponent
             let surfaceName = (root as NSString).lastPathComponent
-            let dbPath = (root as NSString).appendingPathComponent("conversation_summaries.db")
-            let dbRows = loadSQLiteRows(at: dbPath, defaultSurface: surfaceName)
+            let dbRows = loadSQLiteRows(at: entry.path, defaultSurface: surfaceName)
 
             for (_, row) in dbRows {
                 mergeRecord(row, into: &merged)
@@ -179,6 +193,7 @@ final class SessionReplayService {
                let data = try? Data(contentsOf: URL(fileURLWithPath: metaJSONPath)) {
                 let parsed = SessionLogic.parseConversationMetadataJSON(data)
                 for (_, agy) in parsed {
+                    guard AGYLocator.isSafeConversationId(agy.conversationId) else { continue }
                     let row = ConversationRecord(
                         id: agy.conversationId,
                         title: agy.title ?? "",
@@ -309,7 +324,7 @@ final class SessionReplayService {
         while sqlite3_step(s) == SQLITE_ROW {
             guard let idPtr = sqlite3_column_text(s, 0) else { continue }
             let convId = String(cString: idPtr).trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !convId.isEmpty else { continue }
+            guard AGYLocator.isSafeConversationId(convId) else { continue }
 
             let title = sqliteText(s, 1)
             let preview = sqliteText(s, 2)
@@ -383,7 +398,7 @@ final class SessionReplayService {
         }
 
         var discoveredIds: [String] = []
-        for convId in entries where !convId.hasPrefix(".") {
+        for convId in entries where AGYLocator.isSafeConversationId(convId) {
             let txPath = AGYLocator.transcriptPath(brainDir: brainDir, conversationId: convId)
             guard let stat = Self.statFile(at: txPath), stat.size > 0 else { continue }
             discoveredIds.append(convId)
@@ -417,11 +432,11 @@ final class SessionReplayService {
                     inferredParents[member.conversationId, default: []].append(parentId)
                 }
             }
-            let subDir = Self.subagentsDirPath(brainDir: brainDir, conversationId: parentId)
+            let subDir = AGYLocator.subagentsDir(brainDir: brainDir, conversationId: parentId)
             if let subFiles = try? fm.contentsOfDirectory(atPath: subDir) {
                 for file in subFiles where file.hasSuffix(".json") {
                     let childId = String(file.dropLast(".json".count))
-                    if !childId.isEmpty && childId != parentId {
+                    if AGYLocator.isSafeConversationId(childId) && childId != parentId {
                         inferredParents[childId, default: []].append(parentId)
                     }
                 }
@@ -649,8 +664,13 @@ final class SessionReplayService {
 
     // MARK: - 3. Full Timeline Loading (LRU-Cached + Bounded I/O)
 
-    private func buildAndCacheTimeline(missionId: String) -> ReplayTimeline? {
-        let records = loadAllConversationRecords()
+    private func buildAndCacheTimeline(
+        missionId: String,
+        isCurrent: (@Sendable () -> Bool)? = nil
+    ) -> ReplayTimeline? {
+        guard isCurrent?() ?? true else { return nil }
+        let records = loadAllConversationRecords(isCurrent: isCurrent)
+        guard isCurrent?() ?? true else { return nil }
         let rootRecord = records[missionId]
         let preferredSurface = rootRecord?.appDataDir
 
@@ -675,6 +695,7 @@ final class SessionReplayService {
             }
         }
 
+        guard isCurrent?() ?? true else { return nil }
         let swarmResult = rootBrainDir.flatMap { inspectSwarmDir(brainDir: $0, conversationId: missionId) }
         let hasSwarmDir = swarmResult?.exists ?? false
         let swarmTitle = swarmResult?.title
@@ -692,6 +713,8 @@ final class SessionReplayService {
             battleGroups: battleGroups,
             preloadedSwarmMembers: swarmResult?.members
         )
+
+        guard isCurrent?() ?? true else { return nil }
 
         // Resolve transcript paths for discovered children and cap to `maxChildTracks` (16),
         // keeping shallower depth first so parent chains remain intact, then most recently active.
@@ -729,23 +752,29 @@ final class SessionReplayService {
         )
 
         if let cached = timelineCache.get(cacheKey) {
-            return cached
+            return (isCurrent?() ?? true) ? cached : nil
         }
+
+        guard isCurrent?() ?? true else { return nil }
 
         // Parse root transcript (bounded <= 8 MB tail on clean line boundary)
         let rootSteps: [ReplayRawStep]
         if let txPath = rootTranscriptPath,
            let text = Self.readBoundedTailText(at: txPath, maxBytes: Self.maxTranscriptBytes) {
+            guard isCurrent?() ?? true else { return nil }
             rootSteps = ReplayLogic.parseTranscriptSteps(jsonlText: text)
         } else {
             rootSteps = []
         }
+
+        guard isCurrent?() ?? true else { return nil }
 
         // Parse swarm board (bounded <= 4 MB tail on clean line boundary)
         let boardEvents: [ReplayBoardInput]
         if let bPath = boardPath,
            (boardStat?.size ?? 0) > 0,
            let text = Self.readBoundedTailText(at: bPath, maxBytes: Self.maxBoardBytes) {
+            guard isCurrent?() ?? true else { return nil }
             boardEvents = ReplayLogic.parseSwarmBoard(jsonlText: text)
         } else {
             boardEvents = []
@@ -755,9 +784,11 @@ final class SessionReplayService {
         var childInputs: [ReplayChildInput] = []
         childInputs.reserveCapacity(selectedChildren.count)
         for item in selectedChildren {
+            guard isCurrent?() ?? true else { return nil }
             guard let text = Self.readBoundedTailText(at: item.txPath, maxBytes: Self.maxTranscriptBytes) else {
                 continue
             }
+            guard isCurrent?() ?? true else { return nil }
             let steps = ReplayLogic.parseTranscriptSteps(jsonlText: text)
             guard !steps.isEmpty else { continue }
             childInputs.append(ReplayChildInput(
@@ -770,6 +801,8 @@ final class SessionReplayService {
                 steps: steps
             ))
         }
+
+        guard isCurrent?() ?? true else { return nil }
 
         guard !rootSteps.isEmpty || !childInputs.isEmpty || !boardEvents.isEmpty else {
             return nil
@@ -838,7 +871,7 @@ final class SessionReplayService {
             depth: Int,
             isRosterName: Bool
         ) -> Bool {
-            guard !id.isEmpty, id != rootId else { return false }
+            guard AGYLocator.isSafeConversationId(id), id != rootId else { return false }
             let dbRec = records[id]
             let stepCount = dbRec?.stepCount ?? 0
             let lastMod = dbRec?.lastModifiedSec ?? 0
@@ -1080,6 +1113,7 @@ final class SessionReplayService {
     }
 
     private func inspectSwarmDir(brainDir: String, conversationId: String) -> SwarmDirInspection? {
+        guard AGYLocator.isSafeConversationId(conversationId) else { return nil }
         let fm = FileManager.default
         let membersPath = AGYLocator.swarmMembersPath(brainDir: brainDir, conversationId: conversationId)
         let boardPath = Self.swarmBoardPath(brainDir: brainDir, conversationId: conversationId)
@@ -1097,25 +1131,23 @@ final class SessionReplayService {
     }
 
     private func readSubagentManifests(brainDir: String, conversationId: String) -> [SubagentManifest] {
+        guard AGYLocator.isSafeConversationId(conversationId) else { return [] }
         let fm = FileManager.default
-        let subagentsDir = Self.subagentsDirPath(brainDir: brainDir, conversationId: conversationId)
+        let subagentsDir = AGYLocator.subagentsDir(brainDir: brainDir, conversationId: conversationId)
         guard let files = try? fm.contentsOfDirectory(atPath: subagentsDir) else { return [] }
 
         var manifests: [SubagentManifest] = []
         for file in files.sorted() where file.hasSuffix(".json") {
             let fullPath = (subagentsDir as NSString).appendingPathComponent(file)
             guard let data = try? Data(contentsOf: URL(fileURLWithPath: fullPath)),
-                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let convId = (obj["conversationId"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !convId.isEmpty else {
+                  let record = SessionLogic.parseSubagentRecordJSON(data),
+                  AGYLocator.isSafeConversationId(record.conversationId) else {
                 continue
             }
-            let desc = obj["subagentDescriptor"] as? [String: Any]
-            let typeName = (desc?["typeName"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let role = (desc?["role"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let spawnStep = obj["spawnStepIndex"] as? Int
+            let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            let spawnStep = obj?["spawnStepIndex"] as? Int
             let workspacePath: String = {
-                if let uris = obj["workspaceUris"] as? [String] {
+                if let uris = obj?["workspaceUris"] as? [String] {
                     for u in uris {
                         if let p = SessionLogic.workspacePath(fromURI: u) { return p }
                     }
@@ -1123,9 +1155,9 @@ final class SessionReplayService {
                 return ""
             }()
             manifests.append(SubagentManifest(
-                conversationId: convId,
-                typeName: typeName,
-                role: role,
+                conversationId: record.conversationId,
+                typeName: record.typeName ?? "",
+                role: record.role ?? "",
                 spawnStepIndex: spawnStep,
                 workspacePath: workspacePath
             ))
@@ -1151,7 +1183,7 @@ final class SessionReplayService {
     }
 
     private func locateBrainDir(for conversationId: String, preferredSurface: String?) -> String? {
-        guard !conversationId.isEmpty else { return nil }
+        guard AGYLocator.isSafeConversationId(conversationId) else { return nil }
         let fm = FileManager.default
         var bestDir: String? = nil
         var bestMtime: Double = -1
@@ -1177,7 +1209,7 @@ final class SessionReplayService {
     }
 
     private func locateTranscriptPath(for conversationId: String, preferredSurface: String?) -> String? {
-        guard !conversationId.isEmpty else { return nil }
+        guard AGYLocator.isSafeConversationId(conversationId) else { return nil }
         let candidates = AGYLocator.candidateTranscriptPaths(
             home: homeDir,
             conversationId: conversationId,
@@ -1199,12 +1231,6 @@ final class SessionReplayService {
         let membersPath = AGYLocator.swarmMembersPath(brainDir: brainDir, conversationId: conversationId)
         let swarmDir = (membersPath as NSString).deletingLastPathComponent
         return (swarmDir as NSString).appendingPathComponent("board.jsonl")
-    }
-
-    private static func subagentsDirPath(brainDir: String, conversationId: String) -> String {
-        let membersPath = AGYLocator.swarmMembersPath(brainDir: brainDir, conversationId: conversationId)
-        let sysGenDir = ((membersPath as NSString).deletingLastPathComponent as NSString).deletingLastPathComponent
-        return (sysGenDir as NSString).appendingPathComponent("subagents")
     }
 
     // MARK: - 7. Title & Workspace Resolution
@@ -1245,10 +1271,13 @@ final class SessionReplayService {
     }
 
     private func readAnnotationTitle(conversationId: String) -> String? {
+        guard AGYLocator.isSafeConversationId(conversationId) else { return nil }
         let fm = FileManager.default
-        for root in AGYLocator.surfaceRoots(home: homeDir, envDataDir: envDataDir) {
-            let path = ((root as NSString).appendingPathComponent("annotations") as NSString)
-                .appendingPathComponent("\(conversationId).pbtxt")
+        for path in AGYLocator.candidateAnnotationPaths(
+            home: homeDir,
+            conversationId: conversationId,
+            envDataDir: envDataDir
+        ) {
             guard fm.fileExists(atPath: path),
                   let raw = try? String(contentsOfFile: path, encoding: .utf8),
                   let parsed = TranscriptParse.parseAnnotationTitle(raw),
@@ -1307,7 +1336,7 @@ final class SessionReplayService {
             return nil
         }
 
-        let data = handle.readData(ofLength: length)
+        let data = (try? handle.read(upToCount: length)) ?? Data()
         guard !data.isEmpty else { return nil }
 
         if truncated, let firstNL = data.firstIndex(of: 0x0A) {
@@ -1336,7 +1365,7 @@ final class SessionReplayService {
         // Head read
         if (try? handle.seek(toOffset: 0)) != nil {
             let headLen = Int(min(UInt64(peekHeadBytes), fileSize))
-            let headData = handle.readData(ofLength: headLen)
+            let headData = (try? handle.read(upToCount: headLen)) ?? Data()
             let headText = String(decoding: headData, as: UTF8.self)
             for rawLine in headText.split(separator: "\n", omittingEmptySubsequences: true) {
                 guard let lineData = rawLine.data(using: .utf8),
@@ -1362,7 +1391,7 @@ final class SessionReplayService {
         let tailLen = Int(min(UInt64(peekTailBytes), fileSize))
         let tailOffset = fileSize - UInt64(tailLen)
         if (try? handle.seek(toOffset: tailOffset)) != nil {
-            let tailData = handle.readData(ofLength: tailLen)
+            let tailData = (try? handle.read(upToCount: tailLen)) ?? Data()
             let tailText = String(decoding: tailData, as: UTF8.self)
             for rawLine in tailText.split(separator: "\n", omittingEmptySubsequences: true).reversed() {
                 guard let lineData = rawLine.data(using: .utf8),
@@ -1420,13 +1449,13 @@ final class SessionReplayService {
 
         let headLen = Int(min(UInt64(workflowPeekBytes), fileSize))
         if (try? handle.seek(toOffset: 0)) != nil {
-            scan(handle.readData(ofLength: headLen))
+            scan((try? handle.read(upToCount: headLen)) ?? Data())
         }
         if !foundWorkflow && fileSize > UInt64(headLen) {
             let tailLen = Int(min(UInt64(workflowPeekBytes), fileSize - UInt64(headLen)))
             let tailOffset = fileSize - UInt64(tailLen)
             if (try? handle.seek(toOffset: tailOffset)) != nil {
-                scan(handle.readData(ofLength: tailLen))
+                scan((try? handle.read(upToCount: tailLen)) ?? Data())
             }
         }
 
@@ -1473,17 +1502,23 @@ final class SessionReplayService {
     ) -> String {
         var parts: [String] = [missionId]
         parts.reserveCapacity(4 + childStats.count)
+        func safeMs(_ sec: Double) -> Int64 {
+            let ms = sec * 1000.0
+            guard ms.isFinite else { return 0 }
+            let clamped = min(max(ms, -Double(Int64.max / 2)), Double(Int64.max / 2))
+            return Int64(clamped)
+        }
         if let r = rootStat {
-            parts.append("r:\(Int64(r.mtimeSec * 1000)):\(r.size)")
+            parts.append("r:\(safeMs(r.mtimeSec)):\(r.size)")
         }
         if let m = membersStat {
-            parts.append("m:\(Int64(m.mtimeSec * 1000)):\(m.size)")
+            parts.append("m:\(safeMs(m.mtimeSec)):\(m.size)")
         }
         if let b = boardStat {
-            parts.append("b:\(Int64(b.mtimeSec * 1000)):\(b.size)")
+            parts.append("b:\(safeMs(b.mtimeSec)):\(b.size)")
         }
         for (cid, st) in childStats {
-            parts.append("\(cid):\(Int64(st.mtimeSec * 1000)):\(st.size)")
+            parts.append("\(cid):\(safeMs(st.mtimeSec)):\(st.size)")
         }
         return parts.joined(separator: "|")
     }

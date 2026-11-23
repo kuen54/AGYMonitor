@@ -17,7 +17,10 @@ struct OAuthUsageWindow: Codable, Equatable {
     let label: String?
 
     /// Integer percent used, clamped to 0...100.
-    var displayPercent: Int { max(0, min(100, Int(utilization.rounded()))) }
+    var displayPercent: Int {
+        guard utilization.isFinite else { return 0 }
+        return Int(min(100.0, max(0.0, utilization)).rounded())
+    }
 
     /// Integer percent remaining, clamped to 0...100.
     var remainingPercent: Int { max(0, min(100, 100 - displayPercent)) }
@@ -54,7 +57,10 @@ struct OAuthUsageLimit: Codable, Equatable {
     let is_active: Bool?
 
     /// Integer percent used, clamped to 0...100.
-    var displayPercent: Int { max(0, min(100, Int((percent ?? 0).rounded()))) }
+    var displayPercent: Int {
+        guard let p = percent, p.isFinite else { return 0 }
+        return Int(min(100.0, max(0.0, p)).rounded())
+    }
     var remainingPercent: Int { max(0, min(100, 100 - displayPercent)) }
     var resetDate: Date? { OAuthUsage.parseISO(resets_at) }
     var modelDisplayName: String? { scope?.model?.display_name }

@@ -5,9 +5,9 @@ import Combine
 // MARK: - Notch UI (AppKit layer)
 //
 // The AppKit layer for Notch display mode: screen/notch geometry, synthetic-notch
-// fallback on external displays, one fixed-footprint NSPanel per display, screen-change
-// and wake rebuild lifecycle, per-display fullscreen behavior, and the global+local
-// mouse monitor that governs open/close (dwell + grace) and mouse passthrough.
+// fallback on external displays, one top-pinned compact/expanded NSPanel per display,
+// screen-change and wake rebuild lifecycle, per-display fullscreen behavior, and the
+// global+local mouse monitor that governs open/close (dwell + grace) and mouse passthrough.
 //
 // Main-thread only (plain NSObject, like AppDelegate). macOS 13 safe.
 
@@ -103,6 +103,7 @@ final class NotchPanel: NSPanel {
     /// Drives canBecomeKey. false for the idle pill; true while expanded so
     /// PopoverView's controls receive key events.
     var isInteractive = false
+    var onCancelOperation: (() -> Void)?
 
     static let notchStyleMask: NSWindow.StyleMask =
         [.borderless, .nonactivatingPanel, .utilityWindow, .hudWindow]
@@ -134,6 +135,10 @@ final class NotchPanel: NSPanel {
     override var canBecomeKey: Bool { isInteractive }
     override var canBecomeMain: Bool { false }
 
+    override func cancelOperation(_ sender: Any?) {
+        onCancelOperation?()
+    }
+
     func enableFullscreenFloat() { FullscreenSpace.shared.add(self) }
     func disableFullscreenFloat() { FullscreenSpace.shared.remove(self) }
 }
@@ -152,13 +157,21 @@ final class NotchInstance {
     let vm = NotchViewModel()
     let panel: NotchPanel
     var screen: NotchScreen
+    var backingMode: NotchPanelBackingMode = .compact
     var openWork: DispatchWorkItem?
     var closeWork: DispatchWorkItem?
+    var shrinkWork: DispatchWorkItem?
 
-    init(displayId: CGDirectDisplayID, panel: NotchPanel, screen: NotchScreen) {
+    init(
+        displayId: CGDirectDisplayID,
+        panel: NotchPanel,
+        screen: NotchScreen,
+        backingMode: NotchPanelBackingMode = .compact
+    ) {
         self.displayId = displayId
         self.panel = panel
         self.screen = screen
+        self.backingMode = backingMode
     }
 }
 
@@ -169,7 +182,7 @@ final class NotchController: NSObject {
     private let onQuit: () -> Void
     private let onOpenStateChanged: ((Bool) -> Void)?
 
-    private let maxWindowSize = CGSize(width: 600, height: 860)
+    private let maxWindowSize = CGSize(width: 600, height: CGFloat(PanelHeightBudget.notchMaxWindowHeight))
     private let syntheticWidth: CGFloat = 200
     private let hoverShoulder: CGFloat = 84
     private let revealEdge: CGFloat = 8
@@ -180,6 +193,7 @@ final class NotchController: NSObject {
     private var globalMonitor: Any?
     private var localMonitor: Any?
     private var rebuildWork: DispatchWorkItem?
+    private var idleCacheTrimWork: DispatchWorkItem?
     private var wingState = NotchLiveWingState()
     private var wingTimer: DispatchWorkItem?
     private var sessionWingObserver: AnyCancellable?
@@ -221,6 +235,7 @@ final class NotchController: NSObject {
         NotificationCenter.default.removeObserver(self)
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         rebuildWork?.cancel(); rebuildWork = nil
+        cancelIdleCacheTrim()
         wingTimer?.cancel(); wingTimer = nil
         wingState = NotchLiveWingState()
         sessionWingObserver?.cancel(); sessionWingObserver = nil
@@ -253,6 +268,7 @@ final class NotchController: NSObject {
 
     private func reconcileScreens() {
         guard coordinator.isStarted else { return }
+        let wasAnyOpen = coordinator.anyOpen
         let resolved = resolveNotchScreens(syntheticWidth: syntheticWidth)
         let mainDisplayId = NSScreen.main?.displayID
         var byId: [CGDirectDisplayID: NotchScreen] = [:]
@@ -278,38 +294,61 @@ final class NotchController: NSObject {
             }
         }
 
-        // Preserve live open/modal state on surviving displays; only refresh frame & notch metrics.
+        // Preserve live open/modal state on surviving displays; refresh frame, notch metrics,
+        // and apply any fullscreen-change effects produced during screen reconciliation.
+        let mouse = NSEvent.mouseLocation
         for id in plan.kept {
             guard let inst = instances[id], let ns = byId[id] else { continue }
             inst.screen = ns
-            let frame = panelFrame(for: ns)
-            if inst.panel.frame != frame {
-                inst.panel.setFrame(frame, display: true)
-            }
             if inst.vm.closedNotchSize != ns.closedNotchSize {
                 inst.vm.closedNotchSize = ns.closedNotchSize
             }
             if inst.vm.isSynthetic != ns.isSynthetic {
                 inst.vm.isSynthetic = ns.isSynthetic
             }
-            if inst.vm.screenVisibleHeight != ns.screen.visibleFrame.height {
-                inst.vm.screenVisibleHeight = ns.screen.visibleFrame.height
+            let maxHostH = expandedPanelFrame(for: ns).height
+            if inst.vm.screenVisibleHeight != maxHostH {
+                inst.vm.screenVisibleHeight = maxHostH
             }
-            if var st = coordinator.displays[id] {
-                st.lastPointerSample = nil
-                coordinator.displays[id] = st
+            let current = coordinator.displays[id]
+            let shouldBeOpen = current?.isOpen ?? false
+            if shouldBeOpen {
+                cancelPanelShrink(inst)
+                ensurePanelBackingMode(.expanded, for: inst, display: true)
+            } else {
+                // Keep `.expanded` while a close-spring shrink timer is in flight;
+                // otherwise re-anchor the `.compact` envelope to the updated screen geometry.
+                ensurePanelBackingMode(inst.backingMode, for: inst, display: true)
+            }
+            NotchCoordinatorMachine.invalidatePointerSample(&coordinator, displayId: id)
+            if let effects = plan.keptEffects[id], !effects.isEmpty {
+                if let current = current, inst.vm.isOpen != current.isOpen {
+                    if current.isOpen {
+                        cancelPanelShrink(inst)
+                        ensurePanelBackingMode(.expanded, for: inst, display: false)
+                    }
+                    inst.vm.isOpen = current.isOpen
+                    if !current.isOpen {
+                        schedulePanelShrink(inst)
+                    }
+                }
+                applyEffects(effects, to: inst, pointer: pointerSample(for: inst, mouse: mouse), mouse: mouse)
             }
         }
 
         for desc in plan.added {
             guard let ns = byId[desc.displayId] else { continue }
-            let frame = panelFrame(for: ns)
+            let isOpen = coordinator.displays[desc.displayId]?.isOpen ?? false
+            let initialMode: NotchPanelBackingMode = isOpen ? .expanded : .compact
+            let frame = (initialMode == .expanded)
+                ? expandedPanelFrame(for: ns)
+                : compactPanelFrame(for: ns, geometry: NotchGeometryState(), hasActiveWing: wingState.activeWing != nil)
             let panel = NotchPanel(contentRect: frame)
-            let inst = NotchInstance(displayId: desc.displayId, panel: panel, screen: ns)
+            let inst = NotchInstance(displayId: desc.displayId, panel: panel, screen: ns, backingMode: initialMode)
             inst.vm.closedNotchSize = ns.closedNotchSize
             inst.vm.isSynthetic = ns.isSynthetic
-            inst.vm.screenVisibleHeight = ns.screen.visibleFrame.height
-            inst.vm.isOpen = coordinator.displays[desc.displayId]?.isOpen ?? false
+            inst.vm.screenVisibleHeight = expandedPanelFrame(for: ns).height
+            inst.vm.isOpen = isOpen
             inst.vm.activeWing = wingState.activeWing
             inst.vm.onAcquireModalLock = { [weak self, weak inst] lock in
                 guard let self = self, let inst = inst else { return }
@@ -327,16 +366,19 @@ final class NotchController: NSObject {
                 guard let self = self, let inst = inst else { return }
                 self.dispatch(inst, event: .explicitClose)
             }
+            panel.onCancelOperation = { [weak self, weak inst] in
+                guard let self = self, let inst = inst else { return }
+                self.dispatch(inst, event: .escapePressed)
+            }
             inst.vm.onGeometryChanged = { [weak self, weak inst] in
                 guard let self = self, let inst = inst else { return }
-                if var st = self.coordinator.displays[inst.displayId] {
-                    st.lastPointerSample = nil
-                    self.coordinator.displays[inst.displayId] = st
-                }
+                self.syncCompactFrameIfNeeded(for: inst)
+                NotchCoordinatorMachine.invalidatePointerSample(&self.coordinator, displayId: inst.displayId)
                 self.applyPanelState()
             }
 
             let host = FirstMouseHostingView(rootView: NotchRootView(store: store, sessionStore: store.sessionStore, vm: inst.vm, onQuit: onQuit))
+            host.sizingOptions = []
             host.translatesAutoresizingMaskIntoConstraints = true
             host.frame = NSRect(origin: .zero, size: frame.size)
             host.autoresizingMask = [.width, .height]
@@ -350,6 +392,12 @@ final class NotchController: NSObject {
             instances[desc.displayId] = inst
         }
 
+        if coordinator.anyOpen {
+            cancelIdleCacheTrim()
+        } else if wasAnyOpen {
+            scheduleIdleCacheTrim()
+        }
+
         syncSessionMonitorActive()
         applyPanelState()
     }
@@ -360,9 +408,14 @@ final class NotchController: NSObject {
         inst.vm.onReleaseModalLock = nil
         inst.vm.onTapWing = nil
         inst.vm.onRequestClose = nil
+        inst.panel.onCancelOperation = nil
+        inst.vm.isOpen = false
+        inst.vm.isPanelShown = false
         inst.openWork?.cancel(); inst.openWork = nil
         inst.closeWork?.cancel(); inst.closeWork = nil
+        inst.shrinkWork?.cancel(); inst.shrinkWork = nil
         inst.panel.disableFullscreenFloat()
+        inst.panel.contentView = nil
         inst.panel.orderOut(nil)
         inst.panel.close()
     }
@@ -375,11 +428,112 @@ final class NotchController: NSObject {
         syncSessionMonitorActive()
     }
 
-    private func panelFrame(for ns: NotchScreen) -> NSRect {
+    private func expandedPanelFrame(for ns: NotchScreen) -> NSRect {
         let f = ns.screen.frame
         let h = min(maxWindowSize.height, ns.screen.visibleFrame.height - 8)
         let w = min(maxWindowSize.width, f.width)
         return NSRect(x: f.midX - w / 2, y: f.maxY - h, width: w, height: h)
+    }
+
+    private func compactPanelFrame(
+        for ns: NotchScreen,
+        geometry: NotchGeometryState,
+        hasActiveWing: Bool
+    ) -> NSRect {
+        let f = ns.screen.frame
+        let maxW = Double(min(maxWindowSize.width, f.width))
+        let compact = NotchGeometryState.compactWindowSize(
+            maxWidth: maxW,
+            closedNotchWidth: Double(ns.closedNotchSize.width),
+            closedNotchHeight: Double(ns.closedNotchSize.height),
+            leftWingWidth: geometry.leftWingWidth,
+            rightWingWidth: geometry.rightWingWidth,
+            hasActiveWing: hasActiveWing
+        )
+        let maxH = max(60, min(maxWindowSize.height, ns.screen.visibleFrame.height - 8))
+        let w = CGFloat(compact.width)
+        let h = min(maxH, CGFloat(compact.height))
+        return NSRect(x: f.midX - w / 2, y: f.maxY - h, width: w, height: h)
+    }
+
+    private func compactPanelFrame(for inst: NotchInstance) -> NSRect {
+        compactPanelFrame(
+            for: inst.screen,
+            geometry: inst.vm.geometry,
+            hasActiveWing: inst.vm.activeWing != nil
+        )
+    }
+
+    private func ensurePanelBackingMode(
+        _ mode: NotchPanelBackingMode,
+        for inst: NotchInstance,
+        display: Bool = true
+    ) {
+        let targetFrame = (mode == .expanded)
+            ? expandedPanelFrame(for: inst.screen)
+            : compactPanelFrame(for: inst)
+        inst.backingMode = mode
+        if inst.panel.frame != targetFrame {
+            inst.panel.setFrame(targetFrame, display: display)
+        }
+    }
+
+    private func cancelPanelShrink(_ inst: NotchInstance) {
+        inst.shrinkWork?.cancel()
+        inst.shrinkWork = nil
+    }
+
+    private func schedulePanelShrink(_ inst: NotchInstance) {
+        cancelPanelShrink(inst)
+        let displayId = inst.displayId
+        let work = DispatchWorkItem { [weak self, weak inst] in
+            guard let self = self,
+                  let inst = inst,
+                  self.coordinator.isStarted,
+                  self.coordinator.displays[displayId]?.isOpen == false else { return }
+            inst.shrinkWork = nil
+            self.ensurePanelBackingMode(.compact, for: inst, display: true)
+        }
+        inst.shrinkWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + NotchTiming.panelShrinkDelay, execute: work)
+    }
+
+    /// Keeps the closed `.compact` window envelope comfortably wide enough whenever a Live Wing
+    /// or TPS sparkline expands the pill; grows immediately to prevent clipping and trims lazily
+    /// after `NotchTiming.panelShrinkDelay` once a retracting wing finishes its spring.
+    private func syncCompactFrameIfNeeded(for inst: NotchInstance) {
+        guard inst.backingMode == .compact,
+              !inst.vm.isOpen,
+              coordinator.displays[inst.displayId]?.isOpen == false else { return }
+        let target = compactPanelFrame(for: inst)
+        let current = inst.panel.frame
+        if target.width > current.width + 0.5
+            || target.height > current.height + 0.5
+            || abs(target.midX - current.midX) > 0.5
+            || abs(target.maxY - current.maxY) > 0.5 {
+            cancelPanelShrink(inst)
+            inst.panel.setFrame(target, display: true)
+        } else if target.width < current.width - 1.0 || target.height < current.height - 1.0 {
+            schedulePanelShrink(inst)
+        }
+    }
+
+    private func cancelIdleCacheTrim() {
+        idleCacheTrimWork?.cancel()
+        idleCacheTrimWork = nil
+    }
+
+    private func scheduleIdleCacheTrim() {
+        cancelIdleCacheTrim()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self, self.coordinator.isStarted, !self.coordinator.anyOpen else { return }
+            self.idleCacheTrimWork = nil
+            MainActor.assumeIsolated {
+                TelemetryArtworkCache.shared.trim(to: 6)
+            }
+        }
+        idleCacheTrimWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15.0, execute: work)
     }
 
     // MARK: State-machine dispatch (backed by Core_NotchState.NotchMachine)
@@ -429,8 +583,21 @@ final class NotchController: NSObject {
         coordinator.displays[inst.displayId] = currentState
         if effects.isEmpty { return }
 
+        if currentState.isOpen && (!wasOpen || inst.backingMode != .expanded) {
+            cancelIdleCacheTrim()
+            cancelPanelShrink(inst)
+            ensurePanelBackingMode(.expanded, for: inst, display: false)
+        }
+
         if inst.vm.isOpen != currentState.isOpen {
             inst.vm.isOpen = currentState.isOpen
+        }
+
+        if wasOpen && !currentState.isOpen {
+            schedulePanelShrink(inst)
+            if !coordinator.anyOpen {
+                scheduleIdleCacheTrim()
+            }
         }
 
         // Single-open exclusivity across displays: opening Display B closes Display A.
@@ -446,6 +613,13 @@ final class NotchController: NSObject {
             }
         }
 
+        applyEffects(effects, to: inst, pointer: pointer, mouse: mouse)
+    }
+
+    private func applyEffects(_ effects: [NotchEffect],
+                              to inst: NotchInstance,
+                              pointer: NotchPointerSample? = nil,
+                              mouse: NSPoint = NSEvent.mouseLocation) {
         let sample = pointer ?? pointerSample(for: inst, mouse: mouse)
         for effect in effects {
             switch effect {
@@ -459,6 +633,10 @@ final class NotchController: NSObject {
                 cancelClose(inst)
             case .setInteractive(let interactive):
                 inst.panel.isInteractive = interactive
+            case .focusPanel:
+                if inst.panel.isInteractive {
+                    inst.panel.makeKey()
+                }
             case .resignKeyIfNeeded:
                 if inst.panel.isKeyWindow { inst.panel.resignKey() }
             case .syncSessionMonitor:
@@ -517,11 +695,13 @@ final class NotchController: NSObject {
 
     private func installMouseMonitor() {
         removeMouseMonitor()
-        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved]) {
-            [weak self] _ in self?.handleMouseMoved()
+        let mask: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseDown, .rightMouseDown, .otherMouseDown]
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in
+            self?.handleMouseEvent(event.type)
         }
-        localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) {
-            [weak self] event in self?.handleMouseMoved(); return event
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
+            self?.handleMouseEvent(event.type)
+            return event
         }
     }
 
@@ -530,12 +710,32 @@ final class NotchController: NSObject {
         if let m = localMonitor { NSEvent.removeMonitor(m); localMonitor = nil }
     }
 
+    private func handleMouseEvent(_ type: NSEvent.EventType) {
+        if type == .mouseMoved {
+            handleMouseMoved()
+        } else {
+            handleMouseDown()
+        }
+    }
+
     private func handleMouseMoved() {
         guard coordinator.isStarted else { return }
         let mouse = NSEvent.mouseLocation
         for inst in instances.values {
             let sample = pointerSample(for: inst, mouse: mouse)
             dispatch(inst, event: .pointerMoved(sample), pointer: sample, mouse: mouse)
+        }
+    }
+
+    private func handleMouseDown() {
+        guard coordinator.isStarted, coordinator.anyOpen, NSApp.modalWindow == nil else { return }
+        let mouse = NSEvent.mouseLocation
+        for inst in instances.values {
+            guard state(for: inst).isOpen else { continue }
+            let sample = pointerSample(for: inst, mouse: mouse)
+            if !sample.onScreen || !sample.inContentRect {
+                dispatch(inst, event: .outsideClick, pointer: sample, mouse: mouse)
+            }
         }
     }
 
@@ -687,10 +887,8 @@ final class NotchController: NSObject {
         for inst in instances.values {
             if inst.vm.activeWing != wingState.activeWing {
                 inst.vm.activeWing = wingState.activeWing
-                if var st = coordinator.displays[inst.displayId] {
-                    st.lastPointerSample = nil
-                    coordinator.displays[inst.displayId] = st
-                }
+                syncCompactFrameIfNeeded(for: inst)
+                NotchCoordinatorMachine.invalidatePointerSample(&coordinator, displayId: inst.displayId)
                 changed = true
             }
         }

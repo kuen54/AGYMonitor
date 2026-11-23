@@ -16,19 +16,122 @@ import AppKit
 // Zero SwiftUI `Button`s inside charts/scrubber/radar (`ImageRenderer`-safe across all 7 themes
 // + Light/Dark/Notch), strictly 0% idle CPU when paused, in LIVE mode, or panel hidden.
 
+// MARK: - Keyboard Command Handoff & Timer Box
+
+enum ReplayKeyboardCommand: Equatable {
+    case togglePlay
+    case stepPrev
+    case stepNext
+}
+
+struct ReplayKeyboardTrigger: Equatable {
+    let id: UInt64
+    let command: ReplayKeyboardCommand
+}
+
+private final class ReplayTimelineBox {
+    var timeline: ReplayTimeline?
+    var isActive: Bool = false
+    var reduceMotion: Bool = false
+    var hapticsEnabled: Bool = false
+    var lastTickUptime: TimeInterval = 0
+
+    init(timeline: ReplayTimeline? = nil) {
+        self.timeline = timeline
+    }
+}
+
+private struct ReplayAnomalySpans: Equatable {
+    let waitSpans: [ReplaySegment]
+    let retrySpans: [ReplaySegment]
+
+    static func build(from timeline: ReplayTimeline) -> ReplayAnomalySpans {
+        var waits: [ReplaySegment] = []
+        var retries: [ReplaySegment] = []
+        for track in timeline.tracks {
+            for seg in track.segments {
+                switch seg.kind {
+                case .humanWait: waits.append(seg)
+                case .retryLoop: retries.append(seg)
+                case .work, .verify: break
+                }
+            }
+        }
+        return ReplayAnomalySpans(waitSpans: waits, retrySpans: retries)
+    }
+}
+
+private struct ReplayPlaybackGate: Equatable {
+    let isActive: Bool
+    let reduceMotion: Bool
+}
+
+/// Bounded LRU memoization cache for `ReplayLogic.radarLayout(timeline:)` so 60fps
+/// playback ticks never recompute topology node geometry 60×/s.
+private enum ReplayRadarLayoutCache {
+    struct Key: Hashable {
+        let timelineId: String
+        let topology: SessionTopologyKind
+        let trackCount: Int
+        let durationCentis: Int
+        let totalCostMicros: Int
+        let totalTokens: Int
+        let trackDigest: Int
+    }
+
+    private static let lock = NSLock()
+    private static var lru = BoundedLRUState<Key, [ReplayRadarNode]>(maxEntries: 8)
+
+    static func nodes(for timeline: ReplayTimeline) -> [ReplayRadarNode] {
+        var acc: UInt64 = 14695981039346656037
+        for track in timeline.tracks {
+            for b in track.id.utf8 { acc = (acc ^ UInt64(b)) &* 1099511628211 }
+            for b in track.name.utf8 { acc = (acc ^ UInt64(b)) &* 1099511628211 }
+            acc = (acc ^ UInt64(bitPattern: Int64(track.depth))) &* 1099511628211
+            acc = (acc ^ UInt64(bitPattern: Int64(safeRoundedInt(track.estimatedCostUSD * 1_000_000.0)))) &* 1099511628211
+        }
+        let key = Key(
+            timelineId: timeline.id,
+            topology: timeline.topology,
+            trackCount: timeline.tracks.count,
+            durationCentis: safeRoundedInt(timeline.totalDurationSec * 100.0, min: 0),
+            totalCostMicros: safeRoundedInt(timeline.totalCostUSD * 1_000_000.0, min: 0),
+            totalTokens: timeline.totalTokens,
+            trackDigest: Int(truncatingIfNeeded: acc)
+        )
+
+        lock.lock()
+        if let hit = lru.get(key) {
+            lock.unlock()
+            return hit
+        }
+        lock.unlock()
+
+        let computed = ReplayLogic.radarLayout(timeline: timeline)
+        lock.lock()
+        lru.set(computed, for: key)
+        lock.unlock()
+        return computed
+    }
+}
+
 // MARK: - Top-Level Replay Deck View
 
 struct SessionReplayDeckView: View {
     private enum Source {
-        case store(SessionStore, isActiveMode: Bool)
+        case store(SessionStore, isActiveMode: Bool, keyboardTrigger: ReplayKeyboardTrigger?)
         case standalone(timeline: ReplayTimeline, missions: [ReplayMissionSummary], initialProgress: Double?)
     }
 
     private let source: Source
 
     /// Store-connected initializer for `SessionTabView`.
-    init(sessionStore: SessionStore, isActiveMode: Bool = true) {
-        self.source = .store(sessionStore, isActiveMode: isActiveMode)
+    init(
+        sessionStore: SessionStore,
+        isActiveMode: Bool = true,
+        keyboardTrigger: ReplayKeyboardTrigger? = nil
+    ) {
+        self.source = .store(sessionStore, isActiveMode: isActiveMode, keyboardTrigger: keyboardTrigger)
     }
 
     /// Standalone deterministic initializer for `ImageRenderer` QA snapshots & previews.
@@ -58,17 +161,21 @@ struct SessionReplayDeckView: View {
 
     var body: some View {
         switch source {
-        case .store(let store, let isActiveMode):
-            StoreBoundReplayDeck(sessionStore: store, isActiveMode: isActiveMode)
+        case .store(let store, let isActiveMode, let keyboardTrigger):
+            StoreBoundReplayDeck(
+                sessionStore: store,
+                isActiveMode: isActiveMode,
+                keyboardTrigger: keyboardTrigger
+            )
         case .standalone(let timeline, let missions, let initialProgress):
             ReplayDeckContent(
                 missions: missions,
                 selectedMissionId: timeline.id,
-                timeline: timeline,
+                timelinePhase: .loaded(timeline),
                 isIndexLoading: false,
-                isTimelineLoading: false,
                 isActiveMode: true,
                 pinnedInitialProgress: initialProgress,
+                keyboardTrigger: nil,
                 onSelectMission: { _ in }
             )
         }
@@ -78,16 +185,17 @@ struct SessionReplayDeckView: View {
 private struct StoreBoundReplayDeck: View {
     @ObservedObject var sessionStore: SessionStore
     let isActiveMode: Bool
+    let keyboardTrigger: ReplayKeyboardTrigger?
 
     var body: some View {
         ReplayDeckContent(
             missions: sessionStore.replayMissions,
             selectedMissionId: sessionStore.selectedReplayMissionId,
-            timeline: sessionStore.activeReplay,
+            timelinePhase: sessionStore.replayState.timelinePhase,
             isIndexLoading: sessionStore.isReplayIndexLoading,
-            isTimelineLoading: sessionStore.isReplayTimelineLoading,
             isActiveMode: isActiveMode,
             pinnedInitialProgress: nil,
+            keyboardTrigger: keyboardTrigger,
             onSelectMission: { id in
                 sessionStore.selectReplayMission(id)
             }
@@ -100,66 +208,81 @@ private struct StoreBoundReplayDeck: View {
 private struct ReplayDeckContent: View {
     let missions: [ReplayMissionSummary]
     let selectedMissionId: String?
-    let timeline: ReplayTimeline?
+    let timelinePhase: ReplayTimelinePhase
     let isIndexLoading: Bool
-    let isTimelineLoading: Bool
     let isActiveMode: Bool
     let pinnedInitialProgress: Double?
+    let keyboardTrigger: ReplayKeyboardTrigger?
     let onSelectMission: (String) -> Void
 
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
     @Environment(\.telemetryStaticRender) private var isStaticRender
     @Environment(\.telemetryPanelVisible) private var isPanelVisible
+    @Environment(\.telemetryReduceMotion) private var reduceMotion
     @Environment(\.craftHapticsEnabled) private var hapticsEnabled
 
     @State private var playback: ReplayPlaybackState
     @State private var tickTimer: Timer? = nil
-    @State private var lastTickUptime: TimeInterval = 0
-    @State private var liveSweepDeg: Double = 0
-    @State private var lastLoadedTimelineId: String? = nil
+    @State private var timerBox: ReplayTimelineBox
+    @State private var cachedSpans: ReplayAnomalySpans?
 
     init(
         missions: [ReplayMissionSummary],
         selectedMissionId: String?,
-        timeline: ReplayTimeline?,
+        timelinePhase: ReplayTimelinePhase,
         isIndexLoading: Bool,
-        isTimelineLoading: Bool,
         isActiveMode: Bool,
         pinnedInitialProgress: Double?,
+        keyboardTrigger: ReplayKeyboardTrigger?,
         onSelectMission: @escaping (String) -> Void
     ) {
         self.missions = missions
         self.selectedMissionId = selectedMissionId
-        self.timeline = timeline
+        self.timelinePhase = timelinePhase
         self.isIndexLoading = isIndexLoading
-        self.isTimelineLoading = isTimelineLoading
         self.isActiveMode = isActiveMode
         self.pinnedInitialProgress = pinnedInitialProgress
+        self.keyboardTrigger = keyboardTrigger
         self.onSelectMission = onSelectMission
 
-        let startProgress: Double
-        if let pinned = pinnedInitialProgress {
-            startProgress = min(1.0, max(0.0, pinned))
-        } else if let tl = timeline {
-            startProgress = ReplayPlaybackState.suggestedInitialProgress(for: tl)
+        if let tl = timelinePhase.timeline {
+            let startProgress = pinnedInitialProgress.map { min(1.0, max(0.0, $0)) }
+                ?? ReplayPlaybackState.suggestedInitialProgress(for: tl)
+            _playback = State(initialValue: ReplayPlaybackState(
+                progress: startProgress,
+                isPlaying: false,
+                speed: .x1,
+                loadedTimelineId: tl.id,
+                loadedDurationSec: tl.totalDurationSec,
+                isTimerRunning: false
+            ))
+            _timerBox = State(initialValue: ReplayTimelineBox(timeline: tl))
+            _cachedSpans = State(initialValue: ReplayAnomalySpans.build(from: tl))
         } else {
-            startProgress = 0.0
+            _playback = State(initialValue: ReplayPlaybackState(
+                progress: 0.0,
+                isPlaying: false,
+                speed: .x1,
+                loadedTimelineId: nil,
+                loadedDurationSec: 0.0,
+                isTimerRunning: false
+            ))
+            _timerBox = State(initialValue: ReplayTimelineBox(timeline: nil))
+            _cachedSpans = State(initialValue: nil)
         }
-        _playback = State(initialValue: ReplayPlaybackState(
-            progress: startProgress,
-            isPlaying: false,
-            speed: .x1
-        ))
-        _lastLoadedTimelineId = State(initialValue: timeline?.id)
     }
 
-    private var shouldTick: Bool {
-        playback.isPlaying && isActiveMode && isPanelVisible && !isStaticRender && timeline != nil
+    private var isPlaybackActive: Bool {
+        isActiveMode && isPanelVisible && !isStaticRender
+    }
+
+    private var playbackGate: ReplayPlaybackGate {
+        ReplayPlaybackGate(isActive: isPlaybackActive, reduceMotion: reduceMotion)
     }
 
     private var currentMissionIndex: Int? {
-        if let selId = selectedMissionId ?? timeline?.id,
+        if let selId = selectedMissionId ?? timelinePhase.missionId,
            let idx = missions.firstIndex(where: { $0.id == selId }) {
             return idx
         }
@@ -173,51 +296,57 @@ private struct ReplayDeckContent: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if isIndexLoading && missions.isEmpty && timeline == nil {
+            if isIndexLoading && missions.isEmpty && timelinePhase.timeline == nil {
                 loadingBanner(loc("replayLoadingIndex"))
-            } else if missions.isEmpty && timeline == nil {
+            } else if missions.isEmpty && timelinePhase == .idle {
                 emptyReplayState
             } else {
                 missionSelectorStrip
                 HairlineRule(showCrosshairs: true)
 
-                if let tl = timeline {
+                switch timelinePhase {
+                case .loaded(let tl):
+                    let spans = cachedSpans ?? ReplayAnomalySpans.build(from: tl)
                     SessionReplayCanvas(
                         timeline: tl,
                         progress: playback.progress,
                         isPlaying: playback.isPlaying,
                         isSkippingIdle: playback.isPlaying && playback.isSkippingIdle,
                         speed: playback.speed,
-                        sweepPhaseDeg: playback.isPlaying ? liveSweepDeg : nil,
+                        sweepPhaseDeg: playback.sweepAngleDeg,
+                        waitSpans: spans.waitSpans,
+                        retrySpans: spans.retrySpans,
+                        onBeginScrub: {
+                            dispatchPlayback(.beginScrub)
+                        },
                         onScrub: { newProgress in
-                            playback.scrub(to: newProgress)
+                            dispatchPlayback(.scrub(progress: newProgress, timeline: tl))
+                        },
+                        onEndScrub: {
+                            dispatchPlayback(.endScrub(isActive: isPlaybackActive, reduceMotion: reduceMotion))
                         },
                         onTogglePlay: {
-                            playback.togglePlay()
-                            CraftEngine.shared.perform(.chronometerPin, enabled: hapticsEnabled)
+                            dispatchPlayback(.togglePlay(
+                                durationSec: tl.totalDurationSec,
+                                isActive: isPlaybackActive,
+                                reduceMotion: reduceMotion
+                            ))
                         },
                         onPrevEvent: {
-                            let event = playback.stepToPreviousEvent(in: tl)
-                            CraftEngine.shared.perform(
-                                event?.kind == .retryStart ? .chronometerPin : .chronometerCrown,
-                                enabled: hapticsEnabled
-                            )
+                            dispatchPlayback(.stepPrev(timeline: tl))
                         },
                         onNextEvent: {
-                            let event = playback.stepToNextEvent(in: tl)
-                            CraftEngine.shared.perform(
-                                event?.kind == .retryStart ? .chronometerPin : .chronometerCrown,
-                                enabled: hapticsEnabled
-                            )
+                            dispatchPlayback(.stepNext(timeline: tl))
                         },
                         onCycleSpeed: {
-                            playback.cycleSpeed()
-                            CraftEngine.shared.perform(.tabDetent, enabled: hapticsEnabled)
+                            dispatchPlayback(.cycleSpeed)
                         }
                     )
-                } else if isTimelineLoading {
+                case .loading:
                     loadingBanner(loc("replayLoadingTimeline"))
-                } else {
+                case .unavailable:
+                    unavailableReplayState
+                case .idle:
                     emptyReplayState
                 }
             }
@@ -225,74 +354,135 @@ private struct ReplayDeckContent: View {
             HairlineRule(showCrosshairs: false)
             replayColophonFooter
         }
-        .onChange(of: missions.first?.id) { firstId in
-            if let firstId = firstId,
-               selectedMissionId == nil,
-               timeline == nil,
-               !isTimelineLoading {
-                onSelectMission(firstId)
-            }
+        .onChange(of: timelinePhase) { nextPhase in
+            syncTimelinePhase(nextPhase)
         }
-        .onChange(of: timeline?.id) { newId in
-            guard newId != lastLoadedTimelineId else { return }
-            lastLoadedTimelineId = newId
-            stopPlaybackTimer()
-            liveSweepDeg = 0
-            if let pinned = pinnedInitialProgress {
-                playback.reset(initialProgress: pinned)
-            } else if let tl = timeline {
-                playback.reset(initialProgress: ReplayPlaybackState.suggestedInitialProgress(for: tl))
-            } else {
-                playback.reset(initialProgress: 0.0)
-            }
+        .onChange(of: playbackGate) { gate in
+            timerBox.isActive = gate.isActive
+            timerBox.reduceMotion = gate.reduceMotion
+            dispatchPlayback(.setActive(gate.isActive, reduceMotion: gate.reduceMotion))
         }
-        .onChange(of: isPanelVisible) { visible in
-            if !visible {
-                playback.pause()
-                stopPlaybackTimer()
-            }
+        .onChange(of: hapticsEnabled) { enabled in
+            timerBox.hapticsEnabled = enabled
         }
-        .onChange(of: isActiveMode) { active in
-            if !active {
-                playback.pause()
-                stopPlaybackTimer()
-            }
-        }
-        .onChange(of: shouldTick) { running in
-            if running {
-                startPlaybackTimer()
-            } else {
-                stopPlaybackTimer()
+        .onChange(of: keyboardTrigger) { trigger in
+            guard let trigger = trigger,
+                  isPlaybackActive,
+                  case .loaded(let tl) = timelinePhase else { return }
+            switch trigger.command {
+            case .togglePlay:
+                dispatchPlayback(.togglePlay(
+                    durationSec: tl.totalDurationSec,
+                    isActive: isPlaybackActive,
+                    reduceMotion: reduceMotion
+                ))
+            case .stepPrev:
+                dispatchPlayback(.stepPrev(timeline: tl))
+            case .stepNext:
+                dispatchPlayback(.stepNext(timeline: tl))
             }
         }
         .onAppear {
-            if shouldTick {
-                startPlaybackTimer()
-            }
+            timerBox.isActive = isPlaybackActive
+            timerBox.reduceMotion = reduceMotion
+            timerBox.hapticsEnabled = hapticsEnabled
+            syncTimelinePhase(timelinePhase)
         }
         .onDisappear {
-            playback.pause()
+            timerBox.isActive = false
+            dispatchPlayback(.setActive(false, reduceMotion: reduceMotion))
             stopPlaybackTimer()
         }
     }
 
-    // MARK: Strict 0% Idle CPU 60fps Adaptive Playback Timer
+    // MARK: Unified ReplayPlaybackMachine Dispatch & 60fps Timer
+
+    private func syncTimelinePhase(_ phase: ReplayTimelinePhase) {
+        switch phase {
+        case .loaded(let tl):
+            timerBox.timeline = tl
+            cachedSpans = ReplayAnomalySpans.build(from: tl)
+            let suggested = pinnedInitialProgress.map { min(1.0, max(0.0, $0)) }
+                ?? ReplayPlaybackState.suggestedInitialProgress(for: tl)
+            dispatchPlayback(.syncTimeline(
+                id: tl.id,
+                durationSec: tl.totalDurationSec,
+                suggestedProgress: suggested,
+                pinnedMissionId: nil
+            ))
+        case .loading(let missionId, _):
+            timerBox.timeline = nil
+            cachedSpans = nil
+            if missionId == playback.loadedTimelineId {
+                dispatchPlayback(.setActive(false, reduceMotion: reduceMotion))
+            } else {
+                dispatchPlayback(.syncTimeline(
+                    id: "",
+                    durationSec: 0,
+                    suggestedProgress: 0,
+                    pinnedMissionId: nil
+                ))
+            }
+        case .unavailable, .idle:
+            timerBox.timeline = nil
+            cachedSpans = nil
+            dispatchPlayback(.syncTimeline(
+                id: "",
+                durationSec: 0,
+                suggestedProgress: 0,
+                pinnedMissionId: nil
+            ))
+        }
+    }
+
+    private func dispatchPlayback(_ event: ReplayPlaybackEvent) {
+        let effects = ReplayPlaybackMachine.reduce(&playback, event: event)
+        for effect in effects {
+            switch effect {
+            case .startTimer:
+                startPlaybackTimer()
+            case .stopTimer:
+                stopPlaybackTimer()
+            case .haptic(let cue):
+                performReplayHaptic(cue)
+            }
+        }
+    }
+
+    private func performReplayHaptic(_ cue: ReplayHapticCue) {
+        let enabled = timerBox.hapticsEnabled
+        switch cue {
+        case .playToggle:
+            CraftEngine.shared.perform(.chronometerPin, enabled: enabled)
+        case .scrubDetent:
+            CraftEngine.shared.perform(.chronometerCrown, enabled: enabled)
+        case .anomalyEnter:
+            CraftEngine.shared.perform(.chronometerPin, enabled: enabled)
+        case .stepEvent:
+            CraftEngine.shared.perform(.chronometerCrown, enabled: enabled)
+        case .speedChange:
+            CraftEngine.shared.perform(.tabDetent, enabled: enabled)
+        }
+    }
 
     private func startPlaybackTimer() {
-        guard tickTimer == nil, shouldTick, let activeTimeline = timeline, activeTimeline.totalDurationSec > 0 else { return }
-        // Seed live sweep from deterministic paused angle so playhead starts with zero jump
-        liveSweepDeg = (playback.progress * 720.0).truncatingRemainder(dividingBy: 360.0)
-        lastTickUptime = ProcessInfo.processInfo.systemUptime
+        guard tickTimer == nil else { return }
+        let box = timerBox
+        box.lastTickUptime = ProcessInfo.processInfo.systemUptime
         let timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { _ in
             let now = ProcessInfo.processInfo.systemUptime
-            let dt = min(0.05, max(0.0, now - lastTickUptime))
-            lastTickUptime = now
-            playback.step(deltaWallSec: dt, timeline: activeTimeline, smartSkipIdle: true)
-            if playback.isPlaying {
-                liveSweepDeg = (liveSweepDeg + dt * 90.0).truncatingRemainder(dividingBy: 360.0)
-            } else {
-                stopPlaybackTimer()
+            let dt = min(0.05, max(0.0, now - box.lastTickUptime))
+            box.lastTickUptime = now
+            guard let activeTimeline = box.timeline else {
+                dispatchPlayback(.setActive(false, reduceMotion: box.reduceMotion))
+                return
             }
+            dispatchPlayback(.tick(
+                dt: dt,
+                timeline: activeTimeline,
+                isActive: box.isActive,
+                reduceMotion: box.reduceMotion
+            ))
         }
         RunLoop.main.add(timer, forMode: .common)
         tickTimer = timer
@@ -306,11 +496,12 @@ private struct ReplayDeckContent: View {
     // MARK: Mission Selector Strip
 
     private var missionSelectorStrip: some View {
-        let topology = timeline?.topology ?? currentSummary?.topology ?? .solo
-        let title = timeline?.title ?? currentSummary?.title ?? loc("sessionUntitled")
-        let trackCount = timeline?.tracks.count ?? currentSummary?.trackCount ?? 1
-        let durationSec = timeline?.totalDurationSec ?? currentSummary?.durationSec ?? 0
-        let dateLabel = timeline?.dateLabel ?? formattedDateLabel(from: currentSummary?.startedAt)
+        let loadedTimeline = timelinePhase.timeline
+        let topology = loadedTimeline?.topology ?? currentSummary?.topology ?? .solo
+        let title = loadedTimeline?.title ?? currentSummary?.title ?? loc("sessionUntitled")
+        let trackCount = loadedTimeline?.tracks.count ?? currentSummary?.trackCount ?? 1
+        let durationSec = loadedTimeline?.totalDurationSec ?? currentSummary?.durationSec ?? 0
+        let dateLabel = loadedTimeline?.dateLabel ?? formattedDateLabel(from: currentSummary?.startedAt)
         let isLiveMission = currentSummary?.isLive ?? false
         let idx = currentMissionIndex ?? 0
         let canGoNewer = idx > 0
@@ -366,7 +557,7 @@ private struct ReplayDeckContent: View {
                             .foregroundColor(theme.inkMuted)
                     }
 
-                    if let ws = timeline?.workspaceLabel ?? currentSummary?.workspaceLabel, !ws.isEmpty {
+                    if let ws = loadedTimeline?.workspaceLabel ?? currentSummary?.workspaceLabel, !ws.isEmpty {
                         Text("·")
                             .font(.system(size: 8, weight: .regular, design: .monospaced))
                             .foregroundColor(theme.inkMuted.opacity(0.6))
@@ -419,7 +610,7 @@ private struct ReplayDeckContent: View {
         .padding(.vertical, 8)
     }
 
-    // MARK: Empty & Loading States
+    // MARK: Empty, Loading & Unavailable States
 
     private func loadingBanner(_ label: String) -> some View {
         VStack(spacing: 8) {
@@ -433,6 +624,21 @@ private struct ReplayDeckContent: View {
                     .foregroundColor(theme.inkSecondary)
             }
         }
+        .frame(maxWidth: .infinity)
+        .frame(height: 180)
+    }
+
+    private var unavailableReplayState: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 16, weight: .light))
+                .foregroundColor(theme.signalAmber)
+            Text(loc("replayTimelineUnavailable"))
+                .font(.system(size: 10, weight: .regular, design: .monospaced))
+                .foregroundColor(theme.inkSecondary)
+                .multilineTextAlignment(.center)
+        }
+        .padding(.horizontal, 14)
         .frame(maxWidth: .infinity)
         .frame(height: 180)
     }
@@ -497,7 +703,11 @@ struct SessionReplayCanvas: View {
     var isSkippingIdle: Bool = false
     var speed: ReplaySpeed = .x1
     var sweepPhaseDeg: Double? = nil
+    var waitSpans: [ReplaySegment]? = nil
+    var retrySpans: [ReplaySegment]? = nil
+    var onBeginScrub: () -> Void = {}
     var onScrub: (Double) -> Void = { _ in }
+    var onEndScrub: () -> Void = {}
     var onTogglePlay: () -> Void = {}
     var onPrevEvent: () -> Void = {}
     var onNextEvent: () -> Void = {}
@@ -506,16 +716,21 @@ struct SessionReplayCanvas: View {
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
     @Environment(\.telemetryStaticRender) private var isStaticRender
-    @Environment(\.craftHapticsEnabled) private var hapticsEnabled
 
     var body: some View {
         let clampedProgress = progress.isFinite ? min(1.0, max(0.0, progress)) : 0.0
-        let nodes = ReplayLogic.radarLayout(timeline: timeline)
+        let nodes = ReplayRadarLayoutCache.nodes(for: timeline)
         let snapshot = ReplayLogic.evaluateFrame(
             timeline: timeline,
             progress: clampedProgress,
-            sweepPhaseDeg: (isPlaying && !isStaticRender) ? sweepPhaseDeg : nil
+            sweepPhaseDeg: isStaticRender ? nil : sweepPhaseDeg
         )
+        let resolvedSpans: ReplayAnomalySpans = {
+            if let waits = waitSpans, let retries = retrySpans {
+                return ReplayAnomalySpans(waitSpans: waits, retrySpans: retries)
+            }
+            return ReplayAnomalySpans.build(from: timeline)
+        }()
 
         VStack(spacing: 0) {
             // Upper Deck — 04.1 Agent Telemetry Radar · Replay
@@ -538,7 +753,11 @@ struct SessionReplayCanvas: View {
                 isPlaying: isPlaying,
                 isSkippingIdle: isPlaying && !isStaticRender && isSkippingIdle,
                 speed: speed,
+                waitSpans: resolvedSpans.waitSpans,
+                retrySpans: resolvedSpans.retrySpans,
+                onBeginScrub: onBeginScrub,
                 onScrub: onScrub,
+                onEndScrub: onEndScrub,
                 onTogglePlay: onTogglePlay,
                 onPrevEvent: onPrevEvent,
                 onNextEvent: onNextEvent,
@@ -554,8 +773,9 @@ struct SessionReplayCanvas: View {
                 snapshot: snapshot,
                 isStaticRender: isStaticRender,
                 onSeekProgress: { p in
+                    onBeginScrub()
                     onScrub(p)
-                    CraftEngine.shared.perform(.chronometerPin, enabled: hapticsEnabled)
+                    onEndScrub()
                 },
                 onSelectTrack: { trackId in
                     seekToTrack(trackId)
@@ -583,8 +803,9 @@ struct SessionReplayCanvas: View {
             return
         }
         let nextProgress = min(1.0, max(0.0, targetSec / timeline.totalDurationSec))
+        onBeginScrub()
         onScrub(nextProgress)
-        CraftEngine.shared.perform(.chronometerPin, enabled: hapticsEnabled)
+        onEndScrub()
     }
 }
 
@@ -598,9 +819,15 @@ private struct ReplayRadarDeckView: View {
 
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
+    @Environment(\.telemetryPanelVisible) private var isPanelVisible
     @Environment(\.craftHapticsEnabled) private var hapticsEnabled
 
-    @State private var hoveredNodeId: String? = nil
+    @State private var inspection = ChartInspectionState<String, String>(scope: "")
+
+    private var hoveredNodeId: String? {
+        guard isPanelVisible, inspection.scope == timeline.id else { return nil }
+        return inspection.target
+    }
 
     private let radarHeight: CGFloat = 168
 
@@ -628,16 +855,17 @@ private struct ReplayRadarDeckView: View {
                         .onContinuousHover(coordinateSpace: .local) { phase in
                             switch phase {
                             case .active(let pt):
+                                inspection.syncScope(timeline.id)
                                 let hit = hitTestNode(at: pt, size: CGSize(width: w, height: h))
-                                if hoveredNodeId != hit?.id {
-                                    hoveredNodeId = hit?.id
+                                if inspection.target != hit?.id {
+                                    inspection.setTarget(hit?.id)
                                     if hit != nil {
                                         CraftEngine.shared.perform(.radarBeaconLock, enabled: hapticsEnabled)
                                     }
                                 }
                                 PointingCursorCoordinator.shared.setPointing(hit != nil, token: "replay-radar")
                             case .ended:
-                                if hoveredNodeId != nil { hoveredNodeId = nil }
+                                if inspection.target != nil { inspection.reset() }
                                 PointingCursorCoordinator.shared.setPointing(false, token: "replay-radar")
                             }
                         }
@@ -645,10 +873,6 @@ private struct ReplayRadarDeckView: View {
                             if let hit = hitTestNode(at: pt, size: CGSize(width: w, height: h)) {
                                 onSelectTrack(hit.id)
                             }
-                        }
-                        .onDisappear {
-                            hoveredNodeId = nil
-                            PointingCursorCoordinator.shared.setPointing(false, token: "replay-radar")
                         }
                 }
             }
@@ -660,6 +884,21 @@ private struct ReplayRadarDeckView: View {
         .padding(.horizontal, 14)
         .padding(.top, 9)
         .padding(.bottom, 9)
+        .onChange(of: timeline.id) { nextId in
+            if inspection.syncScope(nextId) {
+                PointingCursorCoordinator.shared.setPointing(false, token: "replay-radar")
+            }
+        }
+        .onChange(of: isPanelVisible) { visible in
+            if !visible {
+                inspection.reset()
+                PointingCursorCoordinator.shared.setPointing(false, token: "replay-radar")
+            }
+        }
+        .onDisappear {
+            inspection.reset()
+            PointingCursorCoordinator.shared.setPointing(false, token: "replay-radar")
+        }
     }
 
     private var radarHeaderRow: some View {
@@ -755,8 +994,8 @@ private struct ReplayRadarCanvas: View {
             guard cw > 24, ch > 24 else { return }
 
             let center = CGPoint(x: cw * 0.5, y: ch * 0.5)
-            let nodeById = Dictionary(uniqueKeysWithValues: nodes.map { ($0.id, $0) })
-            let trackById = Dictionary(uniqueKeysWithValues: timeline.tracks.map { ($0.id, $0) })
+            let nodeById = Dictionary(nodes.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+            let trackById = Dictionary(timeline.tracks.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
 
             func pt(_ node: ReplayRadarNode) -> CGPoint {
                 CGPoint(x: CGFloat(node.normX) * cw, y: CGFloat(node.normY) * ch)
@@ -1586,7 +1825,11 @@ private struct ReplayScrubberRailView: View {
     let isPlaying: Bool
     let isSkippingIdle: Bool
     let speed: ReplaySpeed
+    let waitSpans: [ReplaySegment]
+    let retrySpans: [ReplaySegment]
+    let onBeginScrub: () -> Void
     let onScrub: (Double) -> Void
+    let onEndScrub: () -> Void
     let onTogglePlay: () -> Void
     let onPrevEvent: () -> Void
     let onNextEvent: () -> Void
@@ -1594,18 +1837,7 @@ private struct ReplayScrubberRailView: View {
 
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
-    @Environment(\.craftHapticsEnabled) private var hapticsEnabled
-
-    @State private var lastScrubBucket: Int = -1
-    @State private var wasInsideAnomaly: Bool = false
-
-    private var waitSpans: [ReplaySegment] {
-        timeline.tracks.flatMap(\.segments).filter { $0.kind == .humanWait }
-    }
-
-    private var retrySpans: [ReplaySegment] {
-        timeline.tracks.flatMap(\.segments).filter { $0.kind == .retryLoop }
-    }
+    @Environment(\.telemetryPanelVisible) private var isPanelVisible
 
     private var speedHelpText: String {
         guard timeline.totalDurationSec > 0 else {
@@ -1708,7 +1940,13 @@ private struct ReplayScrubberRailView: View {
                             .onHover { inside in
                                 PointingCursorCoordinator.shared.setPointing(inside, token: "replay-scrubber")
                             }
+                            .onChange(of: isPanelVisible) { visible in
+                                if !visible {
+                                    PointingCursorCoordinator.shared.setPointing(false, token: "replay-scrubber")
+                                }
+                            }
                             .onDisappear {
+                                onEndScrub()
                                 PointingCursorCoordinator.shared.setPointing(false, token: "replay-scrubber")
                             }
                             .gesture(
@@ -1717,11 +1955,11 @@ private struct ReplayScrubberRailView: View {
                                         guard w > 1 else { return }
                                         let rawP = Double(value.location.x / w)
                                         let clampedP = min(1.0, max(0.0, rawP))
+                                        onBeginScrub()
                                         onScrub(clampedP)
-                                        emitScrubHaptics(for: clampedP)
                                     }
                                     .onEnded { _ in
-                                        lastScrubBucket = -1
+                                        onEndScrub()
                                     }
                             )
                     }
@@ -1895,25 +2133,6 @@ private struct ReplayScrubberRailView: View {
             context.fill(finial, with: .color(theme.accent))
         }
     }
-
-    private func emitScrubHaptics(for newProgress: Double) {
-        let bucket = Int((newProgress * 20.0).rounded(.down))
-        let sec = newProgress * max(0.0, timeline.totalDurationSec)
-        let inAnomaly = retrySpans.contains { sec >= $0.startSec && sec <= $0.endSec }
-            || waitSpans.contains { sec >= $0.startSec && sec <= $0.endSec }
-
-        if inAnomaly && !wasInsideAnomaly {
-            wasInsideAnomaly = true
-            lastScrubBucket = bucket
-            CraftEngine.shared.perform(.chronometerPin, enabled: hapticsEnabled)
-        } else {
-            wasInsideAnomaly = inAnomaly
-            if bucket != lastScrubBucket {
-                lastScrubBucket = bucket
-                CraftEngine.shared.perform(.chronometerCrown, enabled: hapticsEnabled)
-            }
-        }
-    }
 }
 
 // MARK: - 04.2 Waterfall & Waste Forensics
@@ -1989,12 +2208,10 @@ private struct ReplayWaterfallDeckView: View {
 
     private var trackRowsStack: some View {
         VStack(spacing: 4) {
-            ForEach(Array(timeline.tracks.enumerated()), id: \.element.id) { idx, track in
+            ForEach(timeline.tracks, id: \.id) { track in
                 ReplayWaterfallTrackRow(
                     track: track,
-                    isFirstRow: idx == 0,
                     totalDurationSec: max(1.0, timeline.totalDurationSec),
-                    progress: progress,
                     liveState: snapshot.trackStates[track.id] ?? .idle,
                     labelColWidth: labelColWidth,
                     costColWidth: costColWidth,
@@ -2002,6 +2219,14 @@ private struct ReplayWaterfallDeckView: View {
                     onSelectTrack: { onSelectTrack(track.id) }
                 )
             }
+        }
+        .overlay {
+            ReplayWaterfallPlayheadOverlay(
+                progress: progress,
+                labelColWidth: labelColWidth,
+                costColWidth: costColWidth,
+                theme: theme
+            )
         }
     }
 
@@ -2042,11 +2267,145 @@ private struct ReplayWaterfallDeckView: View {
     }
 }
 
+/// Lightweight single-layer playhead needle + top index finial overlaid above the entire
+/// waterfall Gantt stack so static diagonal-hatched track strata NEVER redraw at 60fps.
+private struct ReplayWaterfallPlayheadOverlay: View {
+    let progress: Double
+    let labelColWidth: CGFloat
+    let costColWidth: CGFloat
+    let theme: AGYTheme
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Color.clear.frame(width: labelColWidth)
+
+            Canvas { context, size in
+                let cw = size.width
+                let ch = size.height
+                guard cw > 4, ch > 4 else { return }
+
+                let clamped = progress.isFinite ? min(1.0, max(0.0, progress)) : 0.0
+                let px = min(max(1.0, CGFloat(clamped) * cw), cw - 1.0)
+
+                var needle = Path()
+                needle.move(to: CGPoint(x: px, y: 1.0))
+                needle.addLine(to: CGPoint(x: px, y: ch - 1.0))
+                context.stroke(needle, with: .color(theme.accent), lineWidth: 1.25)
+
+                var tri = Path()
+                tri.move(to: CGPoint(x: px - 2.6, y: 1.0))
+                tri.addLine(to: CGPoint(x: px + 2.6, y: 1.0))
+                tri.addLine(to: CGPoint(x: px, y: 4.0))
+                tri.closeSubpath()
+                context.fill(tri, with: .color(theme.accent))
+            }
+
+            Color.clear.frame(width: costColWidth)
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+/// Static diagonal-hatched Gantt bar canvas isolated via `Equatable` so 60fps playhead
+/// motion never invalidates or re-renders strata geometry.
+private struct ReplayWaterfallTrackBarCanvas: View, Equatable {
+    let track: ReplayTrack
+    let totalDurationSec: Double
+    let theme: AGYTheme
+    let loc: Localizer
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.track == rhs.track
+            && lhs.totalDurationSec == rhs.totalDurationSec
+            && lhs.theme.cacheKey == rhs.theme.cacheKey
+            && lhs.loc == rhs.loc
+    }
+
+    var body: some View {
+        Canvas { context, size in
+            let cw = size.width
+            let ch = size.height
+            guard cw > 4, ch > 4 else { return }
+
+            let barInsetY: CGFloat = 1.5
+            let barH = max(4.0, ch - barInsetY * 2.0)
+
+            // Recessed lane trough
+            context.fill(
+                Path(CGRect(x: 0, y: barInsetY, width: cw, height: barH)),
+                with: .color(theme.surface.opacity(theme.isDark ? 0.60 : 0.80))
+            )
+
+            // Draw each segment
+            for seg in track.segments {
+                let x0 = CGFloat(seg.startSec / totalDurationSec) * cw
+                let x1 = CGFloat(seg.endSec / totalDurationSec) * cw
+                let segW = max(2.2, min(cw - x0, x1 - x0))
+                let rect = CGRect(x: x0, y: barInsetY, width: segW, height: barH)
+                var ctx = context
+
+                switch seg.kind {
+                case .work:
+                    context.fill(Path(rect), with: .color(theme.accent.opacity(theme.isDark ? 0.88 : 0.90)))
+
+                case .humanWait:
+                    drawStrataRect(in: &ctx, rect: rect, color: theme.signalAmber, pattern: .diagonalHatch)
+                    context.stroke(Path(rect.insetBy(dx: 0.4, dy: 0.4)), with: .color(theme.signalAmber.opacity(0.85)), lineWidth: 0.8)
+                    if segW >= 54 {
+                        drawBarPill(in: &context, rect: rect, text: loc("replayHumanWaitBar"), tint: theme.signalAmber)
+                    }
+
+                case .retryLoop:
+                    drawStrataRect(in: &ctx, rect: rect, color: theme.signalRed, pattern: .diagonalHatch)
+                    context.stroke(Path(rect.insetBy(dx: 0.4, dy: 0.4)), with: .color(theme.signalRed.opacity(0.92)), lineWidth: 0.85)
+                    if segW >= 44 {
+                        let label = seg.errorCount > 0
+                            ? "\(loc("replayLegendRetry")) ×\(seg.errorCount)"
+                            : loc("replayLegendRetry")
+                        drawBarPill(in: &context, rect: rect, text: label, tint: theme.signalRed)
+                    }
+
+                case .verify:
+                    context.fill(Path(rect), with: .color(replayVerifyColor(theme).opacity(theme.isDark ? 0.78 : 0.84)))
+                    if segW >= 42 {
+                        let vText = Text(loc("replayVerifyBar"))
+                            .font(.system(size: 6.2, weight: .semibold, design: .monospaced))
+                            .tracking(0.4)
+                            .foregroundColor(theme.isDark ? theme.canvas : Color.white)
+                        context.draw(vText, at: CGPoint(x: rect.midX, y: rect.midY))
+                    }
+                }
+            }
+        }
+    }
+
+    private func drawBarPill(
+        in context: inout GraphicsContext,
+        rect: CGRect,
+        text: String,
+        tint: Color
+    ) {
+        let pillW = min(rect.width - 6, CGFloat(text.count) * 4.3 + 8)
+        let pillH = min(rect.height - 3, 9.5)
+        guard pillW >= 24, pillH >= 7 else { return }
+        let pillRect = CGRect(
+            x: rect.midX - pillW * 0.5,
+            y: rect.midY - pillH * 0.5,
+            width: pillW,
+            height: pillH
+        )
+        context.fill(Path(pillRect), with: .color(theme.isDark ? theme.canvas.opacity(0.92) : theme.surfaceRaised.opacity(0.95)))
+        let label = Text(text)
+            .font(.system(size: 6.0, weight: .bold, design: .monospaced))
+            .tracking(0.3)
+            .foregroundColor(tint)
+        context.draw(label, at: CGPoint(x: pillRect.midX, y: pillRect.midY))
+    }
+}
+
 private struct ReplayWaterfallTrackRow: View {
     let track: ReplayTrack
-    let isFirstRow: Bool
     let totalDurationSec: Double
-    let progress: Double
     let liveState: ReplayTrackLiveState
     let labelColWidth: CGFloat
     let costColWidth: CGFloat
@@ -2055,6 +2414,7 @@ private struct ReplayWaterfallTrackRow: View {
 
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
+    @Environment(\.telemetryPanelVisible) private var isPanelVisible
     @State private var hovering = false
 
     private var hasRetryWaste: Bool { track.retryWasteUSD > 0.0001 || track.retryCount > 0 }
@@ -2093,81 +2453,17 @@ private struct ReplayWaterfallTrackRow: View {
             .contentShape(Rectangle())
             .onTapGesture { onSelectTrack() }
 
-            // Interactive Gantt Bar Canvas
+            // Interactive Static Gantt Bar Canvas (playhead is overlaid once across the whole stack)
             GeometryReader { geo in
                 let w = geo.size.width
 
-                Canvas { context, size in
-                    let cw = size.width
-                    let ch = size.height
-                    guard cw > 4, ch > 4 else { return }
-
-                    let barInsetY: CGFloat = 1.5
-                    let barH = max(4.0, ch - barInsetY * 2.0)
-
-                    // Recessed lane trough
-                    context.fill(
-                        Path(CGRect(x: 0, y: barInsetY, width: cw, height: barH)),
-                        with: .color(theme.surface.opacity(theme.isDark ? 0.60 : 0.80))
-                    )
-
-                    // Draw each segment
-                    for seg in track.segments {
-                        let x0 = CGFloat(seg.startSec / totalDurationSec) * cw
-                        let x1 = CGFloat(seg.endSec / totalDurationSec) * cw
-                        let segW = max(2.2, min(cw - x0, x1 - x0))
-                        let rect = CGRect(x: x0, y: barInsetY, width: segW, height: barH)
-                        var ctx = context
-
-                        switch seg.kind {
-                        case .work:
-                            context.fill(Path(rect), with: .color(theme.accent.opacity(theme.isDark ? 0.88 : 0.90)))
-
-                        case .humanWait:
-                            drawStrataRect(in: &ctx, rect: rect, color: theme.signalAmber, pattern: .diagonalHatch)
-                            context.stroke(Path(rect.insetBy(dx: 0.4, dy: 0.4)), with: .color(theme.signalAmber.opacity(0.85)), lineWidth: 0.8)
-                            if segW >= 54 {
-                                drawBarPill(in: &context, rect: rect, text: loc("replayHumanWaitBar"), tint: theme.signalAmber)
-                            }
-
-                        case .retryLoop:
-                            drawStrataRect(in: &ctx, rect: rect, color: theme.signalRed, pattern: .diagonalHatch)
-                            context.stroke(Path(rect.insetBy(dx: 0.4, dy: 0.4)), with: .color(theme.signalRed.opacity(0.92)), lineWidth: 0.85)
-                            if segW >= 44 {
-                                let label = seg.errorCount > 0
-                                    ? "\(loc("replayLegendRetry")) ×\(seg.errorCount)"
-                                    : loc("replayLegendRetry")
-                                drawBarPill(in: &context, rect: rect, text: label, tint: theme.signalRed)
-                            }
-
-                        case .verify:
-                            context.fill(Path(rect), with: .color(replayVerifyColor(theme).opacity(theme.isDark ? 0.78 : 0.84)))
-                            if segW >= 42 {
-                                let vText = Text(loc("replayVerifyBar"))
-                                    .font(.system(size: 6.2, weight: .semibold, design: .monospaced))
-                                    .tracking(0.4)
-                                    .foregroundColor(theme.isDark ? theme.canvas : Color.white)
-                                context.draw(vText, at: CGPoint(x: rect.midX, y: rect.midY))
-                            }
-                        }
-                    }
-
-                    // Slicing Vertical Cobalt Playhead Line across every track
-                    let px = min(max(1.0, CGFloat(progress) * cw), cw - 1.0)
-                    var needle = Path()
-                    needle.move(to: CGPoint(x: px, y: 0))
-                    needle.addLine(to: CGPoint(x: px, y: ch))
-                    context.stroke(needle, with: .color(theme.accent), lineWidth: 1.25)
-
-                    if isFirstRow {
-                        var tri = Path()
-                        tri.move(to: CGPoint(x: px - 2.6, y: 0))
-                        tri.addLine(to: CGPoint(x: px + 2.6, y: 0))
-                        tri.addLine(to: CGPoint(x: px, y: 3.0))
-                        tri.closeSubpath()
-                        context.fill(tri, with: .color(theme.accent))
-                    }
-                }
+                ReplayWaterfallTrackBarCanvas(
+                    track: track,
+                    totalDurationSec: totalDurationSec,
+                    theme: theme,
+                    loc: loc
+                )
+                .equatable()
                 .contentShape(Rectangle())
                 .onTapGesture(coordinateSpace: .local) { pt in
                     guard w > 1 else { return }
@@ -2192,33 +2488,16 @@ private struct ReplayWaterfallTrackRow: View {
             hovering = inside
             PointingCursorCoordinator.shared.setPointing(inside, token: "replay-track-\(track.id)")
         }
+        .onChange(of: isPanelVisible) { visible in
+            if !visible {
+                hovering = false
+                PointingCursorCoordinator.shared.setPointing(false, token: "replay-track-\(track.id)")
+            }
+        }
         .onDisappear {
             hovering = false
             PointingCursorCoordinator.shared.setPointing(false, token: "replay-track-\(track.id)")
         }
-    }
-
-    private func drawBarPill(
-        in context: inout GraphicsContext,
-        rect: CGRect,
-        text: String,
-        tint: Color
-    ) {
-        let pillW = min(rect.width - 6, CGFloat(text.count) * 4.3 + 8)
-        let pillH = min(rect.height - 3, 9.5)
-        guard pillW >= 24, pillH >= 7 else { return }
-        let pillRect = CGRect(
-            x: rect.midX - pillW * 0.5,
-            y: rect.midY - pillH * 0.5,
-            width: pillW,
-            height: pillH
-        )
-        context.fill(Path(pillRect), with: .color(theme.isDark ? theme.canvas.opacity(0.92) : theme.surfaceRaised.opacity(0.95)))
-        let label = Text(text)
-            .font(.system(size: 6.0, weight: .bold, design: .monospaced))
-            .tracking(0.3)
-            .foregroundColor(tint)
-        context.draw(label, at: CGPoint(x: pillRect.midX, y: pillRect.midY))
     }
 }
 
@@ -2376,6 +2655,7 @@ private struct ReplayStepperBox: View {
     let onTap: () -> Void
 
     @Environment(\.agyTheme) private var theme
+    @Environment(\.telemetryPanelVisible) private var isPanelVisible
     @State private var hovering = false
 
     var body: some View {
@@ -2391,9 +2671,24 @@ private struct ReplayStepperBox: View {
             .overlay(Rectangle().stroke(enabled && hovering ? theme.accent.opacity(0.7) : theme.hairlineStrong.opacity(enabled ? 0.8 : 0.35), lineWidth: 0.75))
             .contentShape(Rectangle())
             .help(helpText)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(helpText)
+            .accessibilityAddTraits(.isButton)
             .onHover { inside in
                 hovering = inside && enabled
                 PointingCursorCoordinator.shared.setPointing(inside && enabled, token: token)
+            }
+            .onChange(of: enabled) { isEnabled in
+                if !isEnabled {
+                    hovering = false
+                    PointingCursorCoordinator.shared.setPointing(false, token: token)
+                }
+            }
+            .onChange(of: isPanelVisible) { visible in
+                if !visible {
+                    hovering = false
+                    PointingCursorCoordinator.shared.setPointing(false, token: token)
+                }
             }
             .onDisappear {
                 hovering = false
@@ -2414,6 +2709,7 @@ private struct ReplayTransportBox<Content: View>: View {
     let content: () -> Content
 
     @Environment(\.agyTheme) private var theme
+    @Environment(\.telemetryPanelVisible) private var isPanelVisible
     @State private var hovering = false
 
     var body: some View {
@@ -2434,9 +2730,18 @@ private struct ReplayTransportBox<Content: View>: View {
             )
             .contentShape(Rectangle())
             .help(helpText)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(helpText)
+            .accessibilityAddTraits(isActive ? [.isButton, .isSelected] : .isButton)
             .onHover { inside in
                 hovering = inside
                 PointingCursorCoordinator.shared.setPointing(inside, token: token)
+            }
+            .onChange(of: isPanelVisible) { visible in
+                if !visible {
+                    hovering = false
+                    PointingCursorCoordinator.shared.setPointing(false, token: token)
+                }
             }
             .onDisappear {
                 hovering = false

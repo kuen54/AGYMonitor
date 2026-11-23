@@ -75,7 +75,7 @@ enum ProcessRunner {
         }
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout, execute: watchdog)
 
-        let data = outPipe.fileHandleForReading.readDataToEndOfFile()
+        let data = (try? outPipe.fileHandleForReading.readToEnd()) ?? Data()
         task.waitUntilExit()
 
         stateLock.lock()

@@ -214,4 +214,60 @@ struct UsageStateTests {
         #expect(!staleApplied)
         #expect(gate.lastSucceededAt == nil)
     }
+
+    @Test("RefreshQueueState suppresses intermediate .loaded flash when forced follow-up is pending and exposes typed completeAction")
+    func refreshQueuePendingFollowUpHelpers() {
+        var q = RefreshQueueState()
+        let bundle = CurrentMonthBundle(
+            today: samplePeriod(cost: 1.0),
+            week: samplePeriod(cost: 5.0),
+            month: samplePeriod(cost: 10.0),
+            dailyBreakdown: nil,
+            time: nil
+        )
+
+        _ = q.request(force: false)
+        #expect(!q.hasPendingFollowUp)
+        #expect(q.phaseForIntermediateResult(LoadPhase.loaded(bundle)) == .loaded(bundle))
+
+        // User hits ⌘R while scan is running -> follow-up pending
+        _ = q.request(force: true)
+        #expect(q.hasPendingFollowUp)
+        // Intermediate result stays .loading(cached: bundle) so UI never flashes .loaded -> .loading
+        #expect(q.phaseForIntermediateResult(LoadPhase.loaded(bundle)) == .loading(cached: bundle))
+        #expect(q.phaseForIntermediateResult(LoadPhase<CurrentMonthBundle>.failed(.scriptFailed, cached: bundle)) == .loading(cached: bundle))
+
+        // Typed completion reports .runFollowUp(force: true), then .idle
+        #expect(q.completeAction() == .runFollowUp(force: true))
+        #expect(!q.hasPendingFollowUp)
+        #expect(q.phaseForIntermediateResult(LoadPhase.loaded(bundle)) == .loaded(bundle))
+        #expect(q.completeAction() == .idle)
+    }
+
+    @Test("SnapshotFreshnessPolicy and MonthNavigationState reject stale current-month fetches across midnight rollover")
+    func currentMonthFreshnessAcrossMidnightRollover() throws {
+        // Use explicit Gregorian components in local timezone to avoid UTC offset ambiguity across midnight
+        let cal = AppDate.gregorian
+        let nov30Late = try #require(cal.date(from: DateComponents(year: 2026, month: 11, day: 30, hour: 23, minute: 59, second: 55)))
+        let dec01Early = try #require(cal.date(from: DateComponents(year: 2026, month: 12, day: 1, hour: 0, minute: 0, second: 5)))
+        let jan01Next = try #require(cal.date(from: DateComponents(year: 2027, month: 1, day: 1, hour: 0, minute: 0, second: 5)))
+
+        #expect(SnapshotFreshnessPolicy.yearMonthKey(year: 2026, month: 11) == "2026-11")
+        #expect(SnapshotFreshnessPolicy.currentYearMonthKey(now: nov30Late) == "2026-11")
+        #expect(SnapshotFreshnessPolicy.currentYearMonthKey(now: dec01Early) == "2026-12")
+
+        // Same month -> fresh
+        #expect(SnapshotFreshnessPolicy.isFreshCurrentMonthFetch(fetchedYear: 2026, fetchedMonth: 11, now: nov30Late))
+        #expect(SnapshotFreshnessPolicy.isFreshCurrentMonthFetch(fetchedYearMonth: "2026-11", now: nov30Late))
+        #expect(MonthNavigationState.isCurrentMonth(year: 2026, month: 11, now: nov30Late))
+
+        // Midnight month rollover Nov 30 -> Dec 1 -> stale fetch MUST NOT overwrite currentMonthData!
+        #expect(!SnapshotFreshnessPolicy.isFreshCurrentMonthFetch(fetchedYear: 2026, fetchedMonth: 11, now: dec01Early))
+        #expect(!SnapshotFreshnessPolicy.isFreshCurrentMonthFetch(fetchedYearMonth: "2026-11", now: dec01Early))
+        #expect(!MonthNavigationState.isCurrentMonth(year: 2026, month: 11, now: dec01Early))
+
+        // Year rollover Dec 31 -> Jan 1 -> stale
+        #expect(!SnapshotFreshnessPolicy.isFreshCurrentMonthFetch(fetchedYear: 2026, fetchedMonth: 12, now: jan01Next))
+        #expect(SnapshotFreshnessPolicy.isFreshCurrentMonthFetch(fetchedYear: 2027, fetchedMonth: 1, now: jan01Next))
+    }
 }

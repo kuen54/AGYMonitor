@@ -197,4 +197,85 @@ struct QuotaStateTests {
         #expect(!staleRevalAccepted)
         #expect(swr.cachedValue == false)
     }
+
+    @Test("QuotaPhase tracks isRefreshing on .ready during .beginFetch and clears on completion, failure, or logout")
+    func readyRefreshingFlagAndLoadingSemantics() {
+        let t0 = Date(timeIntervalSince1970: 100_000)
+        let retry = t0.addingTimeInterval(120)
+
+        var phase: QuotaPhase<String> = .ready(snapshot: "snap-1", source: .live, updatedAt: t0, notice: .none)
+        #expect(!phase.isLoading)
+        #expect(!phase.isRefreshing)
+
+        // Manual/background refresh while ready keeps snapshot visible AND flips isLoading/isRefreshing true
+        phase = QuotaStateReducer.reduce(phase, event: .beginFetch)
+        #expect(phase.isLoading)
+        #expect(phase.isRefreshing)
+        #expect(phase.snapshot == "snap-1")
+        // Already refreshing -> tab entry gate skips redundant trigger
+        #expect(!QuotaStateReducer.shouldAutoRefreshOnTabEntry(phase: phase, cooldownUntil: nil, now: t0.addingTimeInterval(60)))
+
+        // Successful fetch clears isRefreshing
+        phase = QuotaStateReducer.reduce(phase, event: .fetched("snap-2", source: .live, at: t0.addingTimeInterval(61), notice: .none))
+        #expect(!phase.isLoading)
+        #expect(!phase.isRefreshing)
+        #expect(phase.snapshot == "snap-2")
+
+        // Refreshing -> stale network failure clears isRefreshing while keeping snapshot + error notice
+        phase = QuotaStateReducer.reduce(phase, event: .beginFetch)
+        #expect(phase.isRefreshing)
+        phase = QuotaStateReducer.reduce(phase, event: .fetchFailed(.rateLimited, retryAt: retry, at: t0.addingTimeInterval(70)))
+        #expect(!phase.isRefreshing)
+        #expect(!phase.isLoading)
+        #expect(phase.error == .rateLimited)
+        #expect(phase.retryAt == retry)
+
+        // Cooldown expiry preserves isRefreshing if a refresh was started
+        phase = QuotaStateReducer.reduce(phase, event: .beginFetch)
+        #expect(phase.isRefreshing)
+        phase = QuotaStateReducer.reduce(phase, event: .cooldownExpired(now: retry))
+        #expect(phase.error == nil)
+        #expect(phase.isRefreshing)
+
+        // Logout clears everything to .noAccount
+        phase = QuotaStateReducer.reduce(phase, event: .tokenPresenceChanged(false))
+        #expect(phase == .noAccount)
+        #expect(!phase.isLoading)
+        #expect(!phase.isRefreshing)
+    }
+
+    @Test("QuotaFetchGenerationState prevents in-flight fetch from resurrecting Plan tab after logout or superseding refresh")
+    func fetchGenerationPreventsPostLogoutResurrection() {
+        var genState = QuotaFetchGenerationState()
+        #expect(!genState.hasActiveFetch)
+        #expect(!genState.isCurrent(0))
+
+        // Fetch 1 starts
+        let g1 = genState.beginFetch()
+        #expect(g1 == 1)
+        #expect(genState.hasActiveFetch)
+        #expect(genState.isCurrent(g1))
+
+        // User logs out (.noAccount) while fetch 1 is still in flight
+        genState.invalidate()
+        #expect(!genState.hasActiveFetch)
+        #expect(!genState.isCurrent(g1))
+        let staleAfterLogout = genState.complete(g1)
+        #expect(!staleAfterLogout)
+
+        // User signs back in; fetch 2 starts, then ⌘R starts fetch 3
+        let g2 = genState.beginFetch()
+        let g3 = genState.beginFetch()
+        #expect(g2 < g3)
+        #expect(!genState.isCurrent(g2))
+        let staleSuperseded = genState.complete(g2)
+        #expect(!staleSuperseded)
+        #expect(genState.isCurrent(g3))
+        let currentCompleted = genState.complete(g3)
+        #expect(currentCompleted)
+        // Duplicate completion for g3 is rejected
+        let duplicateCompleted = genState.complete(g3)
+        #expect(!duplicateCompleted)
+        #expect(!genState.hasActiveFetch)
+    }
 }

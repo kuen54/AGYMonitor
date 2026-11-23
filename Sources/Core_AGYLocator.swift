@@ -49,6 +49,22 @@ public enum AGYLocator {
         return result
     }
 
+    // MARK: - Conversation ID safety
+
+    /// True when `id` is a safe single path component (non-empty, no `/`, `\`, `..`, NUL,
+    /// leading `.`, or ASCII control characters).
+    public static func isSafeConversationId(_ id: String) -> Bool {
+        guard !id.isEmpty,
+              !id.hasPrefix("."),
+              !id.contains(".."),
+              !id.contains("/"),
+              !id.contains("\\"),
+              !id.contains("\0") else {
+            return false
+        }
+        return id.unicodeScalars.allSatisfy { $0.value >= 0x20 && $0.value != 0x7F }
+    }
+
     // MARK: - ~/.gemini roots & brain directories
 
     /// `~/.gemini`
@@ -105,7 +121,7 @@ public enum AGYLocator {
         preferredSurface: String? = nil,
         envDataDir: String? = nil
     ) -> [String] {
-        guard !conversationId.isEmpty else { return [] }
+        guard isSafeConversationId(conversationId) else { return [] }
         var orderedBrains: [String] = []
         if let pref = preferredSurface?.trimmingCharacters(in: .whitespacesAndNewlines),
            let surface = AGYSurface(rawValue: pref) {
@@ -119,6 +135,12 @@ public enum AGYLocator {
     /// `<brainDir>/<conversationId>/.system_generated/swarm/members.json`
     public static func swarmMembersPath(brainDir: String, conversationId: String) -> String {
         join(join(join(join(brainDir, conversationId), ".system_generated"), "swarm"), "members.json")
+    }
+
+    /// Subagent descriptors directory for a parent conversation:
+    /// `<brainDir>/<conversationId>/.system_generated/subagents`
+    public static func subagentsDir(brainDir: String, conversationId: String) -> String {
+        join(join(join(brainDir, conversationId), ".system_generated"), "subagents")
     }
 
     // MARK: - CLI session, metadata, SQLite & log paths
@@ -136,6 +158,31 @@ public enum AGYLocator {
     /// `~/.gemini/antigravity-cli/conversation_summaries.db`
     public static func conversationSummariesDBPath(home: String) -> String {
         join(surfaceRoot(home: home, surface: .cli), "conversation_summaries.db")
+    }
+
+    /// All Antigravity surface `conversation_summaries.db` paths (optional `envDataDir`
+    /// override prepended as `.cli`, followed by CLI, Desktop, and IDE), deduplicated
+    /// by standardized path.
+    public static func conversationSummariesDBPaths(
+        home: String,
+        envDataDir: String? = nil
+    ) -> [(surface: AGYSurface, path: String)] {
+        var candidates: [(surface: AGYSurface, path: String)] = []
+        if let env = envDataDir?.trimmingCharacters(in: .whitespacesAndNewlines), !env.isEmpty {
+            candidates.append((.cli, join(env, "conversation_summaries.db")))
+        }
+        for surface in AGYSurface.allCases {
+            candidates.append((surface, join(surfaceRoot(home: home, surface: surface), "conversation_summaries.db")))
+        }
+        var seen = Set<String>()
+        var result: [(surface: AGYSurface, path: String)] = []
+        for entry in candidates where !entry.path.isEmpty {
+            let normalized = (entry.path as NSString).standardizingPath
+            if seen.insert(normalized).inserted {
+                result.append((surface: entry.surface, path: normalized))
+            }
+        }
+        return result
     }
 
     /// `~/.gemini/antigravity-cli/cache/conversation_metadata.json`
@@ -163,6 +210,25 @@ public enum AGYLocator {
         join(annotationsDir(home: home), "\(conversationId).pbtxt")
     }
 
+    /// Candidate `<surfaceRoot>/annotations/<conversationId>.pbtxt` paths across surfaces.
+    public static func candidateAnnotationPaths(
+        home: String,
+        conversationId: String,
+        envDataDir: String? = nil
+    ) -> [String] {
+        guard isSafeConversationId(conversationId) else { return [] }
+        return surfaceRoots(home: home, envDataDir: envDataDir)
+            .map { join(join($0, "annotations"), "\(conversationId).pbtxt") }
+    }
+
+    /// Candidate OAuth credentials JSON paths (`~/.gemini/oauth_creds.json`, then CLI surface).
+    public static func oauthCredsPaths(home: String) -> [String] {
+        [
+            join(geminiRoot(home: home), "oauth_creds.json"),
+            join(surfaceRoot(home: home, surface: .cli), "oauth_creds.json"),
+        ]
+    }
+
     /// `<surfaceRoot>/conversations/<conversationId>.db`
     public static func conversationDBPath(surfaceRoot: String, conversationId: String) -> String {
         join(join(surfaceRoot, "conversations"), "\(conversationId).db")
@@ -174,7 +240,7 @@ public enum AGYLocator {
         conversationId: String,
         envDataDir: String? = nil
     ) -> [String] {
-        guard !conversationId.isEmpty else { return [] }
+        guard isSafeConversationId(conversationId) else { return [] }
         return surfaceRoots(home: home, envDataDir: envDataDir)
             .map { conversationDBPath(surfaceRoot: $0, conversationId: conversationId) }
     }

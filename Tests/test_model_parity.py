@@ -7,7 +7,7 @@ from pathlib import Path
 import plistlib
 import re
 import unittest
-from typing import List, Set
+from typing import Dict, List, Set
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT_PATH = REPO_ROOT / "Resources" / "analyze_usage.py"
@@ -15,6 +15,7 @@ MODEL_CLASS_SWIFT = REPO_ROOT / "Sources" / "Core_ModelClass.swift"
 PACKAGE_SWIFT = REPO_ROOT / "Package.swift"
 INFO_PLIST = REPO_ROOT / "Info.plist"
 QUOTA_SERVICE_SWIFT = REPO_ROOT / "Sources" / "QuotaService.swift"
+LOCALIZATION_SWIFT = REPO_ROOT / "Sources" / "Localization.swift"
 
 
 def _load_analyze_usage():
@@ -67,13 +68,15 @@ class TestCrossLanguageParity(unittest.TestCase):
     def test_version_lockstep(self) -> None:
         with open(INFO_PLIST, "rb") as f:
             plist = plistlib.load(f)
-        plist_version = str(plist["CFBundleShortVersionString"])
-        self.assertEqual(au.__version__, plist_version)
+        short_version = str(plist["CFBundleShortVersionString"])
+        bundle_version = str(plist["CFBundleVersion"])
+        self.assertEqual(short_version, bundle_version)
+        self.assertEqual(au.__version__, short_version)
 
         quota_src = QUOTA_SERVICE_SWIFT.read_text(encoding="utf-8")
         m = re.search(r'CFBundleShortVersionString[^\n]*\?\?\s*"([^"]+)"', quota_src)
         self.assertIsNotNone(m, "Fallback appVersion not found in Sources/QuotaService.swift")
-        self.assertEqual(m.group(1), plist_version)
+        self.assertEqual(m.group(1), short_version)
 
     def test_package_swift_covers_all_sources(self) -> None:
         pkg_text = PACKAGE_SWIFT.read_text(encoding="utf-8")
@@ -106,6 +109,71 @@ class TestCrossLanguageParity(unittest.TestCase):
                 msg=f"{p.name} must use Double, not CGFloat",
             )
 
+    def test_localization_key_and_format_parity(self) -> None:
+        src = LOCALIZATION_SWIFT.read_text(encoding="utf-8")
+        marker = "let i18n: [AppLanguage: [String: String]] = ["
+        self.assertIn(marker, src)
+        body = src.split(marker, 1)[1]
+
+        locale_names = ("en", "zhHans", "zhHant", "ja")
+        locales: Dict[str, Dict[str, str]] = {}
+        current_locale = None
+        locale_start_re = re.compile(r"^\s*\.(en|zhHans|zhHant|ja):\s*\[\s*$")
+        locale_end_re = re.compile(r"^\s*\],\s*$")
+        entry_re = re.compile(r'^\s*"((?:\\.|[^"\\])*)"\s*:\s*"((?:\\.|[^"\\])*)",?\s*$')
+
+        for raw_line in body.splitlines():
+            if current_locale is None:
+                m_start = locale_start_re.match(raw_line)
+                if m_start:
+                    current_locale = m_start.group(1)
+                    self.assertNotIn(current_locale, locales, msg=f"Duplicate locale .{current_locale}")
+                    locales[current_locale] = {}
+                continue
+
+            if locale_end_re.match(raw_line):
+                current_locale = None
+                continue
+
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith("//"):
+                continue
+
+            m_entry = entry_re.match(raw_line)
+            self.assertIsNotNone(
+                m_entry,
+                msg=f"Unparseable Localization.swift line in .{current_locale}: {raw_line!r}",
+            )
+            assert m_entry is not None
+            key, val = m_entry.group(1), m_entry.group(2)
+            self.assertNotIn(key, locales[current_locale], msg=f"Duplicate key {key!r} in .{current_locale}")
+            locales[current_locale][key] = val
+
+        self.assertEqual(set(locales.keys()), set(locale_names))
+        en_map = locales["en"]
+        self.assertGreater(len(en_map), 100)
+
+        spec_re = re.compile(r"%%|%(?:\d+\$)?[-+ #0]*(?:\d+)?(?:\.\d+)?(?:ll|l|h|hh|z|t|j)?[@dDuUxXoOfeEgGcCsSp]")
+        for loc in ("zhHans", "zhHant", "ja"):
+            loc_map = locales[loc]
+            self.assertEqual(
+                set(loc_map.keys()),
+                set(en_map.keys()),
+                msg=(
+                    f"Key mismatch in .{loc}: "
+                    f"missing={sorted(set(en_map.keys()) - set(loc_map.keys()))}, "
+                    f"extra={sorted(set(loc_map.keys()) - set(en_map.keys()))}"
+                ),
+            )
+            for key, en_val in en_map.items():
+                en_specs = spec_re.findall(en_val)
+                loc_specs = spec_re.findall(loc_map[key])
+                self.assertEqual(
+                    loc_specs,
+                    en_specs,
+                    msg=f"Format specifier mismatch for key {key!r} in .{loc}: {loc_specs!r} != {en_specs!r}",
+                )
+
     def test_app_layer_uses_core_sources_no_split_brain(self) -> None:
         app_sources = "\n".join(
             p.read_text(encoding="utf-8")
@@ -118,6 +186,9 @@ class TestCrossLanguageParity(unittest.TestCase):
             "SessionLogic.parseConversationMetadataJSON",
             "SessionLogic.parseSwarmMembersJSON",
             "SessionLogic.resolveLiveSessionStatus",
+            "SessionLogic.extractPresenceLockId",
+            "SessionLogic.mergeConversationSummaryRows",
+            "SessionLogic.parseSubagentRecordJSON",
             "TranscriptParse.parseAnnotationTitle",
             "NotchMachine.reduce",
             "NotchLiveWingMachine",
@@ -125,9 +196,17 @@ class TestCrossLanguageParity(unittest.TestCase):
             "QuotaPaceLogic",
             "RefreshQueueState",
             "MenuBarAnchorState",
+            "MenuBarPanelMachine",
             "InstrumentMath",
             "TelemetryVisualMode",
             "UpdateCheckerMachine",
+            "LiveTPSTracker",
+            "ReplayStoreMachine",
+            "ReplayPlaybackMachine",
+            "HapticCadenceMachine",
+            "AcousticEngineLifecycleMachine",
+            "BlueprintWallpaperMachine",
+            "SpecimenExporterMachine",
         ]
         for sym in required_core_calls:
             self.assertIn(sym, app_sources, msg=f"Split-brain check failed: {sym} not wired into app layer")

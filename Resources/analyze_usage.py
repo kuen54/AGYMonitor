@@ -35,17 +35,19 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 import fnmatch
 import json
+import math
 import os
 from pathlib import Path
 import re
 import sqlite3
 import sys
+import tempfile
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 import urllib.parse
 import urllib.request
 
-__version__ = "1.9.0"
+__version__ = "2.0.0"
 
 # ---------------------------------------------------------------------------
 # Antigravity surfaces & cache paths
@@ -326,11 +328,10 @@ def _load_scan_cache() -> Dict[str, Any]:
 
 
 def _write_scan_cache(files: Dict[str, Any]) -> None:
-    """Atomic write (tmp file in same directory + os.replace)."""
+    """Atomic write (NamedTemporaryFile in same directory + os.replace)."""
     tmp_path: Optional[Path] = None
     try:
         SCAN_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = SCAN_CACHE_PATH.with_name(f"{SCAN_CACHE_PATH.name}.tmp{os.getpid()}")
         doc = {
             "format_version": SCAN_CACHE_FORMAT_VERSION,
             "script_version": __version__,
@@ -338,8 +339,16 @@ def _write_scan_cache(files: Dict[str, Any]) -> None:
             "gap_minutes": _GAP_MINUTES,
             "files": files,
         }
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(doc, f)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=str(SCAN_CACHE_PATH.parent),
+            prefix=f"{SCAN_CACHE_PATH.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as f:
+            tmp_path = Path(f.name)
+            json.dump(doc, f, allow_nan=False)
         os.replace(tmp_path, SCAN_CACHE_PATH)
     except Exception:
         if tmp_path is not None:
@@ -354,6 +363,7 @@ def _write_scan_cache(files: Dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 def _fetch_litellm_pricing(offline: bool = False) -> Optional[Dict[str, Any]]:
     """Fetch pricing JSON from LiteLLM GitHub with 24h local cache in ~/Library/Caches/AGYMonitor/."""
+    cache_corrupt = False
     if PRICING_CACHE_PATH.exists():
         try:
             age = time.time() - PRICING_CACHE_PATH.stat().st_mtime
@@ -362,15 +372,16 @@ def _fetch_litellm_pricing(offline: bool = False) -> Optional[Dict[str, Any]]:
                     cached = json.load(f)
                 if isinstance(cached, dict):
                     return cached
+                cache_corrupt = True
         except Exception:
-            pass
+            cache_corrupt = True
 
     if offline or os.environ.get("AGY_OFFLINE_PRICING") == "1":
         return None
 
-    # Cold-start negative backoff: avoid 5s network timeout on every scan while offline.
+    # Cold-start / corrupt-cache negative backoff: avoid 5s network timeout on every scan while offline.
     backoff_path = PRICING_CACHE_PATH.with_name(f"{PRICING_CACHE_PATH.name}.backoff")
-    if not PRICING_CACHE_PATH.exists() and backoff_path.exists():
+    if (not PRICING_CACHE_PATH.exists() or cache_corrupt) and backoff_path.exists():
         try:
             if (time.time() - backoff_path.stat().st_mtime) < 3600:
                 return None
@@ -383,7 +394,8 @@ def _fetch_litellm_pricing(offline: bool = False) -> Optional[Dict[str, Any]]:
             headers={"User-Agent": f"AGYMonitor/{__version__}"},
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+            raw_bytes = resp.read(16 * 1024 * 1024)
+        data = json.loads(raw_bytes.decode("utf-8"))
         if not isinstance(data, dict):
             return None
     except Exception:
@@ -400,20 +412,31 @@ def _fetch_litellm_pricing(offline: bool = False) -> Optional[Dict[str, Any]]:
                     return stale
             except Exception:
                 pass
-        else:
+            # Corrupt or non-dict pricing cache file: remove best-effort so `.backoff` takes effect.
             try:
-                backoff_path.parent.mkdir(parents=True, exist_ok=True)
-                backoff_path.write_text("1", encoding="utf-8")
+                PRICING_CACHE_PATH.unlink(missing_ok=True)
             except Exception:
                 pass
+        try:
+            backoff_path.parent.mkdir(parents=True, exist_ok=True)
+            backoff_path.write_text("1", encoding="utf-8")
+        except Exception:
+            pass
         return None
 
     tmp_path: Optional[Path] = None
     try:
         PRICING_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = PRICING_CACHE_PATH.with_name(f"{PRICING_CACHE_PATH.name}.tmp{os.getpid()}")
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(data, f)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=str(PRICING_CACHE_PATH.parent),
+            prefix=f"{PRICING_CACHE_PATH.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as f:
+            tmp_path = Path(f.name)
+            json.dump(_sanitize_json_value(data), f, allow_nan=False)
         os.replace(tmp_path, PRICING_CACHE_PATH)
         try:
             backoff_path.unlink(missing_ok=True)
@@ -433,7 +456,25 @@ def _per_token_to_per_million(cost_per_token: float) -> float:
 
 
 def _is_num(val: Any) -> bool:
-    return isinstance(val, (int, float)) and not isinstance(val, bool)
+    if isinstance(val, bool) or not isinstance(val, (int, float)):
+        return False
+    try:
+        return math.isfinite(val)
+    except OverflowError:
+        return False
+
+
+def _sanitize_json_value(obj: Any) -> Any:
+    """Recursively replace any non-finite float (NaN/Inf) with 0.0 for strict JSON."""
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else 0.0
+    if isinstance(obj, dict):
+        return {k: _sanitize_json_value(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_json_value(v) for v in obj]
+    if isinstance(obj, tuple):
+        return [_sanitize_json_value(v) for v in obj]
+    return obj
 
 
 def _extract_litellm_entry(entry: Any) -> Optional[Dict[str, float]]:
@@ -452,12 +493,15 @@ def _extract_litellm_entry(entry: Any) -> Optional[Dict[str, float]]:
     cr = entry.get("cache_read_input_token_cost")
     if not _is_num(cr) or cr < 0:
         cr = inp * 0.1
-    return {
+    res = {
         "input":       _per_token_to_per_million(float(inp)),
         "output":      _per_token_to_per_million(float(out)),
         "cache_write": _per_token_to_per_million(float(cw)),
         "cache_read":  _per_token_to_per_million(float(cr)),
     }
+    if not all(math.isfinite(v) for v in res.values()):
+        return None
+    return res
 
 
 def _apply_standard_list_floor(
@@ -1309,6 +1353,8 @@ def _nonneg_int(val: Any) -> int:
     if isinstance(val, int):
         return val if val > 0 else 0
     if isinstance(val, float):
+        if not math.isfinite(val):
+            return 0
         iv = int(val)
         return iv if iv > 0 else 0
     if isinstance(val, str):
@@ -2099,7 +2145,7 @@ def build_json_payload(
     if not include_sessions:
         del result["sessions"]
 
-    return result
+    return _sanitize_json_value(result)
 
 
 def print_json(
@@ -2107,12 +2153,14 @@ def print_json(
     include_sessions: bool = True,
     time_days: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> None:
-    payload = build_json_payload(
-        sessions,
-        include_sessions=include_sessions,
-        time_days=time_days,
+    payload = _sanitize_json_value(
+        build_json_payload(
+            sessions,
+            include_sessions=include_sessions,
+            time_days=time_days,
+        )
     )
-    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str, allow_nan=False))
 
 
 def print_detail(sessions: Dict[str, Dict[str, Any]], range_label: str) -> None:
@@ -2362,9 +2410,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     data_dirs = [Path(p) for p in args.data_dir] if args.data_dir else None
 
     if args.time_year is not None:
-        if not (1970 <= args.time_year <= 9999):
+        if not (1970 <= args.time_year <= 9998):
             print(
-                f"Error: --time-year must be within 1970-9999 (got {args.time_year})",
+                f"Error: --time-year must be within 1970-9998 (got {args.time_year})",
                 file=sys.stderr,
             )
             sys.exit(2)
@@ -2377,13 +2425,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             data_dirs=data_dirs,
             load_workspaces=False,
         )
-        out = {
+        out = _sanitize_json_value({
             "script_version": __version__,
             "year": y,
             "gap_minutes": _GAP_MINUTES,
             "days": {day: rec["total_seconds"] for day, rec in time_days.items()},
-        }
-        print(json.dumps(out, indent=2, ensure_ascii=False))
+        })
+        print(json.dumps(out, indent=2, ensure_ascii=False, allow_nan=False))
         return 0
 
     load_pricing(offline=args.offline)

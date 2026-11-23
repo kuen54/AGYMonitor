@@ -146,4 +146,52 @@ struct UsageParserTests {
         #expect(yearParsed.gapMinutes == 10)
         #expect(yearParsed.days == ["2026-11-16": 5400, "2026-11-17": 1, "2026-11-18": 0])
     }
+
+    @Test("UsageParser rejects 'unknown' and malformed calendar keys across daily breakdown and time parsers")
+    func rejectsUnknownAndMalformedDayKeys() throws {
+        let modelPayload: [String: Any] = [
+            "carbon": ["input_tokens": 100, "output_tokens": 20, "cache_read": 0, "cache_write": 0, "messages": 1, "cost": 1.0]
+        ]
+        let json: [String: Any] = [
+            "daily_breakdown": [
+                "unknown": ["total_cost": 5.0, "models": modelPayload],
+                "2026-11-xx": ["total_cost": 5.0, "models": modelPayload],
+                "2026-02-30": ["total_cost": 5.0, "models": modelPayload],
+                "9999-01-01": ["total_cost": 5.0, "models": modelPayload],
+                "2026-11-01": ["total_cost": 2.0, "models": modelPayload],
+            ],
+            "time": [
+                "gap_minutes": 10,
+                "days": [
+                    "unknown": ["intervals": [[0, 60, "carbon"]], "total_seconds": 60],
+                    "2026-11-31": ["intervals": [[0, 60, "carbon"]], "total_seconds": 60],
+                    "2026-11-01": ["intervals": [[0, 60, "carbon"]], "total_seconds": 60],
+                ]
+            ],
+        ]
+
+        // Neither unknown nor malformed keys enter daily breakdown or cause duplicate day==1 entries
+        let all = try #require(UsageParser.parseAllDailyBreakdown(json))
+        #expect(all.map(\.dateString) == ["2026-11-01"])
+        #expect(all.map(\.day) == [1])
+
+        let nov = try #require(UsageParser.parseDailyBreakdown(json, yearMonth: "2026-11"))
+        #expect(nov.map(\.dateString) == ["2026-11-01"])
+        #expect(UsageParser.parseDailyBreakdown(json, yearMonth: "unknown") == nil)
+
+        let time = try #require(UsageParser.parseTimeSection(json))
+        #expect(Array(time.days.keys) == ["2026-11-01"])
+
+        let yearJSON: [String: Any] = [
+            "year": 2026,
+            "gap_minutes": 10,
+            "days": [
+                "unknown": 120,
+                "2026-02-29": 300,
+                "2026-11-01": 600,
+            ]
+        ]
+        let yearTime = try #require(UsageParser.parseYearTime(yearJSON))
+        #expect(yearTime.days == ["2026-11-01": 600])
+    }
 }

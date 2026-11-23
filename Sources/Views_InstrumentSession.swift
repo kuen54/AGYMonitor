@@ -112,10 +112,19 @@ struct AgentTelemetryRadarView: View {
     private func liveTPSTooltip(_ snapshot: LiveTPSSnapshot) -> String {
         let cur = LiveTPSTracker.formatCompactTPS(snapshot.currentTPS)
         let peak = LiveTPSTracker.formatCompactTPS(snapshot.peakTPS)
+        var parts: [String] = [loc("liveTpsHelp")]
         if snapshot.peakTPS >= 0.5 {
-            return "\(loc("liveTpsHelp")) · \(cur) (\(loc("peakTag")) \(peak))"
+            parts.append("\(cur) (\(loc("peakTag")) \(peak))")
+        } else {
+            parts.append(cur)
         }
-        return "\(loc("liveTpsHelp")) · \(cur)"
+        if snapshot.activeSubagentCount > 0 {
+            let subPart = snapshot.activeSubagentCount == 1
+                ? loc("liveTpsSubagentSuffixOne")
+                : String(format: loc("liveTpsSubagentSuffixFmt"), snapshot.activeSubagentCount)
+            parts.append(subPart)
+        }
+        return parts.joined(separator: " · ")
     }
 
     private struct RadarNodeKey: Hashable {

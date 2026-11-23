@@ -337,14 +337,14 @@ public enum InstrumentMath {
             return TopographicRidgeResult(layers: [], dayAnchors: [], peakIndex: nil, peakValue: 0, maxValue: 0)
         }
 
-        let sanitized = dailyValues.map { max(0.0, $0) }
+        let sanitized = dailyValues.map { ($0.isFinite && $0 > 0.0) ? $0 : 0.0 }
         var maxIdx: Int? = nil
         var maxVal: Double = 0
         for (i, v) in sanitized.enumerated() where v > maxVal {
             maxVal = v
             maxIdx = i
         }
-        guard maxVal > 0 else {
+        guard maxVal.isFinite, maxVal > 0 else {
             return TopographicRidgeResult(layers: [], dayAnchors: [], peakIndex: nil, peakValue: 0, maxValue: 0)
         }
 
@@ -449,12 +449,13 @@ public enum InstrumentMath {
         items: [(id: String, value: Double)],
         minSliceFraction: Double = 0.06
     ) -> [BoreholeSlice] {
-        let positive = items.filter { $0.value > 0 }
+        let positive = items.filter { $0.value.isFinite && $0.value > 0 }
         let total = positive.reduce(0.0) { $0 + $1.value }
-        guard !positive.isEmpty, total > 0 else { return [] }
+        guard !positive.isEmpty, total.isFinite, total > 0 else { return [] }
 
+        let safeMin = minSliceFraction.isFinite ? minSliceFraction : 0.0
         let count = positive.count
-        let clampedMin = min(max(0.0, minSliceFraction), 0.85 / Double(count))
+        let clampedMin = min(max(0.0, safeMin), 0.85 / Double(count))
         let rawFractions = positive.map { $0.value / total }
 
         let remainder = max(0.0, 1.0 - Double(count) * clampedMin)
@@ -610,9 +611,11 @@ public enum InstrumentMath {
         guard count > 0 else { return [] }
         if count == 1 { return [(0.0, 1.0)] }
 
-        let totalGap = gap * Double(count - 1)
+        let safeGap = gap.isFinite ? max(0.0, gap) : 0.0
+        let safeMinSpan = minSpan.isFinite ? max(0.0, minSpan) : 0.0
+        let totalGap = safeGap * Double(count - 1)
         let usable = max(0.25, 1.0 - totalGap)
-        let effMin = min(minSpan, (usable * 0.85) / Double(count))
+        let effMin = min(safeMinSpan, (usable * 0.85) / Double(count))
         let remainder = max(0.0, usable - Double(count) * effMin)
         let sum = Double(max(1, values.reduce(0, +)))
 
@@ -623,7 +626,7 @@ public enum InstrumentMath {
             let y0 = cursor
             let y1 = (i == count - 1) ? 1.0 : min(1.0, cursor + h)
             spans.append((y0, y1))
-            cursor = y1 + gap
+            cursor = y1 + safeGap
         }
         return spans
     }
@@ -631,8 +634,10 @@ public enum InstrumentMath {
     // MARK: 2b. Density Matrix Quantizer
 
     public static func densityLevel(value: Double, maxValue: Double) -> Int {
-        guard value > 0, maxValue > 0 else { return 0 }
-        let ratio = min(1.0, max(0.0, value / maxValue))
+        guard value.isFinite, maxValue.isFinite, value > 0, maxValue > 0 else { return 0 }
+        let raw = value / maxValue
+        guard raw.isFinite else { return 0 }
+        let ratio = min(1.0, max(0.0, raw))
         return 1 + min(4, Int(floor(ratio * 4.999)))
     }
 
@@ -681,8 +686,11 @@ public enum InstrumentMath {
         ringStep: Double,
         weekendGap: Double = 0.0
     ) -> Double {
-        let base = outerRadius - Double(dayIndex) * ringStep
-        return dayIndex >= 5 ? base - weekendGap : base
+        let safeOuter = outerRadius.isFinite ? outerRadius : 0.0
+        let safeStep = ringStep.isFinite ? ringStep : 0.0
+        let safeGap = weekendGap.isFinite ? weekendGap : 0.0
+        let base = safeOuter - Double(dayIndex) * safeStep
+        return dayIndex >= 5 ? base - safeGap : base
     }
 
     public static func hitTestPolarArc(
@@ -694,7 +702,9 @@ public enum InstrumentMath {
         weekendGap: Double = 0.0,
         arcs: [PolarArc]
     ) -> PolarArc? {
-        guard ringCount > 0, ringStep > 0 else { return nil }
+        guard dx.isFinite, dy.isFinite,
+              outerRadius.isFinite, ringStep.isFinite, weekendGap.isFinite,
+              ringCount > 0, ringStep > 0 else { return nil }
         let r = hypot(dx, dy)
         let tolerance = ringStep * 0.55
 
@@ -1151,6 +1161,7 @@ public enum InstrumentMath {
     public static let orbitalEndAngle: Double = 2.25 * Double.pi
 
     public static func orbitalAngleRad(fraction: Double) -> Double {
+        guard fraction.isFinite else { return orbitalStartAngle }
         let clamped = min(1.0, max(0.0, fraction))
         return orbitalStartAngle + clamped * 1.5 * Double.pi
     }
@@ -1160,12 +1171,14 @@ public enum InstrumentMath {
         paceExpectedRemainingFraction: Double?,
         isOverPaceWarning: Bool
     ) -> OrbitalGaugeAngles {
-        let remEnd = orbitalAngleRad(fraction: remainingFraction)
-        let paceAng = paceExpectedRemainingFraction.map { orbitalAngleRad(fraction: $0) }
+        let safeRem = remainingFraction.isFinite ? remainingFraction : 0.0
+        let safePace = paceExpectedRemainingFraction.flatMap { $0.isFinite ? $0 : nil }
+        let remEnd = orbitalAngleRad(fraction: safeRem)
+        let paceAng = safePace.map { orbitalAngleRad(fraction: $0) }
         let deficit: Bool = {
             if isOverPaceWarning { return true }
-            if let exp = paceExpectedRemainingFraction {
-                return remainingFraction < exp - 0.005
+            if let exp = safePace {
+                return safeRem < exp - 0.005
             }
             return false
         }()
@@ -1309,7 +1322,7 @@ public enum InstrumentMath {
         normalizedY: Double,
         slices: [BoreholeSlice]
     ) -> String? {
-        guard !slices.isEmpty, normalizedY >= 0.0, normalizedY <= 1.0 else { return nil }
+        guard !slices.isEmpty, normalizedY.isFinite, normalizedY >= 0.0, normalizedY <= 1.0 else { return nil }
         for (idx, slice) in slices.enumerated() {
             let isLast = (idx == slices.count - 1)
             if normalizedY >= slice.yStart && (normalizedY < slice.yEnd || (isLast && normalizedY <= slice.yEnd)) {
@@ -1327,10 +1340,11 @@ public enum InstrumentMath {
         maxDistance: Double = 11.0
     ) -> String? {
         let count = min(centers.count, ids.count)
-        guard count > 0, maxDistance > 0 else { return nil }
+        guard count > 0, y.isFinite, maxDistance.isFinite, maxDistance > 0 else { return nil }
         var bestId: String? = nil
         var bestDist = maxDistance
         for i in 0..<count {
+            guard centers[i].isFinite else { continue }
             let d = abs(y - centers[i])
             if d <= bestDist {
                 bestDist = d
@@ -1349,7 +1363,10 @@ public enum InstrumentMath {
         nodes: [RadarNode],
         maxRadius: Double = 18.0
     ) -> RadarNode? {
-        guard width > 0, height > 0, maxRadius > 0, !nodes.isEmpty else { return nil }
+        guard x.isFinite, y.isFinite,
+              width.isFinite, height.isFinite, maxRadius.isFinite,
+              width > 0, height > 0, maxRadius > 0,
+              !nodes.isEmpty else { return nil }
         var best: RadarNode? = nil
         var bestDist = maxRadius
         for node in nodes {
@@ -1373,10 +1390,15 @@ public enum InstrumentMath {
         height: Double,
         padY: Double
     ) -> (col: Int, row: Int, normX: Double, normY: Double)? {
-        guard width > 0, height > 0 else { return nil }
+        guard x.isFinite, y.isFinite, width.isFinite, height.isFinite, padY.isFinite,
+              width > 0, height > 0 else { return nil }
         let innerH = max(1.0, height - padY * 2.0)
-        let nx = min(0.9999, max(0.0, x / width))
-        let ny = min(0.9999, max(0.0, (y - padY) / innerH))
+        guard innerH.isFinite else { return nil }
+        let rawNX = x / width
+        let rawNY = (y - padY) / innerH
+        guard rawNX.isFinite, rawNY.isFinite else { return nil }
+        let nx = min(0.9999, max(0.0, rawNX))
+        let ny = min(0.9999, max(0.0, rawNY))
         let col = min(52, max(0, Int(nx * 53.0)))
         let row = min(6, max(0, Int(ny * 7.0)))
         return (col: col, row: row, normX: nx, normY: ny)

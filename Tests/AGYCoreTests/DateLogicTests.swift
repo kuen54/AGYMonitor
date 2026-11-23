@@ -76,4 +76,47 @@ struct DateLogicTests {
         let d3 = try #require(AppDate.parseISO8601("2026-11-16T06:21:04-05:30"))
         #expect(abs(d3.timeIntervalSince(d1)) < 1e-6)
     }
+
+    @Test("isValidDayKey and isValidMonthKey enforce strict Gregorian ASCII bounds")
+    func strictDayAndMonthKeyValidation() {
+        // Valid day keys (including leap years & boundary years)
+        #expect(AppDate.isValidDayKey("1970-01-01"))
+        #expect(AppDate.isValidDayKey("2024-02-29"))
+        #expect(AppDate.isValidDayKey("2000-02-29"))
+        #expect(AppDate.isValidDayKey("2026-11-30"))
+        #expect(AppDate.isValidDayKey("9998-12-31"))
+
+        // Invalid day keys
+        #expect(!AppDate.isValidDayKey("unknown"))
+        #expect(!AppDate.isValidDayKey(""))
+        #expect(!AppDate.isValidDayKey("0001-01-01"))
+        #expect(!AppDate.isValidDayKey("1969-12-31"))
+        #expect(!AppDate.isValidDayKey("9999-01-01"))
+        #expect(!AppDate.isValidDayKey("2026-02-29"))
+        #expect(!AppDate.isValidDayKey("2100-02-29"))
+        #expect(!AppDate.isValidDayKey("2026-11-31"))
+        #expect(!AppDate.isValidDayKey("2026-00-10"))
+        #expect(!AppDate.isValidDayKey("2026-13-01"))
+        #expect(!AppDate.isValidDayKey("2026-11-00"))
+        #expect(!AppDate.isValidDayKey("2026-11-1"))
+        #expect(!AppDate.isValidDayKey("2026-11-01 "))
+        #expect(!AppDate.isValidDayKey("../../etc/p"))
+        #expect(!AppDate.isValidDayKey("٢٠٢٦-١١-٠١"))
+
+        // Valid month keys
+        #expect(AppDate.isValidMonthKey("1970-01"))
+        #expect(AppDate.isValidMonthKey("2026-11"))
+        #expect(AppDate.isValidMonthKey("9998-12"))
+
+        // Invalid month keys
+        #expect(!AppDate.isValidMonthKey("unknown"))
+        #expect(!AppDate.isValidMonthKey(""))
+        #expect(!AppDate.isValidMonthKey("1969-12"))
+        #expect(!AppDate.isValidMonthKey("9999-01"))
+        #expect(!AppDate.isValidMonthKey("2026-00"))
+        #expect(!AppDate.isValidMonthKey("2026-13"))
+        #expect(!AppDate.isValidMonthKey("2026-1"))
+        #expect(!AppDate.isValidMonthKey("2026-11-01"))
+        #expect(!AppDate.isValidMonthKey("2026/11"))
+    }
 }

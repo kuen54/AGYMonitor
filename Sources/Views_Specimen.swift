@@ -71,19 +71,21 @@ struct SpecimenCardSnapshot: Equatable {
         let monthTimeKeys = monthDaysMap.keys.filter { $0.hasPrefix(monthPrefix) }
         let monthSeconds = TimeLogic.totalSeconds(in: monthDaysMap, dayKeys: monthTimeKeys)
 
-        let yearLabel = store.viewingTimeYear
+        let yearLabel = year
+        let yearPrefix = String(format: "%04d-", yearLabel)
         let yearDays: [String: Int] = {
-            if let yd = store.yearTimeDays, !yd.isEmpty {
+            if store.viewingTimeYear == yearLabel,
+               let yd = store.yearTimeDays,
+               !yd.isEmpty {
                 return yd
             }
             var fallback: [String: Int] = [:]
-            for (k, d) in monthDaysMap where d.totalSeconds > 0 {
+            for (k, d) in monthDaysMap where k.hasPrefix(yearPrefix) && d.totalSeconds > 0 {
                 fallback[k] = d.totalSeconds
             }
             return fallback
         }()
 
-        let yearPrefix = String(format: "%04d-", yearLabel)
         let yearSeconds = yearDays.reduce(0) { acc, pair in
             pair.key.hasPrefix(yearPrefix) ? acc + max(0, pair.value) : acc
         }
@@ -98,7 +100,8 @@ struct SpecimenCardSnapshot: Equatable {
             ? Double(monthSeconds) / 3600.0
             : Double(yearSeconds) / 3600.0
         let displayActiveDays = monthActiveDays > 0 ? monthActiveDays : yearActiveDays
-        let streak = TimeLogic.yearSummary(days: yearDays, year: yearLabel).longestStreakDays
+        let yearSummary = TimeLogic.yearSummary(days: yearDays, year: yearLabel)
+        let streak = yearSummary.longestStreakDays
 
         let diurnalProfile = InstrumentMath.buildMonthDiurnalProfile(
             days: monthDaysMap,
@@ -124,10 +127,10 @@ struct SpecimenCardSnapshot: Equatable {
 
         let currentYear = AppDate.gregorian.component(.year, from: now)
         let cutoffKey: String? = (yearLabel == currentYear) ? todayKey : nil
-        let contourField = InstrumentMath.buildYearContourField(
+        let contourField = YearContourFieldCache.field(
             days: yearDays,
             year: yearLabel,
-            levelCount: 12,
+            totalSeconds: yearSummary.totalSeconds,
             cutoffDayKey: cutoffKey
         )
         let monthlyHours = InstrumentMath.yearMonthlyHours(days: yearDays, year: yearLabel)

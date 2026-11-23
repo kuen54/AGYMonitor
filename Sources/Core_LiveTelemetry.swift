@@ -112,14 +112,28 @@ public struct SessionContextSnapshot: Equatable, Sendable {
 
 public struct OutputTokenSample: Equatable, Sendable {
     public let stepIndex: Int
-    /// Epoch seconds (UTC).
+    /// Effective observation timestamp (epoch seconds UTC): step completion time when
+    /// inferred from a subsequent step or transcript file mtime, falling back to `created_at`.
     public let timestamp: Double
     public let outputTokens: Int
+    /// Explicit step generation duration (`completedAt - createdAt`) when known from
+    /// `PLANNER_RESPONSE` start -> completion bounds. Nil for legacy/synthetic samples.
+    public let durationSeconds: Double?
 
-    public init(stepIndex: Int, timestamp: Double, outputTokens: Int) {
+    public init(
+        stepIndex: Int,
+        timestamp: Double,
+        outputTokens: Int,
+        durationSeconds: Double? = nil
+    ) {
         self.stepIndex = stepIndex
         self.timestamp = timestamp
         self.outputTokens = max(0, outputTokens)
+        if let d = durationSeconds, d.isFinite, d > 0 {
+            self.durationSeconds = d
+        } else {
+            self.durationSeconds = nil
+        }
     }
 }
 
@@ -129,13 +143,19 @@ public struct LiveTPSSnapshot: Equatable, Sendable {
     public let perSessionTPS: [String: Double]
     public let sparkline: [Double]
     public let isWorking: Bool
+    public let shouldShowInNotch: Bool
+    public let shouldShowInMenuBar: Bool
+    public let activeSubagentCount: Int
 
     public static let idle = LiveTPSSnapshot(
         currentTPS: 0,
         peakTPS: 0,
         perSessionTPS: [:],
         sparkline: [],
-        isWorking: false
+        isWorking: false,
+        shouldShowInNotch: false,
+        shouldShowInMenuBar: false,
+        activeSubagentCount: 0
     )
 
     public init(
@@ -143,29 +163,56 @@ public struct LiveTPSSnapshot: Equatable, Sendable {
         peakTPS: Double,
         perSessionTPS: [String: Double],
         sparkline: [Double],
-        isWorking: Bool
+        isWorking: Bool,
+        shouldShowInNotch: Bool? = nil,
+        shouldShowInMenuBar: Bool? = nil,
+        activeSubagentCount: Int = 0
     ) {
         self.currentTPS = currentTPS
         self.peakTPS = peakTPS
         self.perSessionTPS = perSessionTPS
         self.sparkline = sparkline
         self.isWorking = isWorking
+        self.shouldShowInNotch = shouldShowInNotch ?? (isWorking && currentTPS >= LiveTPSTracker.notchShowThreshold)
+        self.shouldShowInMenuBar = shouldShowInMenuBar ?? (isWorking && currentTPS >= LiveTPSTracker.menuBarShowThreshold)
+        self.activeSubagentCount = max(0, activeSubagentCount)
     }
 }
 
 public struct LiveTPSTracker: Equatable, Sendable {
+    private struct SeenStepSignature: Equatable, Sendable {
+        let stepIndex: Int
+        let outputTokens: Int
+    }
+
     public let sparklineCapacity: Int
     public let windowSeconds: Double
 
+    /// Wall-clock per-second exponential decay factor calibrated so a 2.0s interval decays by 0.88x.
+    public static let decayPerSecond: Double = pow(0.88, 0.5)
+    /// Minimum wall-clock spacing between sparkline ring-buffer appends (shorter bursts update last point in place).
+    public static let sparklineMinAppendInterval: Double = 1.5
+
+    /// Canonical display visibility hysteresis thresholds shared by NotchView and AppDelegate.
+    public static let notchShowThreshold: Double = 0.8
+    public static let notchHideThreshold: Double = 0.35
+    public static let menuBarShowThreshold: Double = 1.0
+    public static let menuBarHideThreshold: Double = 0.5
+
     private var sparkline: [Double] = []
+    private var lastSparklineAppendAt: Double? = nil
     private var lastKnownSessionTPS: [String: Double] = [:]
-    private var lastSeenStepBySession: [String: Int] = [:]
+    private var lastSeenStepBySession: [String: SeenStepSignature] = [:]
+    private var lastUpdateAtBySession: [String: Double] = [:]
+    private var isShowingInNotch: Bool = false
+    private var isShowingInMenuBar: Bool = false
 
     private static let maxSaneSessionTPS: Double = 1200.0
     private static let futureSkewAllowance: Double = 5.0
     private static let consecutiveFallbackMaxAge: Double = 90.0
+    private static let consecutiveFallbackMaxPairSpan: Double = 180.0
+    private static let singleSampleMaxAge: Double = 35.0
     private static let singleSampleDecayThreshold: Double = 12.0
-    private static let busyDecayFactor: Double = 0.88
     private static let decayFloor: Double = 0.25
 
     public init(sparklineCapacity: Int = 20, windowSeconds: Double = 30.0) {
@@ -175,19 +222,25 @@ public struct LiveTPSTracker: Equatable, Sendable {
 
     public mutating func update(
         busySessionIds: Set<String>,
+        subagentIds: Set<String> = [],
         samplesBySession: [String: [OutputTokenSample]],
         now: Double
     ) -> LiveTPSSnapshot {
         guard !busySessionIds.isEmpty else {
             sparkline.removeAll(keepingCapacity: false)
+            lastSparklineAppendAt = nil
             lastKnownSessionTPS.removeAll(keepingCapacity: false)
             lastSeenStepBySession.removeAll(keepingCapacity: false)
+            lastUpdateAtBySession.removeAll(keepingCapacity: false)
+            isShowingInNotch = false
+            isShowingInMenuBar = false
             return .idle
         }
 
         // Prune sessions that are no longer busy.
         lastKnownSessionTPS = lastKnownSessionTPS.filter { busySessionIds.contains($0.key) }
         lastSeenStepBySession = lastSeenStepBySession.filter { busySessionIds.contains($0.key) }
+        lastUpdateAtBySession = lastUpdateAtBySession.filter { busySessionIds.contains($0.key) }
 
         var perSession: [String: Double] = [:]
         perSession.reserveCapacity(busySessionIds.count)
@@ -201,31 +254,75 @@ public struct LiveTPSTracker: Equatable, Sendable {
                     return a.timestamp < b.timestamp
                 }
 
-            let tps = computeSessionTPS(sessionId: sid, sortedSamples: valid, now: now)
+            let dtSinceLastUpdate: Double
+            if now.isFinite, let prevAt = lastUpdateAtBySession[sid] {
+                dtSinceLastUpdate = max(0.0, now - prevAt)
+            } else {
+                dtSinceLastUpdate = 0.0
+            }
+
+            let tps = computeSessionTPS(
+                sessionId: sid,
+                sortedSamples: valid,
+                now: now,
+                dtSinceLastUpdate: dtSinceLastUpdate
+            )
             perSession[sid] = tps
             lastKnownSessionTPS[sid] = tps
+            if now.isFinite {
+                lastUpdateAtBySession[sid] = now
+            }
         }
 
         let currentTPS = perSession.values.reduce(0.0, +)
-        sparkline.append(currentTPS)
-        if sparkline.count > sparklineCapacity {
-            sparkline.removeFirst(sparkline.count - sparklineCapacity)
+        if sparkline.isEmpty {
+            sparkline.append(currentTPS)
+            lastSparklineAppendAt = now.isFinite ? now : nil
+        } else if now.isFinite,
+                  let lastAppend = lastSparklineAppendAt,
+                  (now - lastAppend) < Self.sparklineMinAppendInterval {
+            sparkline[sparkline.count - 1] = currentTPS
+        } else {
+            sparkline.append(currentTPS)
+            lastSparklineAppendAt = now.isFinite ? now : lastSparklineAppendAt
+            if sparkline.count > sparklineCapacity {
+                sparkline.removeFirst(sparkline.count - sparklineCapacity)
+            }
         }
         let peakTPS = max(sparkline.max() ?? 0.0, currentTPS)
+
+        // Hysteresis visibility predicates (busySessionIds is non-empty here).
+        if isShowingInNotch {
+            isShowingInNotch = currentTPS >= Self.notchHideThreshold
+        } else {
+            isShowingInNotch = currentTPS >= Self.notchShowThreshold
+        }
+
+        if isShowingInMenuBar {
+            isShowingInMenuBar = currentTPS >= Self.menuBarHideThreshold
+        } else {
+            isShowingInMenuBar = currentTPS >= Self.menuBarShowThreshold
+        }
+
+        let activeSubagentCount = busySessionIds.intersection(subagentIds).count
 
         return LiveTPSSnapshot(
             currentTPS: currentTPS,
             peakTPS: peakTPS,
             perSessionTPS: perSession,
             sparkline: sparkline,
-            isWorking: true
+            isWorking: true,
+            shouldShowInNotch: isShowingInNotch,
+            shouldShowInMenuBar: isShowingInMenuBar,
+            activeSubagentCount: activeSubagentCount
         )
     }
 
     private mutating func computeSessionTPS(
         sessionId: String,
         sortedSamples: [OutputTokenSample],
-        now: Double
+        now: Double,
+        dtSinceLastUpdate: Double
     ) -> Double {
         let prevTPS = lastKnownSessionTPS[sessionId]
         let prevStep = lastSeenStepBySession[sessionId]
@@ -237,27 +334,71 @@ public struct LiveTPSTracker: Equatable, Sendable {
         }
 
         let latestValid = sortedSamples.last(where: { $0.timestamp <= windowEnd })
-        let hasNewStep: Bool = {
+        let hasFreshOutput: Bool = {
             guard let latest = latestValid else { return false }
             guard let seen = prevStep else { return true }
-            return latest.stepIndex > seen
+            return latest.stepIndex > seen.stepIndex
+                || (latest.stepIndex == seen.stepIndex && latest.outputTokens > seen.outputTokens)
         }()
 
         // 1. >= 2 samples inside active window
         if inWindow.count >= 2, let earliest = inWindow.first, let latest = inWindow.last {
             let age = max(0.0, now - latest.timestamp)
-            if !hasNewStep, let prev = prevTPS, age > Self.singleSampleDecayThreshold {
-                return decayed(prev)
+            if !hasFreshOutput, let prev = prevTPS, age > Self.singleSampleDecayThreshold {
+                return decayed(prev, dt: dtSinceLastUpdate)
             }
             let tokensAfterEarliest = inWindow.dropFirst().reduce(0) { $0 + $1.outputTokens }
-            let dt = max(1.0, latest.timestamp - earliest.timestamp)
-            let rate = clampSessionTPS(Double(tokensAfterEarliest) / dt)
-            lastSeenStepBySession[sessionId] = latest.stepIndex
-            return rate
+            let span = latest.timestamp - earliest.timestamp
+            let effectiveSpan: Double
+            if inWindow.count == 2, let explicitDur = latest.durationSeconds {
+                effectiveSpan = max(span, explicitDur)
+            } else {
+                effectiveSpan = span
+            }
+            let dt = max(1.0, effectiveSpan)
+            var rate = clampSessionTPS(Double(tokensAfterEarliest) / dt)
+            if prevTPS == nil, age > Self.singleSampleDecayThreshold {
+                let extraAge = age - Self.singleSampleDecayThreshold
+                rate *= pow(Self.decayPerSecond, extraAge)
+            }
+            lastSeenStepBySession[sessionId] = SeenStepSignature(
+                stepIndex: latest.stepIndex,
+                outputTokens: latest.outputTokens
+            )
+            return rate < Self.decayFloor ? 0.0 : rate
         }
 
-        // 2. Fallback to last 2 consecutive samples if within 90s of `now`
+        // 2a. Explicit step generation duration on latest sample (accurate for long 45s-300s
+        //     subagent turns and 1-turn subagents without dividing by the previous step's span
+        //     or hitting single-sample spikes).
         let recentUpToNow = sortedSamples.filter { $0.timestamp <= windowEnd }
+        if let last = recentUpToNow.last, let explicitDur = last.durationSeconds {
+            let lastAge = max(0.0, now - last.timestamp)
+            if lastAge <= Self.consecutiveFallbackMaxAge {
+                if !hasFreshOutput, let prev = prevTPS,
+                   inWindow.isEmpty || lastAge > Self.singleSampleDecayThreshold {
+                    return decayed(prev, dt: dtSinceLastUpdate)
+                }
+                let dt = max(1.0, explicitDur)
+                var rate = clampSessionTPS(Double(last.outputTokens) / dt)
+                let isSameStepStreaming: Bool = {
+                    guard let seen = prevStep else { return false }
+                    return last.stepIndex == seen.stepIndex && last.outputTokens > seen.outputTokens
+                }()
+                if (prevTPS == nil || !isSameStepStreaming), lastAge > Self.singleSampleDecayThreshold {
+                    let extraAge = lastAge - Self.singleSampleDecayThreshold
+                    rate *= pow(Self.decayPerSecond, extraAge)
+                }
+                lastSeenStepBySession[sessionId] = SeenStepSignature(
+                    stepIndex: last.stepIndex,
+                    outputTokens: last.outputTokens
+                )
+                return rate < Self.decayFloor ? 0.0 : rate
+            }
+        }
+
+        // 2b. Fallback to last 2 consecutive samples if latest is within 90s of `now`
+        //     and the step-to-step span is within 180s (covers legacy samples without durationSeconds).
         if recentUpToNow.count >= 2 {
             let secondLast = recentUpToNow[recentUpToNow.count - 2]
             let last = recentUpToNow[recentUpToNow.count - 1]
@@ -265,38 +406,54 @@ public struct LiveTPSTracker: Equatable, Sendable {
             let pairSpan = last.timestamp - secondLast.timestamp
             if lastAge <= Self.consecutiveFallbackMaxAge
                 && pairSpan >= 0
-                && (now - secondLast.timestamp) <= Self.consecutiveFallbackMaxAge {
-                // If we already observed this exact latest step and it has fallen out of
+                && pairSpan <= Self.consecutiveFallbackMaxPairSpan {
+                // If we already observed this exact latest step & token count and it has fallen out of
                 // the primary window (or aged past singleSampleDecayThreshold), smoothly decay
                 // instead of holding a flat stale plateau.
-                if !hasNewStep, let prev = prevTPS,
+                if !hasFreshOutput, let prev = prevTPS,
                    inWindow.isEmpty || lastAge > Self.singleSampleDecayThreshold {
-                    return decayed(prev)
+                    return decayed(prev, dt: dtSinceLastUpdate)
                 }
                 let dt = max(1.0, pairSpan)
-                let rate = clampSessionTPS(Double(last.outputTokens) / dt)
-                lastSeenStepBySession[sessionId] = last.stepIndex
-                return rate
+                var rate = clampSessionTPS(Double(last.outputTokens) / dt)
+                let isSameStepStreaming: Bool = {
+                    guard let seen = prevStep else { return false }
+                    return last.stepIndex == seen.stepIndex && last.outputTokens > seen.outputTokens
+                }()
+                if (prevTPS == nil || !isSameStepStreaming), lastAge > Self.singleSampleDecayThreshold {
+                    let extraAge = lastAge - Self.singleSampleDecayThreshold
+                    rate *= pow(Self.decayPerSecond, extraAge)
+                }
+                lastSeenStepBySession[sessionId] = SeenStepSignature(
+                    stepIndex: last.stepIndex,
+                    outputTokens: last.outputTokens
+                )
+                return rate < Self.decayFloor ? 0.0 : rate
             }
         }
 
-        // 3. Single recent sample within active window
-        if let sample = inWindow.last {
+        // 3. Single recent sample within active window (up to max(windowSeconds, 35s) for 1-turn subagents)
+        let singleSampleWindow = max(windowSeconds, Self.singleSampleMaxAge)
+        if let sample = inWindow.last ?? recentUpToNow.last,
+           max(0.0, now - sample.timestamp) <= singleSampleWindow {
             let age = max(0.0, now - sample.timestamp)
             let denom = max(2.0, min(15.0, age + 2.0))
             var rate = Double(sample.outputTokens) / denom
             if age > Self.singleSampleDecayThreshold {
                 let extra = age - Self.singleSampleDecayThreshold
-                rate *= pow(Self.busyDecayFactor, extra / 4.0)
+                rate *= pow(Self.decayPerSecond, extra * 0.5)
             }
-            lastSeenStepBySession[sessionId] = sample.stepIndex
+            lastSeenStepBySession[sessionId] = SeenStepSignature(
+                stepIndex: sample.stepIndex,
+                outputTokens: sample.outputTokens
+            )
             let clamped = clampSessionTPS(rate)
             return clamped < Self.decayFloor ? 0.0 : clamped
         }
 
-        // 4. Busy session generating next step with no fresh sample -> gentle exponential decay
+        // 4. Busy session generating next step with no fresh sample -> wall-clock exponential decay
         if let prev = prevTPS, prev > 0 {
-            return decayed(prev)
+            return decayed(prev, dt: dtSinceLastUpdate)
         }
 
         return 0.0
@@ -307,8 +464,10 @@ public struct LiveTPSTracker: Equatable, Sendable {
         return min(Self.maxSaneSessionTPS, max(0.0, value))
     }
 
-    private func decayed(_ prev: Double) -> Double {
-        let next = prev * Self.busyDecayFactor
+    private func decayed(_ prev: Double, dt: Double) -> Double {
+        guard prev.isFinite, prev > 0 else { return 0.0 }
+        let safeDt = dt.isFinite ? max(0.0, dt) : 0.0
+        let next = prev * pow(Self.decayPerSecond, safeDt)
         return next < Self.decayFloor ? 0.0 : next
     }
 

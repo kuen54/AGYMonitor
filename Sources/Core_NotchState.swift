@@ -12,6 +12,14 @@ public enum NotchTiming {
     public static let openDwell: TimeInterval = 0.18
     public static let closeGrace: TimeInterval = 0.12
     public static let rebuildDebounce: TimeInterval = 0.30
+    /// Delay after closing before shrinking `NotchPanel` from `.expanded` back to `.compact`,
+    /// aligned with `NotchAnimations.close` so the collapse spring never clips mid-flight.
+    public static let panelShrinkDelay: TimeInterval = 0.42
+}
+
+public enum NotchPanelBackingMode: Equatable, Sendable {
+    case compact
+    case expanded
 }
 
 public enum NotchModalLock: Hashable, Sendable {
@@ -69,6 +77,10 @@ public struct NotchState: Equatable, Sendable {
     public var isFullscreen: Bool
     public var revealArmed: Bool
     public var modalLocks: Set<NotchModalLock>
+    /// True after an explicit reveal (`⌥⇧A` / reopen) until the pointer enters `contentRect`
+    /// or the notch leaves `.open` / is dismissed. Prevents outside `.pointerMoved` events from
+    /// immediately entering `.closingGrace` while the user moves the cursor toward the notch.
+    public var awaitingPointerEntry: Bool
     /// Last pointer sample dispatched while this state's phase/fullscreen/reveal/locks were unchanged.
     /// Automatically invalidated on every non-pointer state transition or geometry change so
     /// explicit reveals (`⌥⇧A`) and Space switches NEVER swallow subsequent mouse moves.
@@ -79,12 +91,14 @@ public struct NotchState: Equatable, Sendable {
         isFullscreen: Bool = false,
         revealArmed: Bool = false,
         modalLocks: Set<NotchModalLock> = [],
+        awaitingPointerEntry: Bool = false,
         lastPointerSample: NotchPointerSample? = nil
     ) {
         self.phase = phase
         self.isFullscreen = isFullscreen
         self.revealArmed = revealArmed
         self.modalLocks = modalLocks
+        self.awaitingPointerEntry = awaitingPointerEntry
         self.lastPointerSample = lastPointerSample
     }
 
@@ -108,6 +122,11 @@ public enum NotchEvent: Equatable, Sendable {
     case explicitReveal
     case explicitClose
     case explicitToggle
+    case outsideClick
+    case escapePressed
+    /// Clears cached `lastPointerSample` when geometry or wing hit-rects change so
+    /// subsequent pointer updates are never dropped as duplicates.
+    case invalidatePointerSample
 }
 
 public enum NotchEffect: Equatable, Sendable {
@@ -116,6 +135,7 @@ public enum NotchEffect: Equatable, Sendable {
     case scheduleCloseGrace
     case cancelCloseGrace
     case setInteractive(Bool)
+    case focusPanel
     case resignKeyIfNeeded
     case syncSessionMonitor(active: Bool)
     case refreshUsage
@@ -156,14 +176,21 @@ public enum NotchMachine {
 
             var effects: [NotchEffect] = []
             if state.isOpen {
+                if sample.onScreen && sample.inContentRect {
+                    state.awaitingPointerEntry = false
+                }
                 if state.isPinnedOpen {
                     if state.phase == .closingGrace {
                         state.phase = .open
                         effects.append(.cancelCloseGrace)
                     }
                 } else if !sample.onScreen || !sample.inContentRect {
-                    if state.phase != .closingGrace {
+                    if state.phase == .open && state.awaitingPointerEntry {
+                        // Hold open after explicit reveal until pointer enters contentRect
+                        // or user dismisses explicitly (Esc, outside click, ⌥⇧A, Space switch).
+                    } else if state.phase != .closingGrace {
                         state.phase = .closingGrace
+                        state.awaitingPointerEntry = false
                         effects.append(.scheduleCloseGrace)
                     }
                 } else if state.phase == .closingGrace {
@@ -171,6 +198,7 @@ public enum NotchMachine {
                     effects.append(.cancelCloseGrace)
                 }
             } else {
+                state.awaitingPointerEntry = false
                 if sample.onScreen && sample.inHoverBand && state.hoverCanOpen {
                     if state.phase != .openingDwell {
                         state.phase = .openingDwell
@@ -189,6 +217,7 @@ public enum NotchMachine {
         case .openDwellFired(let sample):
             guard state.phase == .openingDwell else { return [] }
             state.lastPointerSample = nil
+            state.awaitingPointerEntry = false
             guard sample.onScreen && sample.inHoverBand && state.hoverCanOpen else {
                 state.phase = restingClosedPhase(for: state)
                 return [.applyPanelPresentation]
@@ -208,9 +237,13 @@ public enum NotchMachine {
             state.lastPointerSample = nil
             if state.isPinnedOpen || (sample.onScreen && sample.inContentRect) {
                 state.phase = .open
+                if sample.onScreen && sample.inContentRect {
+                    state.awaitingPointerEntry = false
+                }
                 return [.cancelCloseGrace, .applyPanelPresentation]
             }
             state.phase = restingClosedPhase(for: state)
+            state.awaitingPointerEntry = false
             return [
                 .cancelOpenDwell,
                 .cancelCloseGrace,
@@ -224,6 +257,7 @@ public enum NotchMachine {
             let changed = state.isFullscreen != isFS
             state.isFullscreen = isFS
             state.lastPointerSample = nil
+            state.awaitingPointerEntry = false
             if changed {
                 state.revealArmed = false
             }
@@ -266,8 +300,10 @@ public enum NotchMachine {
             guard state.modalLocks.isEmpty, state.isOpen else { return [] }
             if !pointer.onScreen || !pointer.inContentRect {
                 state.phase = .closingGrace
+                state.awaitingPointerEntry = false
                 return [.scheduleCloseGrace, .applyPanelPresentation]
             }
+            state.awaitingPointerEntry = false
             if state.phase == .closingGrace {
                 state.phase = .open
                 return [.cancelCloseGrace, .applyPanelPresentation]
@@ -276,6 +312,7 @@ public enum NotchMachine {
 
         case .explicitReveal:
             state.lastPointerSample = nil
+            state.awaitingPointerEntry = true
             var effects: [NotchEffect] = [.cancelOpenDwell, .cancelCloseGrace]
             if !state.isOpen {
                 state.phase = .open
@@ -286,10 +323,12 @@ public enum NotchMachine {
                 state.phase = .open
             }
             effects.append(.applyPanelPresentation)
+            effects.append(.focusPanel)
             return effects
 
-        case .explicitClose:
+        case .explicitClose, .outsideClick, .escapePressed:
             guard !state.isPinnedOpen else { return [] }
+            state.awaitingPointerEntry = false
             state.lastPointerSample = nil
             if state.isOpen {
                 state.phase = restingClosedPhase(for: state)
@@ -310,6 +349,10 @@ public enum NotchMachine {
 
         case .explicitToggle:
             return reduce(&state, event: state.isOpen ? .explicitClose : .explicitReveal)
+
+        case .invalidatePointerSample:
+            state.lastPointerSample = nil
+            return []
         }
     }
 
@@ -399,6 +442,29 @@ public struct NotchGeometryState: Equatable, Sendable {
     public func contentSize(isOpen: Bool) -> (width: Double, height: Double) {
         isOpen ? (openWidth, openHeight) : (closedWidth, closedHeight)
     }
+
+    /// Computes a top-pinned compact `NotchPanel` envelope that fits the closed pill
+    /// plus both asymmetric wings (including Live Wing action pills, TPS sparkline, and
+    /// `compactGapOffset` shift) with zero clipping, while slashing idle Retina GPU backing
+    /// buffer memory compared to the full expanded `600x860` panel footprint.
+    public static func compactWindowSize(
+        maxWidth: Double,
+        closedNotchWidth: Double,
+        closedNotchHeight: Double,
+        leftWingWidth: Double,
+        rightWingWidth: Double,
+        hasActiveWing: Bool
+    ) -> (width: Double, height: Double) {
+        let safeMaxWidth = max(1.0, maxWidth)
+        let safeNotchW = max(0.0, closedNotchWidth)
+        let safeNotchH = max(0.0, closedNotchHeight)
+        let safeLeft = max(0.0, leftWingWidth)
+        let safeRight = max(0.0, rightWingWidth)
+        let symmetricHalfSpan = safeNotchW / 2.0 + max(safeLeft, safeRight) + (hasActiveWing ? 96.0 : 48.0)
+        let width = min(safeMaxWidth, max(safeNotchW + 260.0, ceil(symmetricHalfSpan * 2.0)))
+        let height = max(safeNotchH + 24.0, 60.0)
+        return (width: width, height: height)
+    }
 }
 
 // MARK: - Multi-Display Notch Coordinator State Machine
@@ -434,11 +500,20 @@ public struct NotchScreenReconcilePlan: Equatable, Sendable {
     public let removed: [UInt32]
     public let kept: [UInt32]
     public let added: [NotchDisplayDescriptor]
+    /// Per-display effects produced when a surviving display changed fullscreen state
+    /// during reconciliation (e.g. `.cancelOpenDwell`, `.applyPanelPresentation`).
+    public let keptEffects: [UInt32: [NotchEffect]]
 
-    public init(removed: [UInt32], kept: [UInt32], added: [NotchDisplayDescriptor]) {
+    public init(
+        removed: [UInt32],
+        kept: [UInt32],
+        added: [NotchDisplayDescriptor],
+        keptEffects: [UInt32: [NotchEffect]] = [:]
+    ) {
         self.removed = removed
         self.kept = kept
         self.added = added
+        self.keptEffects = keptEffects
     }
 }
 
@@ -478,7 +553,8 @@ public enum NotchCoordinatorMachine {
         state.isStarted && state.rebuildGeneration == generation
     }
 
-    /// Incrementally reconcile connected displays, preserving open/modal state on surviving displays.
+    /// Incrementally reconcile connected displays, preserving open/modal state on surviving displays
+    /// while reconciling any fullscreen transitions and invalidating stale pointer samples.
     public static func reconcileScreens(
         _ state: inout NotchCoordinatorState,
         descriptors: [NotchDisplayDescriptor]
@@ -494,8 +570,18 @@ public enum NotchCoordinatorMachine {
 
         var kept: [UInt32] = []
         var added: [NotchDisplayDescriptor] = []
+        var keptEffects: [UInt32: [NotchEffect]] = [:]
         for desc in descriptors {
-            if state.displays[desc.displayId] != nil {
+            if var existing = state.displays[desc.displayId] {
+                if desc.isFullscreen != existing.isFullscreen {
+                    let effects = NotchMachine.reduce(&existing, event: .fullscreenChanged(desc.isFullscreen))
+                    if !effects.isEmpty {
+                        keptEffects[desc.displayId] = effects
+                    }
+                } else {
+                    _ = NotchMachine.reduce(&existing, event: .invalidatePointerSample)
+                }
+                state.displays[desc.displayId] = existing
                 kept.append(desc.displayId)
             } else {
                 state.displays[desc.displayId] = NotchState(
@@ -505,7 +591,23 @@ public enum NotchCoordinatorMachine {
                 added.append(desc)
             }
         }
-        return NotchScreenReconcilePlan(removed: removed, kept: kept, added: added)
+        return NotchScreenReconcilePlan(
+            removed: removed,
+            kept: kept,
+            added: added,
+            keptEffects: keptEffects
+        )
+    }
+
+    /// Invalidates cached `lastPointerSample` for `displayId` via `NotchMachine` so
+    /// `NotchController` never mutates `coordinator.displays[id]?.lastPointerSample` directly.
+    public static func invalidatePointerSample(
+        _ state: inout NotchCoordinatorState,
+        displayId: UInt32
+    ) {
+        guard var displayState = state.displays[displayId] else { return }
+        _ = NotchMachine.reduce(&displayState, event: .invalidatePointerSample)
+        state.displays[displayId] = displayState
     }
 
     /// Returns any OTHER open displays that should close when `activeDisplayId` opens,

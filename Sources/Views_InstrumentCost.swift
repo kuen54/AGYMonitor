@@ -221,14 +221,14 @@ struct CostInstrumentView: View {
         switch scope {
         case .today:
             if monthTotal > 0.01 {
-                let pct = Int(((cost / monthTotal) * 100.0).rounded())
-                return String(format: "%02d%% OF MO", min(100, max(0, pct)))
+                let pct = safeRoundedInt((cost / monthTotal) * 100.0, min: 0, max: 100)
+                return String(format: "%02d%% OF MO", pct)
             }
             return "ACTIVE"
         case .week:
             if monthTotal > 0.01 {
-                let pct = Int(((cost / monthTotal) * 100.0).rounded())
-                return String(format: "%02d%% OF MO", min(100, max(0, pct)))
+                let pct = safeRoundedInt((cost / monthTotal) * 100.0, min: 0, max: 100)
+                return String(format: "%02d%% OF MO", pct)
             }
             return "7D WINDOW"
         case .month:
@@ -272,7 +272,7 @@ private enum TopographicRidgeCache {
 
     static func ridge(dailyValues: [Double], layerCount: Int, samplesPerDay: Int) -> TopographicRidgeResult {
         let key = Key(
-            cents: dailyValues.map { Int(($0 * 1000.0).rounded()) },
+            cents: dailyValues.map { safeRoundedInt($0 * 1000.0) },
             layerCount: layerCount,
             samplesPerDay: samplesPerDay
         )
@@ -342,11 +342,11 @@ struct TopographicRidgeChart: View {
         let totalDays = AppDate.daysInMonth(year: year, month: month) ?? 30
         self.daysInMonth = totalDays
 
-        let lookup = Dictionary(uniqueKeysWithValues: data.map { ($0.day, $0) })
+        let lookup = Dictionary(data.map { ($0.day, $0) }, uniquingKeysWith: { _, latest in latest })
         self.dayLookup = lookup
 
         let values = (1...totalDays).map { lookup[$0]?.cost ?? 0 }
-        self.dailyCentsKey = values.map { Int(($0 * 1000.0).rounded()) }
+        self.dailyCentsKey = values.map { safeRoundedInt($0 * 1000.0) }
         self.maxValue = values.max() ?? 0
         self.avgValue = UsageTelemetryLogic.dailyAverage(daily: data, modeIsCost: true)
 
@@ -395,7 +395,7 @@ struct TopographicRidgeChart: View {
                     CachedTelemetryArtwork(
                         key: TerrainArtworkKey(
                             cents: dailyCentsKey,
-                            avgMilli: Int((avgValue * 1000.0).rounded()),
+                            avgMilli: safeRoundedInt(avgValue * 1000.0),
                             theme: theme.cacheKey
                         ),
                         width: geo.size.width,
@@ -1328,7 +1328,7 @@ struct BoreholeModelSection: View {
         bracketTargetId: String?,
         height: CGFloat
     ) -> some View {
-        let modelById = Dictionary(uniqueKeysWithValues: models.map { ($0.id, $0) })
+        let modelById = Dictionary(models.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
         let strata: [BoreholeStratumSpec] = slices.compactMap { s in
             guard let m = modelById[s.id] else { return nil }
             return BoreholeStratumSpec(id: s.id, modelClass: m.modelClass, yStart: s.yStart, yEnd: s.yEnd)
@@ -1575,7 +1575,7 @@ struct BoreholeModelSection: View {
         bracketTargetId: String?,
         height: CGFloat
     ) -> some View {
-        let sliceById = Dictionary(uniqueKeysWithValues: slices.map { ($0.id, $0) })
+        let sliceById = Dictionary(slices.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
 
         return Canvas { context, size in
             let innerH = size.height - 1

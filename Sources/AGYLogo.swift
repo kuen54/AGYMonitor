@@ -99,35 +99,47 @@ enum AGYLogo {
         return p
     }
 
-    /// Builds an aspect-fitted, optically centered SwiftUI Path inside `rect`
-    /// (normalized from the `0…113` SVG viewBox so small menu-bar/header frames
-    /// render with balanced visual weight).
-    static func swiftUIPath(in rect: CGRect) -> SwiftUI.Path {
+    /// Builds an aspect-fitted, optically centered `CGPath` inside `rect`.
+    /// - Parameter flippedForCoreAnimation: Pass `false` (default) for top-down coordinate
+    ///   systems (SwiftUI, flipped `NSView` / `CALayer` with `isGeometryFlipped == true`).
+    ///   Pass `true` for standard bottom-up Core Animation / Core Graphics contexts
+    ///   (`isGeometryFlipped == false`).
+    static func cgPath(in rect: CGRect, flippedForCoreAnimation: Bool = false) -> CGPath {
         let box = normalizedBox
         guard box.width > 0, box.height > 0, rect.width > 0, rect.height > 0 else {
-            return SwiftUI.Path()
+            return CGMutablePath()
         }
         let scale = min(rect.width / box.width, rect.height / box.height)
         let ox = rect.minX + (rect.width - box.width * scale) / 2.0
         let oy = rect.minY + (rect.height - box.height * scale) / 2.0
         func pt(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
-            CGPoint(x: ox + (x - box.minX) * scale, y: oy + (y - box.minY) * scale)
+            let py = flippedForCoreAnimation
+                ? oy + (box.maxY - y) * scale
+                : oy + (y - box.minY) * scale
+            return CGPoint(x: ox + (x - box.minX) * scale, y: py)
         }
-        var p = SwiftUI.Path()
+        let path = CGMutablePath()
         for cmd in commands {
             switch cmd {
             case let .move(x, y):
-                p.move(to: pt(x, y))
+                path.move(to: pt(x, y))
             case let .line(x, y):
-                p.addLine(to: pt(x, y))
+                path.addLine(to: pt(x, y))
             case let .curve(x, y, c1x, c1y, c2x, c2y):
-                p.addCurve(to: pt(x, y),
-                           control1: pt(c1x, c1y),
-                           control2: pt(c2x, c2y))
+                path.addCurve(to: pt(x, y),
+                              control1: pt(c1x, c1y),
+                              control2: pt(c2x, c2y))
             case .close:
-                p.closeSubpath()
+                path.closeSubpath()
             }
         }
-        return p
+        return path
+    }
+
+    /// Builds an aspect-fitted, optically centered SwiftUI Path inside `rect`
+    /// (normalized from the `0…113` SVG viewBox so small menu-bar/header frames
+    /// render with balanced visual weight).
+    static func swiftUIPath(in rect: CGRect) -> SwiftUI.Path {
+        SwiftUI.Path(cgPath(in: rect, flippedForCoreAnimation: false))
     }
 }

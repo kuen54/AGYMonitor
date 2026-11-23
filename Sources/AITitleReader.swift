@@ -16,16 +16,6 @@ enum AITitleReader {
         let fileMtime: TimeInterval
     }
 
-    /// Live step state inferred from the tail of `transcript.jsonl`.
-    struct TailStepActivity: Equatable {
-        let status: SessionStatus
-        let waitingFor: String?
-        let createdAtMs: Double?
-        let fileMtime: TimeInterval
-
-        static let idle = TailStepActivity(status: .idle, waitingFor: nil, createdAtMs: nil, fileMtime: 0)
-    }
-
     /// Swarm coordinator summary read from `brain/<id>/.system_generated/swarm/members.json`.
     struct SwarmCoordinatorInfo: Equatable {
         let title: String?
@@ -64,7 +54,11 @@ enum AITitleReader {
             lastStepAt: scanned.lastStepAt,
             lastModel: scanned.lastModel,
             pendingToolNames: scanned.pendingToolNames,
-            isWaitingForQuestion: scanned.isWaitingForQuestion
+            isWaitingForQuestion: scanned.isWaitingForQuestion,
+            latestModel: scanned.latestModel,
+            latestContextUsedTokens: scanned.latestContextUsedTokens,
+            latestCacheHitRatio: scanned.latestCacheHitRatio,
+            recentOutputSamples: scanned.recentOutputSamples
         )
     }
 
@@ -79,7 +73,7 @@ enum AITitleReader {
     /// Direct O(1) lookup across Antigravity's 3 brain roots, with fallback support
     /// for custom test/project directories.
     static func transcriptPath(sessionId: String, projectsDir: URL) -> String? {
-        guard !sessionId.isEmpty else { return nil }
+        guard AGYLocator.isSafeConversationId(sessionId) else { return nil }
         let fm = FileManager.default
 
         // 1. Check if projectsDir is `~/.gemini` (default) or contains surface dirs
@@ -143,7 +137,7 @@ enum AITitleReader {
 
     /// Fast O(1) lookup across the 3 standard Antigravity brain directories.
     static func transcriptPath(sessionId: String, home: String = NSHomeDirectory()) -> String? {
-        guard !sessionId.isEmpty else { return nil }
+        guard AGYLocator.isSafeConversationId(sessionId) else { return nil }
         let fm = FileManager.default
         var bestPath: String? = nil
         var bestMtime: Date = .distantPast
@@ -162,6 +156,8 @@ enum AITitleReader {
     /// Exponentially widening bounded tail reader (256 KB -> 1 MB -> 4 MB cap)
     /// extracting title + latest user prompt without O(N²) chunk re-scanning.
     static func summary(inFileAt path: String, needInstruction: Bool = true) -> TranscriptSummary {
+        let fileMtime = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate] as? Date)?
+            .timeIntervalSince1970
         guard let handle = FileHandle(forReadingAtPath: path) else { return .empty }
         defer { try? handle.close() }
 
@@ -175,9 +171,9 @@ enum AITitleReader {
             if readLen <= scannedBytes { break }
             let offset = end - readLen
             do { try handle.seek(toOffset: offset) } catch { break }
-            let data = handle.readData(ofLength: Int(readLen))
+            let data = (try? handle.read(upToCount: Int(readLen))) ?? Data()
             scannedBytes = readLen
-            result = TranscriptParse.scan(data)
+            result = TranscriptParse.scan(data, fileMtime: fileMtime)
 
             if !needInstruction && result.title != nil {
                 break
@@ -210,67 +206,23 @@ enum AITitleReader {
         do { try handle.seek(toOffset: offset) } catch {
             return TailSnapshot(summary: .empty, fileMtime: fileMtime)
         }
-        let data = handle.readData(ofLength: readLen)
-        return TailSnapshot(summary: TranscriptParse.scan(data), fileMtime: fileMtime)
-    }
-
-    /// Inspect the last JSONL step in `transcript.jsonl` via `SessionLogic.resolveLiveSessionStatus`.
-    static func tailActivity(inFileAt path: String, now: TimeInterval = Date().timeIntervalSince1970) -> TailStepActivity {
-        let snap = tailSnapshot(inFileAt: path)
-        let createdAt: Double? = snap.summary.lastStepAt.flatMap { d in
-            let sec = d.timeIntervalSince1970
-            return sec > 946_684_800 ? sec * 1000.0 : nil
-        }
-        let resolved = SessionLogic.resolveLiveSessionStatus(
-            swarmWorkerBusy: false,
-            rawStatus: nil,
-            notFullyIdle: false,
-            transcriptSummary: snap.summary,
-            transcriptFileMtime: snap.fileMtime,
-            now: now
-        )
-        return TailStepActivity(
-            status: resolved.status,
-            waitingFor: resolved.waitingFor,
-            createdAtMs: createdAt,
-            fileMtime: snap.fileMtime
+        let data = (try? handle.read(upToCount: readLen)) ?? Data()
+        return TailSnapshot(
+            summary: TranscriptParse.scan(data, fileMtime: fileMtime > 0 ? fileMtime : nil),
+            fileMtime: fileMtime
         )
     }
 
-    // MARK: - Annotations (`annotations/<id>.pbtxt`) & Swarm (`swarm/members.json`)
+    // MARK: - Annotations (`annotations/<id>.pbtxt`)
 
     /// Read `title:"..."` from `~/.gemini/<surface>/annotations/<sessionId>.pbtxt` via `TranscriptParse`.
     static func annotationTitle(sessionId: String, home: String = NSHomeDirectory()) -> String? {
-        guard !sessionId.isEmpty else { return nil }
-        for surface in AGYSurface.allCases {
-            let root = AGYLocator.surfaceRoot(home: home, surface: surface)
-            let path = ((root as NSString).appendingPathComponent("annotations") as NSString)
-                .appendingPathComponent("\(sessionId).pbtxt")
+        guard AGYLocator.isSafeConversationId(sessionId) else { return nil }
+        for path in AGYLocator.candidateAnnotationPaths(home: home, conversationId: sessionId) {
             guard let raw = try? String(contentsOfFile: path, encoding: .utf8) else { continue }
             if let parsed = TranscriptParse.parseAnnotationTitle(raw), !parsed.isEmpty {
                 return parsed
             }
-        }
-        return nil
-    }
-
-    /// Read swarm coordinator info from `brain/<sessionId>/.system_generated/swarm/members.json`
-    /// via `SessionLogic.parseSwarmMembersJSON`.
-    static func swarmInfo(sessionId: String, home: String = NSHomeDirectory()) -> SwarmCoordinatorInfo? {
-        guard !sessionId.isEmpty else { return nil }
-        let fm = FileManager.default
-        for brainDir in AGYLocator.brainDirs(home: home) {
-            let path = AGYLocator.swarmMembersPath(brainDir: brainDir, conversationId: sessionId)
-            guard fm.fileExists(atPath: path),
-                  let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
-                  let parsed = SessionLogic.parseSwarmMembersJSON(data) else {
-                continue
-            }
-            let workers = parsed.members.filter { $0.role == "worker" && !$0.conversationId.isEmpty }
-            let workerIds = Set(workers.map(\.conversationId))
-            let nonMonitorWorkers = workers.filter { $0.name != "monitor" }
-            let anyBusy = SessionLogic.anySwarmWorkerBusy(nonMonitorWorkers)
-            return SwarmCoordinatorInfo(title: parsed.title, anyWorkerBusy: anyBusy, workerConversationIds: workerIds)
         }
         return nil
     }

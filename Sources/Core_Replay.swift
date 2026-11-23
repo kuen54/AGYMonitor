@@ -2082,7 +2082,7 @@ public enum ReplayLogic {
         }
     }
 
-    private static func normalizeDegrees(_ deg: Double) -> Double {
+    internal static func normalizeDegrees(_ deg: Double) -> Double {
         guard deg.isFinite else { return 0.0 }
         let rem = deg.truncatingRemainder(dividingBy: 360.0)
         let positive = rem < 0 ? rem + 360.0 : rem
@@ -2203,6 +2203,282 @@ public enum ReplayLogic {
     }
 }
 
+// MARK: - Pure Black Box Store State Machine (Anti-Split-Brain)
+
+public enum ReplayIndexPhase: Equatable, Sendable {
+    case idle
+    case loading(cached: [ReplayMissionSummary], generation: Int)
+    case loaded([ReplayMissionSummary], loadedAt: Date)
+
+    public var missions: [ReplayMissionSummary] {
+        switch self {
+        case .idle:
+            return []
+        case .loading(let cached, _):
+            return cached
+        case .loaded(let missions, _):
+            return missions
+        }
+    }
+
+    public var isLoading: Bool {
+        if case .loading = self { return true }
+        return false
+    }
+
+    public func isFresh(
+        now: Date,
+        ttl: TimeInterval = ReplayStoreMachine.indexFreshnessTTL
+    ) -> Bool {
+        guard case .loaded(let missions, let loadedAt) = self, !missions.isEmpty else {
+            return false
+        }
+        let elapsed = now.timeIntervalSince(loadedAt)
+        return elapsed >= 0 && elapsed < ttl
+    }
+}
+
+public enum ReplayTimelinePhase: Equatable, Sendable {
+    case idle
+    case loading(missionId: String, generation: Int)
+    case loaded(ReplayTimeline)
+    case unavailable(missionId: String)
+
+    public var timeline: ReplayTimeline? {
+        if case .loaded(let tl) = self { return tl }
+        return nil
+    }
+
+    public var missionId: String? {
+        switch self {
+        case .idle:
+            return nil
+        case .loading(let id, _):
+            return id
+        case .loaded(let tl):
+            return tl.id
+        case .unavailable(let id):
+            return id
+        }
+    }
+
+    public var isLoading: Bool {
+        if case .loading = self { return true }
+        return false
+    }
+
+    public var isUnavailable: Bool {
+        if case .unavailable = self { return true }
+        return false
+    }
+}
+
+public struct ReplayStoreState: Equatable, Sendable {
+    public var indexPhase: ReplayIndexPhase
+    public var timelinePhase: ReplayTimelinePhase
+    public var selectedMissionId: String?
+    public var indexGeneration: Int
+    public var timelineGeneration: Int
+    public var pendingPreferredMissionId: String?
+
+    public init(
+        indexPhase: ReplayIndexPhase = .idle,
+        timelinePhase: ReplayTimelinePhase = .idle,
+        selectedMissionId: String? = nil,
+        indexGeneration: Int = 0,
+        timelineGeneration: Int = 0,
+        pendingPreferredMissionId: String? = nil
+    ) {
+        self.indexPhase = indexPhase
+        self.timelinePhase = timelinePhase
+        self.selectedMissionId = selectedMissionId
+        self.indexGeneration = indexGeneration
+        self.timelineGeneration = timelineGeneration
+        self.pendingPreferredMissionId = pendingPreferredMissionId
+    }
+
+    public var missions: [ReplayMissionSummary] { indexPhase.missions }
+    public var activeReplay: ReplayTimeline? { timelinePhase.timeline }
+    public var isIndexLoading: Bool { indexPhase.isLoading }
+    public var isTimelineLoading: Bool { timelinePhase.isLoading }
+    public var isTimelineUnavailable: Bool { timelinePhase.isUnavailable }
+}
+
+public enum ReplayStoreEvent: Equatable, Sendable {
+    case openBlackBox(preferredMissionId: String? = nil, force: Bool = false, now: Date)
+    case indexLoaded(generation: Int, missions: [ReplayMissionSummary], now: Date)
+    case selectMission(id: String, force: Bool = false)
+    case timelineLoaded(generation: Int, missionId: String, timeline: ReplayTimeline?)
+    case clearSelection
+}
+
+public enum ReplayStoreEffect: Equatable, Sendable {
+    case scanIndex(generation: Int)
+    case loadTimeline(missionId: String, generation: Int)
+}
+
+public enum ReplayStoreMachine {
+
+    /// Default freshness window for cached mission index scans.
+    public static let indexFreshnessTTL: TimeInterval = 5.0
+
+    @discardableResult
+    public static func reduce(
+        _ state: inout ReplayStoreState,
+        event: ReplayStoreEvent,
+        indexTTL: TimeInterval = indexFreshnessTTL
+    ) -> [ReplayStoreEffect] {
+        switch event {
+        case .openBlackBox(let rawPreferred, let force, let now):
+            let preferred = (rawPreferred?.isEmpty == false) ? rawPreferred : nil
+            var effects: [ReplayStoreEffect] = []
+
+            if !force && state.indexPhase.isFresh(now: now, ttl: indexTTL) {
+                state.pendingPreferredMissionId = nil
+                if let sid = preferred {
+                    if let eff = startTimelineLoad(&state, missionId: sid, force: false) {
+                        effects.append(eff)
+                    }
+                } else if let current = state.selectedMissionId,
+                          state.missions.contains(where: { $0.id == current }) {
+                    if state.timelinePhase == .idle || state.timelinePhase.missionId != current {
+                        if let eff = startTimelineLoad(&state, missionId: current, force: false) {
+                            effects.append(eff)
+                        }
+                    }
+                } else if let first = state.missions.first {
+                    if let eff = startTimelineLoad(&state, missionId: first.id, force: false) {
+                        effects.append(eff)
+                    }
+                } else {
+                    clearTimelineSelection(&state)
+                }
+                return effects
+            }
+
+            // Index is not fresh (or force == true): deduplicate concurrent non-forced scans.
+            if force || !state.indexPhase.isLoading {
+                state.indexGeneration += 1
+                let gen = state.indexGeneration
+                state.indexPhase = .loading(cached: state.missions, generation: gen)
+                effects.append(.scanIndex(generation: gen))
+            }
+
+            if let sid = preferred {
+                state.pendingPreferredMissionId = sid
+                if let eff = startTimelineLoad(&state, missionId: sid, force: force) {
+                    effects.append(eff)
+                }
+            } else {
+                state.pendingPreferredMissionId = nil
+                if force, let current = state.selectedMissionId {
+                    if let eff = startTimelineLoad(&state, missionId: current, force: true) {
+                        effects.append(eff)
+                    }
+                }
+            }
+            return effects
+
+        case .indexLoaded(let generation, let missions, let now):
+            guard generation == state.indexGeneration else { return [] }
+            state.indexPhase = .loaded(missions, loadedAt: now)
+            let preferred = state.pendingPreferredMissionId
+            state.pendingPreferredMissionId = nil
+
+            guard let first = missions.first else {
+                clearTimelineSelection(&state)
+                return []
+            }
+
+            if let pref = preferred {
+                if missions.contains(where: { $0.id == pref }) {
+                    if let eff = startTimelineLoad(&state, missionId: pref, force: false) {
+                        return [eff]
+                    }
+                    return []
+                } else {
+                    if let eff = startTimelineLoad(&state, missionId: first.id, force: false) {
+                        return [eff]
+                    }
+                    return []
+                }
+            }
+
+            if let current = state.selectedMissionId,
+               missions.contains(where: { $0.id == current }) {
+                if state.timelinePhase == .idle || state.timelinePhase.missionId != current {
+                    if let eff = startTimelineLoad(&state, missionId: current, force: false) {
+                        return [eff]
+                    }
+                }
+                return []
+            }
+
+            if let eff = startTimelineLoad(&state, missionId: first.id, force: false) {
+                return [eff]
+            }
+            return []
+
+        case .selectMission(let id, let force):
+            guard !id.isEmpty else { return [] }
+            state.pendingPreferredMissionId = nil
+            if let eff = startTimelineLoad(&state, missionId: id, force: force) {
+                return [eff]
+            }
+            return []
+
+        case .timelineLoaded(let generation, let missionId, let timeline):
+            guard generation == state.timelineGeneration,
+                  state.selectedMissionId == missionId else {
+                return []
+            }
+            if let tl = timeline {
+                guard tl.id == missionId else { return [] }
+                state.timelinePhase = .loaded(tl)
+            } else {
+                state.timelinePhase = .unavailable(missionId: missionId)
+            }
+            return []
+
+        case .clearSelection:
+            state.pendingPreferredMissionId = nil
+            clearTimelineSelection(&state)
+            return []
+        }
+    }
+
+    private static func startTimelineLoad(
+        _ state: inout ReplayStoreState,
+        missionId: String,
+        force: Bool
+    ) -> ReplayStoreEffect? {
+        guard !missionId.isEmpty else { return nil }
+        if !force && state.selectedMissionId == missionId {
+            switch state.timelinePhase {
+            case .loading(let loadingId, _) where loadingId == missionId:
+                return nil
+            case .loaded(let tl) where tl.id == missionId:
+                return nil
+            case .idle, .loading, .loaded, .unavailable:
+                break
+            }
+        }
+        state.timelineGeneration += 1
+        let gen = state.timelineGeneration
+        state.selectedMissionId = missionId
+        state.timelinePhase = .loading(missionId: missionId, generation: gen)
+        return .loadTimeline(missionId: missionId, generation: gen)
+    }
+
+    private static func clearTimelineSelection(_ state: inout ReplayStoreState) {
+        if state.selectedMissionId != nil || state.timelinePhase != .idle {
+            state.timelineGeneration += 1
+        }
+        state.selectedMissionId = nil
+        state.timelinePhase = .idle
+    }
+}
+
 // MARK: - Pure Playback State Machine
 
 public enum ReplaySpeed: Double, CaseIterable, Equatable, Sendable {
@@ -2221,44 +2497,105 @@ public enum ReplaySpeed: Double, CaseIterable, Equatable, Sendable {
     }
 }
 
+public enum ReplayPlayPhase: Equatable, Sendable {
+    case paused
+    case playing
+    case scrubbing(wasPlaying: Bool)
+}
+
+public enum ReplayHapticCue: Equatable, Sendable {
+    case playToggle
+    case scrubDetent
+    case anomalyEnter
+    case stepEvent
+    case speedChange
+}
+
+public enum ReplayPlaybackEvent: Equatable, Sendable {
+    case syncTimeline(id: String, durationSec: Double, suggestedProgress: Double, pinnedMissionId: String? = nil)
+    case togglePlay(durationSec: Double, isActive: Bool, reduceMotion: Bool)
+    case beginScrub
+    case scrub(progress: Double, timeline: ReplayTimeline)
+    case endScrub(isActive: Bool, reduceMotion: Bool)
+    case tick(dt: Double, timeline: ReplayTimeline, isActive: Bool, reduceMotion: Bool)
+    case stepPrev(timeline: ReplayTimeline)
+    case stepNext(timeline: ReplayTimeline)
+    case cycleSpeed
+    case setSpeed(ReplaySpeed)
+    case setActive(Bool, reduceMotion: Bool)
+}
+
+public enum ReplayPlaybackEffect: Equatable, Sendable {
+    case startTimer
+    case stopTimer
+    case haptic(ReplayHapticCue)
+}
+
 public struct ReplayPlaybackState: Equatable, Sendable {
     public var progress: Double
-    public var isPlaying: Bool
     public var speed: ReplaySpeed
     public var isSkippingIdle: Bool
+    public var playPhase: ReplayPlayPhase
+    public var sweepAngleDeg: Double
+    public var loadedTimelineId: String?
+    public var loadedDurationSec: Double
+    public var lastScrubBucket: Int
+    public var wasInsideAnomaly: Bool
+    public var isTimerRunning: Bool
+
+    /// Derived strictly from `playPhase` so shadow playing booleans are impossible.
+    public var isPlaying: Bool {
+        playPhase == .playing
+    }
 
     public init(
         progress: Double = 0.0,
         isPlaying: Bool = false,
         speed: ReplaySpeed = .x1,
-        isSkippingIdle: Bool = false
+        isSkippingIdle: Bool = false,
+        playPhase: ReplayPlayPhase? = nil,
+        sweepAngleDeg: Double? = nil,
+        loadedTimelineId: String? = nil,
+        loadedDurationSec: Double = 0.0,
+        lastScrubBucket: Int = -1,
+        wasInsideAnomaly: Bool = false,
+        isTimerRunning: Bool? = nil
     ) {
-        self.progress = progress.isFinite ? min(1.0, max(0.0, progress)) : 0.0
-        self.isPlaying = isPlaying
+        let clamped = progress.isFinite ? min(1.0, max(0.0, progress)) : 0.0
+        let resolvedPhase = playPhase ?? (isPlaying ? .playing : .paused)
+        self.progress = clamped
         self.speed = speed
         self.isSkippingIdle = isSkippingIdle
+        self.playPhase = resolvedPhase
+        self.sweepAngleDeg = sweepAngleDeg.map(ReplayLogic.normalizeDegrees)
+            ?? ReplayLogic.normalizeDegrees(clamped * 720.0)
+        self.loadedTimelineId = loadedTimelineId
+        self.loadedDurationSec = loadedDurationSec.isFinite ? max(0.0, loadedDurationSec) : 0.0
+        self.lastScrubBucket = lastScrubBucket
+        self.wasInsideAnomaly = wasInsideAnomaly
+        self.isTimerRunning = isTimerRunning ?? (resolvedPhase == .playing)
     }
 
     public mutating func togglePlay() {
-        if isPlaying {
-            isPlaying = false
+        if playPhase == .playing {
+            playPhase = .paused
             isSkippingIdle = false
         } else {
             if progress >= 1.0 {
                 progress = 0.0
             }
             isSkippingIdle = false
-            isPlaying = true
+            playPhase = .playing
         }
     }
 
     public mutating func pause() {
-        isPlaying = false
+        playPhase = .paused
         isSkippingIdle = false
     }
 
     public mutating func step(deltaWallSec: Double, timelineDurationSec: Double) {
-        guard isPlaying,
+        guard playPhase == .playing,
               deltaWallSec.isFinite, deltaWallSec > 0,
               timelineDurationSec.isFinite, timelineDurationSec > 0 else {
             return
@@ -2269,7 +2606,7 @@ public struct ReplayPlaybackState: Equatable, Sendable {
         let next = progress + delta
         if next >= 1.0 {
             progress = 1.0
-            isPlaying = false
+            playPhase = .paused
             isSkippingIdle = false
         } else {
             progress = max(0.0, next)
@@ -2284,7 +2621,7 @@ public struct ReplayPlaybackState: Equatable, Sendable {
         timeline: ReplayTimeline,
         smartSkipIdle: Bool = true
     ) {
-        guard isPlaying,
+        guard playPhase == .playing,
               deltaWallSec.isFinite, deltaWallSec > 0,
               timeline.totalDurationSec.isFinite, timeline.totalDurationSec > 0 else {
             return
@@ -2317,7 +2654,7 @@ public struct ReplayPlaybackState: Equatable, Sendable {
 
         if next >= 1.0 {
             progress = 1.0
-            isPlaying = false
+            playPhase = .paused
             isSkippingIdle = false
         } else {
             progress = max(0.0, next)
@@ -2328,8 +2665,8 @@ public struct ReplayPlaybackState: Equatable, Sendable {
         guard newProgress.isFinite else { return }
         isSkippingIdle = false
         progress = min(1.0, max(0.0, newProgress))
-        if progress >= 1.0 {
-            isPlaying = false
+        if progress >= 1.0 && playPhase == .playing {
+            playPhase = .paused
         }
     }
 
@@ -2348,9 +2685,14 @@ public struct ReplayPlaybackState: Equatable, Sendable {
     }
 
     public mutating func reset(initialProgress: Double = 0.0) {
-        progress = initialProgress.isFinite ? min(1.0, max(0.0, initialProgress)) : 0.0
-        isPlaying = false
+        let clamped = initialProgress.isFinite ? min(1.0, max(0.0, initialProgress)) : 0.0
+        progress = clamped
+        playPhase = .paused
         isSkippingIdle = false
+        sweepAngleDeg = ReplayLogic.normalizeDegrees(clamped * 720.0)
+        lastScrubBucket = -1
+        wasInsideAnomaly = false
+        isTimerRunning = false
     }
 
     /// Jumps to the first key event strictly ahead of `progress + 0.005`, or jumps to `1.0` and pauses if none remain.
@@ -2360,13 +2702,15 @@ public struct ReplayPlaybackState: Equatable, Sendable {
         isSkippingIdle = false
         if let next = events.first(where: { $0.progress > progress + 0.005 }) {
             progress = min(1.0, max(0.0, next.progress))
-            if progress >= 1.0 {
-                isPlaying = false
+            if progress >= 1.0 && playPhase == .playing {
+                playPhase = .paused
             }
             return next
         }
         progress = 1.0
-        isPlaying = false
+        if playPhase == .playing {
+            playPhase = .paused
+        }
         return nil
     }
 
@@ -2401,5 +2745,228 @@ public struct ReplayPlaybackState: Equatable, Sendable {
             }
         }
         return 0.0
+    }
+}
+
+public enum ReplayPlaybackMachine {
+
+    /// Radar sweep rotation speed while playing (degrees per wall-clock second).
+    public static let sweepDegreesPerSecond: Double = 90.0
+
+    @discardableResult
+    public static func reduce(
+        _ state: inout ReplayPlaybackState,
+        event: ReplayPlaybackEvent
+    ) -> [ReplayPlaybackEffect] {
+        switch event {
+        case .syncTimeline(let id, let durationSec, let suggestedProgress, let pinnedMissionId):
+            if let pinned = pinnedMissionId, pinned != id {
+                return []
+            }
+            let cleanDur = durationSec.isFinite ? max(0.0, durationSec) : 0.0
+            let cleanProg = suggestedProgress.isFinite ? min(1.0, max(0.0, suggestedProgress)) : 0.0
+            state.lastScrubBucket = -1
+            state.wasInsideAnomaly = false
+
+            if id.isEmpty {
+                state.loadedTimelineId = nil
+                state.loadedDurationSec = 0.0
+                state.progress = 0.0
+                state.sweepAngleDeg = 0.0
+                state.playPhase = .paused
+                state.isSkippingIdle = false
+                return stopTimerIfRunning(&state)
+            }
+
+            if state.loadedTimelineId == id {
+                state.loadedDurationSec = cleanDur
+                if cleanDur <= 0 {
+                    state.playPhase = .paused
+                    state.isSkippingIdle = false
+                    return stopTimerIfRunning(&state)
+                }
+                return []
+            }
+
+            state.loadedTimelineId = id
+            state.loadedDurationSec = cleanDur
+            state.progress = cleanProg
+            state.sweepAngleDeg = ReplayLogic.normalizeDegrees(cleanProg * 720.0)
+            state.playPhase = .paused
+            state.isSkippingIdle = false
+            return stopTimerIfRunning(&state)
+
+        case .togglePlay(let durationSec, let isActive, _):
+            let cleanDur = durationSec.isFinite ? max(0.0, durationSec) : 0.0
+            state.loadedDurationSec = cleanDur
+            var effects: [ReplayPlaybackEffect] = []
+
+            switch state.playPhase {
+            case .playing:
+                state.playPhase = .paused
+                state.isSkippingIdle = false
+                effects.append(contentsOf: stopTimerIfRunning(&state))
+                effects.append(.haptic(.playToggle))
+                return effects
+
+            case .paused, .scrubbing:
+                guard cleanDur > 0, isActive else {
+                    state.playPhase = .paused
+                    state.isSkippingIdle = false
+                    effects.append(contentsOf: stopTimerIfRunning(&state))
+                    return effects
+                }
+                if state.progress >= 1.0 {
+                    state.progress = 0.0
+                }
+                state.playPhase = .playing
+                state.isSkippingIdle = false
+                if !state.isTimerRunning {
+                    state.isTimerRunning = true
+                    effects.append(.startTimer)
+                }
+                effects.append(.haptic(.playToggle))
+                return effects
+            }
+
+        case .beginScrub:
+            switch state.playPhase {
+            case .playing:
+                state.playPhase = .scrubbing(wasPlaying: true)
+                state.isSkippingIdle = false
+                return stopTimerIfRunning(&state)
+            case .paused:
+                state.playPhase = .scrubbing(wasPlaying: false)
+                state.isSkippingIdle = false
+                return stopTimerIfRunning(&state)
+            case .scrubbing:
+                return []
+            }
+
+        case .scrub(let rawProgress, let timeline):
+            guard rawProgress.isFinite else { return [] }
+            let clamped = min(1.0, max(0.0, rawProgress))
+            let cleanDur = timeline.totalDurationSec.isFinite ? max(0.0, timeline.totalDurationSec) : 0.0
+            state.loadedDurationSec = cleanDur
+            var effects: [ReplayPlaybackEffect] = []
+
+            state.progress = clamped
+            state.isSkippingIdle = false
+            if clamped >= 1.0 && state.playPhase == .playing {
+                state.playPhase = .paused
+                effects.append(contentsOf: stopTimerIfRunning(&state))
+            }
+
+            let bucket = Int((clamped * 20.0).rounded(.down))
+            let sec = clamped * cleanDur
+            let inAnomaly = cleanDur > 0 && timeline.tracks.contains { track in
+                track.segments.contains { seg in
+                    (seg.kind == .retryLoop || seg.kind == .humanWait)
+                        && sec >= seg.startSec && sec <= seg.endSec
+                }
+            }
+
+            if inAnomaly && !state.wasInsideAnomaly {
+                state.wasInsideAnomaly = true
+                state.lastScrubBucket = bucket
+                effects.append(.haptic(.anomalyEnter))
+            } else {
+                state.wasInsideAnomaly = inAnomaly
+                if bucket != state.lastScrubBucket {
+                    state.lastScrubBucket = bucket
+                    effects.append(.haptic(.scrubDetent))
+                }
+            }
+            return effects
+
+        case .endScrub(let isActive, _):
+            state.lastScrubBucket = -1
+            state.wasInsideAnomaly = false
+            guard case .scrubbing(let wasPlaying) = state.playPhase else {
+                return []
+            }
+            if wasPlaying && isActive && state.loadedDurationSec > 0 && state.progress < 1.0 {
+                state.playPhase = .playing
+                if !state.isTimerRunning {
+                    state.isTimerRunning = true
+                    return [.startTimer]
+                }
+                return []
+            } else {
+                state.playPhase = .paused
+                state.isSkippingIdle = false
+                return stopTimerIfRunning(&state)
+            }
+
+        case .tick(let dt, let timeline, let isActive, let reduceMotion):
+            let cleanDur = timeline.totalDurationSec.isFinite ? max(0.0, timeline.totalDurationSec) : 0.0
+            state.loadedDurationSec = cleanDur
+
+            guard isActive, cleanDur > 0 else {
+                if state.playPhase == .playing {
+                    state.playPhase = .paused
+                    state.isSkippingIdle = false
+                }
+                return stopTimerIfRunning(&state)
+            }
+
+            guard state.playPhase == .playing else {
+                return stopTimerIfRunning(&state)
+            }
+
+            guard dt.isFinite, dt > 0 else { return [] }
+
+            state.step(deltaWallSec: dt, timeline: timeline, smartSkipIdle: true)
+            if state.playPhase == .playing {
+                if !reduceMotion {
+                    state.sweepAngleDeg = ReplayLogic.normalizeDegrees(
+                        state.sweepAngleDeg + dt * sweepDegreesPerSecond
+                    )
+                }
+                return []
+            } else {
+                return stopTimerIfRunning(&state)
+            }
+
+        case .stepPrev(let timeline):
+            state.loadedDurationSec = timeline.totalDurationSec.isFinite ? max(0.0, timeline.totalDurationSec) : 0.0
+            _ = state.stepToPreviousEvent(in: timeline)
+            return [.haptic(.stepEvent)]
+
+        case .stepNext(let timeline):
+            state.loadedDurationSec = timeline.totalDurationSec.isFinite ? max(0.0, timeline.totalDurationSec) : 0.0
+            var effects: [ReplayPlaybackEffect] = []
+            _ = state.stepToNextEvent(in: timeline)
+            if state.playPhase != .playing {
+                effects.append(contentsOf: stopTimerIfRunning(&state))
+            }
+            effects.append(.haptic(.stepEvent))
+            return effects
+
+        case .cycleSpeed:
+            state.cycleSpeed()
+            return [.haptic(.speedChange)]
+
+        case .setSpeed(let nextSpeed):
+            guard state.speed != nextSpeed else { return [] }
+            state.speed = nextSpeed
+            return [.haptic(.speedChange)]
+
+        case .setActive(let isActive, _):
+            guard !isActive else {
+                return []
+            }
+            state.playPhase = .paused
+            state.isSkippingIdle = false
+            state.lastScrubBucket = -1
+            state.wasInsideAnomaly = false
+            return stopTimerIfRunning(&state)
+        }
+    }
+
+    private static func stopTimerIfRunning(_ state: inout ReplayPlaybackState) -> [ReplayPlaybackEffect] {
+        guard state.isTimerRunning else { return [] }
+        state.isTimerRunning = false
+        return [.stopTimer]
     }
 }

@@ -945,4 +945,379 @@ struct ReplayTests {
         )
         #expect(abs(ReplayPlaybackState.suggestedInitialProgress(for: tl) - 0.50) < 1e-6)
     }
+
+    // MARK: - 10. ReplayStoreMachine (Anti-Split-Brain & Generation Invariants)
+
+    private func makeMissionSummary(id: String, title: String = "Mission") -> ReplayMissionSummary {
+        ReplayMissionSummary(
+            id: id,
+            title: title,
+            workspaceLabel: "AGYMonitor",
+            topology: .swarm,
+            startedAt: 1_700_000_000,
+            lastActiveAt: 1_700_000_100,
+            durationSec: 100,
+            trackCount: 2,
+            stepCount: 10,
+            isLive: false
+        )
+    }
+
+    private func makeSimpleTimeline(id: String, durationSec: Double = 100) -> ReplayTimeline {
+        let rootTrack = ReplayTrack(
+            id: "\(id)-root", name: "coordinator", roleLabel: "Coordinator", kind: .root,
+            parentTrackId: nil, depth: 0, modelClass: .carbon,
+            segments: [
+                ReplaySegment(id: "\(id)-s0", kind: .work, startSec: 0, endSec: 25, stepCount: 2),
+                ReplaySegment(id: "\(id)-s1", kind: .humanWait, startSec: 25, endSec: 50, stepCount: 0),
+                ReplaySegment(id: "\(id)-s2", kind: .retryLoop, startSec: 50, endSec: 70, stepCount: 3, errorCount: 3, estimatedCostUSD: 0.4),
+                ReplaySegment(id: "\(id)-s3", kind: .work, startSec: 70, endSec: max(70, durationSec), stepCount: 2),
+            ],
+            totalTokens: 1000, outputTokens: 200, estimatedCostUSD: 0.6, retryCount: 3, retryWasteUSD: 0.4
+        )
+        return ReplayTimeline(
+            id: id,
+            title: "Timeline \(id)",
+            workspaceLabel: "AGYMonitor",
+            topology: .swarm,
+            dateLabel: "2026-11-22",
+            totalDurationSec: durationSec,
+            tracks: [rootTrack],
+            beams: [],
+            totalCostUSD: 0.6,
+            totalTokens: 1000,
+            retryWasteUSD: 0.4,
+            retryWastePercent: 67,
+            humanWaitSec: 25,
+            humanWaitPercent: 25,
+            totalRetryLoops: 1
+        )
+    }
+
+    @Test("ReplayStoreMachine openBlackBox(preferredMissionId:) NEVER queues throwaway parse of missions.first")
+    func replayStorePreferredMissionNeverParsesFirst() {
+        let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+        let m1 = makeMissionSummary(id: "m1")
+        let m2 = makeMissionSummary(id: "m2")
+
+        // 1. Cold start with preferredMissionId "m2"
+        var state = ReplayStoreState()
+        let openEff = ReplayStoreMachine.reduce(
+            &state,
+            event: .openBlackBox(preferredMissionId: "m2", force: false, now: t0)
+        )
+        #expect(openEff == [.scanIndex(generation: 1), .loadTimeline(missionId: "m2", generation: 1)])
+        #expect(state.selectedMissionId == "m2")
+        #expect(state.pendingPreferredMissionId == "m2")
+        #expect(state.isIndexLoading)
+        #expect(state.isTimelineLoading)
+        #expect(state.activeReplay == nil)
+
+        // Concurrent non-forced openBlackBox while index is loading does NOT start duplicate scan
+        let dupOpen = ReplayStoreMachine.reduce(
+            &state,
+            event: .openBlackBox(preferredMissionId: "m2", force: false, now: t0.addingTimeInterval(0.5))
+        )
+        #expect(dupOpen.isEmpty)
+
+        // When indexLoaded arrives with [m1, m2], m2 is already loading -> zero duplicate or throwaway m1 load!
+        let idxEff = ReplayStoreMachine.reduce(
+            &state,
+            event: .indexLoaded(generation: 1, missions: [m1, m2], now: t0.addingTimeInterval(1.0))
+        )
+        #expect(idxEff.isEmpty)
+        #expect(state.pendingPreferredMissionId == nil)
+        #expect(state.selectedMissionId == "m2")
+        #expect(state.missions == [m1, m2])
+        #expect(!state.isIndexLoading)
+
+        // 2. Fresh index (< 5s TTL) with cleared selection + preferredMissionId "m2" -> loads m2 directly, never m1!
+        ReplayStoreMachine.reduce(&state, event: .clearSelection)
+        #expect(state.selectedMissionId == nil)
+        let freshEff = ReplayStoreMachine.reduce(
+            &state,
+            event: .openBlackBox(preferredMissionId: "m2", force: false, now: t0.addingTimeInterval(3.0))
+        )
+        #expect(freshEff == [.loadTimeline(missionId: "m2", generation: 3)])
+        #expect(state.selectedMissionId == "m2")
+
+        // 3. Stale index (>= 5s TTL) triggers background scan while preserving cached missions
+        let staleEff = ReplayStoreMachine.reduce(
+            &state,
+            event: .openBlackBox(preferredMissionId: nil, force: false, now: t0.addingTimeInterval(10.0))
+        )
+        #expect(staleEff == [.scanIndex(generation: 2)])
+        #expect(state.isIndexLoading)
+        #expect(state.missions == [m1, m2])
+    }
+
+    @Test("ReplayStoreMachine prevents cross-mission split-brain, deduplicates selection, reconciles vanished/empty index, and handles unavailable")
+    func replayStoreAntiSplitBrainAndReconciliation() {
+        let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+        let mA = makeMissionSummary(id: "mA")
+        let mB = makeMissionSummary(id: "mB")
+        let tlA = makeSimpleTimeline(id: "mA")
+        let tlB = makeSimpleTimeline(id: "mB")
+
+        var state = ReplayStoreState()
+        let e1 = ReplayStoreMachine.reduce(&state, event: .openBlackBox(preferredMissionId: nil, force: false, now: t0))
+        #expect(e1 == [.scanIndex(generation: 1)])
+
+        // Stale index generation is ignored
+        #expect(ReplayStoreMachine.reduce(&state, event: .indexLoaded(generation: 99, missions: [mA], now: t0)).isEmpty)
+        #expect(state.isIndexLoading)
+
+        // Valid indexLoaded selects first mission mA
+        let e2 = ReplayStoreMachine.reduce(&state, event: .indexLoaded(generation: 1, missions: [mA, mB], now: t0))
+        #expect(e2 == [.loadTimeline(missionId: "mA", generation: 1)])
+        #expect(state.selectedMissionId == "mA")
+
+        // Re-selecting already-loading mA (force: false) is a strict no-op
+        #expect(ReplayStoreMachine.reduce(&state, event: .selectMission(id: "mA", force: false)).isEmpty)
+        #expect(state.timelineGeneration == 1)
+
+        // Timeline A loads cleanly
+        ReplayStoreMachine.reduce(&state, event: .timelineLoaded(generation: 1, missionId: "mA", timeline: tlA))
+        #expect(state.activeReplay == tlA)
+        #expect(!state.isTimelineLoading)
+        #expect(!state.isTimelineUnavailable)
+
+        // Re-selecting already-loaded mA (force: false) is a strict no-op; force: true reloads
+        #expect(ReplayStoreMachine.reduce(&state, event: .selectMission(id: "mA", force: false)).isEmpty)
+        let forcedReload = ReplayStoreMachine.reduce(&state, event: .selectMission(id: "mA", force: true))
+        #expect(forcedReload == [.loadTimeline(missionId: "mA", generation: 2)])
+        #expect(state.activeReplay == nil)
+
+        // Restore mA loaded, then switch to mB -> activeReplay MUST immediately become nil (zero split-brain!)
+        ReplayStoreMachine.reduce(&state, event: .timelineLoaded(generation: 2, missionId: "mA", timeline: tlA))
+        #expect(state.activeReplay == tlA)
+        let selB = ReplayStoreMachine.reduce(&state, event: .selectMission(id: "mB", force: false))
+        #expect(selB == [.loadTimeline(missionId: "mB", generation: 3)])
+        #expect(state.selectedMissionId == "mB")
+        #expect(state.activeReplay == nil)
+        #expect(state.timelinePhase == .loading(missionId: "mB", generation: 3))
+
+        // Stale completion for mA (gen 2) and mismatched timeline ID for gen 3 are both ignored
+        ReplayStoreMachine.reduce(&state, event: .timelineLoaded(generation: 2, missionId: "mA", timeline: tlA))
+        #expect(state.timelinePhase == .loading(missionId: "mB", generation: 3))
+        ReplayStoreMachine.reduce(&state, event: .timelineLoaded(generation: 3, missionId: "mB", timeline: tlA))
+        #expect(state.timelinePhase == .loading(missionId: "mB", generation: 3))
+
+        // Nil timeline transitions to .unavailable(missionId: "mB")
+        ReplayStoreMachine.reduce(&state, event: .timelineLoaded(generation: 3, missionId: "mB", timeline: nil))
+        #expect(state.timelinePhase == .unavailable(missionId: "mB"))
+        #expect(state.isTimelineUnavailable)
+        #expect(state.activeReplay == nil)
+
+        // Selecting an unavailable mission retries loading
+        let retryB = ReplayStoreMachine.reduce(&state, event: .selectMission(id: "mB", force: false))
+        #expect(retryB == [.loadTimeline(missionId: "mB", generation: 4)])
+        ReplayStoreMachine.reduce(&state, event: .timelineLoaded(generation: 4, missionId: "mB", timeline: tlB))
+        #expect(state.activeReplay == tlB)
+
+        // Forced refresh where mB disappeared reconciles selection to remaining mission mA
+        let refresh = ReplayStoreMachine.reduce(&state, event: .openBlackBox(preferredMissionId: nil, force: true, now: t0.addingTimeInterval(2)))
+        #expect(refresh == [.scanIndex(generation: 2), .loadTimeline(missionId: "mB", generation: 5)])
+        let reconcileA = ReplayStoreMachine.reduce(&state, event: .indexLoaded(generation: 2, missions: [mA], now: t0.addingTimeInterval(3)))
+        #expect(reconcileA == [.loadTimeline(missionId: "mA", generation: 6)])
+        #expect(state.selectedMissionId == "mA")
+
+        // Index returning empty clears selection and invalidates in-flight load
+        _ = ReplayStoreMachine.reduce(&state, event: .openBlackBox(preferredMissionId: nil, force: true, now: t0.addingTimeInterval(4)))
+        let emptyIdx = ReplayStoreMachine.reduce(&state, event: .indexLoaded(generation: 3, missions: [], now: t0.addingTimeInterval(5)))
+        #expect(emptyIdx.isEmpty)
+        #expect(state.selectedMissionId == nil)
+        #expect(state.timelinePhase == .idle)
+        #expect(state.missions.isEmpty)
+    }
+
+    // MARK: - 11. ReplayPlaybackMachine (Phase, Sweep Continuity, Scrubbing & Gates)
+
+    @Test("ReplayPlaybackMachine enforces duration/active gates, allows Reduce Motion playback with stationary sweep, and holds sweepAngleDeg without teleport")
+    func replayPlaybackGatesAndSweepContinuity() {
+        let tl = makeSimpleTimeline(id: "m1", durationSec: 100)
+        let zeroTL = makeSimpleTimeline(id: "m0", durationSec: 0)
+        var state = ReplayPlaybackState()
+
+        // Sync timeline m1 at suggested progress 0.10
+        let syncEff = ReplayPlaybackMachine.reduce(
+            &state,
+            event: .syncTimeline(id: "m1", durationSec: 100, suggestedProgress: 0.10, pinnedMissionId: "m1")
+        )
+        #expect(syncEff.isEmpty)
+        #expect(state.loadedTimelineId == "m1")
+        #expect(abs(state.progress - 0.10) < 1e-9)
+        #expect(abs(state.sweepAngleDeg - 72.0) < 1e-9)
+        #expect(state.playPhase == .paused)
+
+        // Mismatched pinnedMissionId is ignored
+        ReplayPlaybackMachine.reduce(
+            &state,
+            event: .syncTimeline(id: "m-other", durationSec: 50, suggestedProgress: 0.5, pinnedMissionId: "m1")
+        )
+        #expect(state.loadedTimelineId == "m1")
+
+        // Zero duration NEVER enters .playing or starts timer
+        let zeroToggle = ReplayPlaybackMachine.reduce(
+            &state,
+            event: .togglePlay(durationSec: 0, isActive: true, reduceMotion: false)
+        )
+        #expect(zeroToggle.isEmpty)
+        #expect(state.playPhase == .paused)
+        #expect(!state.isTimerRunning)
+
+        // Inactive NEVER enters .playing or starts timer
+        #expect(ReplayPlaybackMachine.reduce(&state, event: .togglePlay(durationSec: 100, isActive: false, reduceMotion: false)).isEmpty)
+        #expect(state.playPhase == .paused)
+        #expect(ReplayPlaybackMachine.reduce(&state, event: .togglePlay(durationSec: 100, isActive: false, reduceMotion: true)).isEmpty)
+        #expect(state.playPhase == .paused)
+
+        // Valid togglePlay enters .playing and emits .startTimer + .playToggle haptic
+        let playEff = ReplayPlaybackMachine.reduce(
+            &state,
+            event: .togglePlay(durationSec: 100, isActive: true, reduceMotion: false)
+        )
+        #expect(playEff == [.startTimer, .haptic(.playToggle)])
+        #expect(state.playPhase == .playing)
+        #expect(state.isPlaying)
+        #expect(state.isTimerRunning)
+
+        // Tick 1.0s advances sweepAngleDeg by exactly 90°/s (72 + 90 = 162°)
+        let tickEff = ReplayPlaybackMachine.reduce(
+            &state,
+            event: .tick(dt: 1.0, timeline: tl, isActive: true, reduceMotion: false)
+        )
+        #expect(tickEff.isEmpty)
+        #expect(abs(state.sweepAngleDeg - 162.0) < 1e-9)
+        #expect(abs(state.progress - 0.15) < 1e-9)
+
+        // Pausing holds exact sweepAngleDeg (162°, NOT teleporting to 0.15 * 720 = 108°!)
+        let pauseEff = ReplayPlaybackMachine.reduce(
+            &state,
+            event: .togglePlay(durationSec: 100, isActive: true, reduceMotion: false)
+        )
+        #expect(pauseEff == [.stopTimer, .haptic(.playToggle)])
+        #expect(state.playPhase == .paused)
+        #expect(!state.isTimerRunning)
+        #expect(abs(state.sweepAngleDeg - 162.0) < 1e-9)
+
+        // Resume + setActive(false) pauses and stops timer immediately
+        _ = ReplayPlaybackMachine.reduce(&state, event: .togglePlay(durationSec: 100, isActive: true, reduceMotion: false))
+        let hideEff = ReplayPlaybackMachine.reduce(&state, event: .setActive(false, reduceMotion: false))
+        #expect(hideEff == [.stopTimer])
+        #expect(state.playPhase == .paused)
+        #expect(!state.isTimerRunning)
+
+        // Under Reduce Motion, playback IS allowed and advances progress while keeping sweepAngleDeg stationary
+        let rmPlayEff = ReplayPlaybackMachine.reduce(
+            &state,
+            event: .togglePlay(durationSec: 100, isActive: true, reduceMotion: true)
+        )
+        #expect(rmPlayEff == [.startTimer, .haptic(.playToggle)])
+        #expect(state.playPhase == .playing)
+        #expect(state.isTimerRunning)
+
+        // setActive(true, reduceMotion: true) keeps playback running
+        let rmKeepActive = ReplayPlaybackMachine.reduce(&state, event: .setActive(true, reduceMotion: true))
+        #expect(rmKeepActive.isEmpty)
+        #expect(state.playPhase == .playing)
+
+        // tick under Reduce Motion advances progress without rotating sweepAngleDeg
+        let progBeforeRM = state.progress
+        let sweepBeforeRM = state.sweepAngleDeg
+        let rmTick = ReplayPlaybackMachine.reduce(&state, event: .tick(dt: 1.0, timeline: tl, isActive: true, reduceMotion: true))
+        #expect(rmTick.isEmpty)
+        #expect(state.playPhase == .playing)
+        #expect(state.progress > progBeforeRM)
+        #expect(abs(state.sweepAngleDeg - sweepBeforeRM) < 1e-9)
+
+        // beginScrub -> endScrub under Reduce Motion resumes .playing and restarts timer
+        #expect(ReplayPlaybackMachine.reduce(&state, event: .beginScrub) == [.stopTimer])
+        let rmEndScrub = ReplayPlaybackMachine.reduce(&state, event: .endScrub(isActive: true, reduceMotion: true))
+        #expect(rmEndScrub == [.startTimer])
+        #expect(state.playPhase == .playing)
+        #expect(state.isTimerRunning)
+
+        // Tick on zero-duration timeline stops timer & pauses
+        let zeroTick = ReplayPlaybackMachine.reduce(&state, event: .tick(dt: 0.1, timeline: zeroTL, isActive: true, reduceMotion: false))
+        #expect(zeroTick == [.stopTimer])
+        #expect(state.playPhase == .paused)
+    }
+
+    @Test("ReplayPlaybackMachine scrubbing suspends/resumes playback, emits anomaly/detent haptics, and resets scrub trackers")
+    func replayPlaybackScrubLifecycleAndHaptics() {
+        let tl = makeSimpleTimeline(id: "m1", durationSec: 100)
+        var state = ReplayPlaybackState()
+        ReplayPlaybackMachine.reduce(&state, event: .syncTimeline(id: "m1", durationSec: 100, suggestedProgress: 0.05))
+        _ = ReplayPlaybackMachine.reduce(&state, event: .togglePlay(durationSec: 100, isActive: true, reduceMotion: false))
+        #expect(state.playPhase == .playing)
+
+        // beginScrub while playing -> .scrubbing(wasPlaying: true) + .stopTimer
+        let beginEff = ReplayPlaybackMachine.reduce(&state, event: .beginScrub)
+        #expect(beginEff == [.stopTimer])
+        #expect(state.playPhase == .scrubbing(wasPlaying: true))
+        #expect(!state.isTimerRunning)
+
+        // Scrub into normal work bucket 2 (p = 0.12 -> bucket 2) -> .scrubDetent
+        let s1 = ReplayPlaybackMachine.reduce(&state, event: .scrub(progress: 0.12, timeline: tl))
+        #expect(s1 == [.haptic(.scrubDetent)])
+        #expect(state.lastScrubBucket == 2)
+        #expect(state.wasInsideAnomaly == false)
+
+        // Scrub within same bucket (p = 0.13 -> bucket 2) -> no duplicate haptic
+        let s2 = ReplayPlaybackMachine.reduce(&state, event: .scrub(progress: 0.13, timeline: tl))
+        #expect(s2.isEmpty)
+
+        // Scrub into retryLoop anomaly (50..70s -> p = 0.55) -> .anomalyEnter (not scrubDetent)
+        let s3 = ReplayPlaybackMachine.reduce(&state, event: .scrub(progress: 0.55, timeline: tl))
+        #expect(s3 == [.haptic(.anomalyEnter)])
+        #expect(state.wasInsideAnomaly == true)
+        #expect(state.lastScrubBucket == 11)
+
+        // Staying inside anomaly across another bucket emits scrubDetent (not repeated anomalyEnter)
+        let s4 = ReplayPlaybackMachine.reduce(&state, event: .scrub(progress: 0.62, timeline: tl))
+        #expect(s4 == [.haptic(.scrubDetent)])
+        #expect(state.wasInsideAnomaly == true)
+
+        // endScrub while active & !reduceMotion & progress < 1 -> resumes .playing + .startTimer and resets trackers
+        let endEff = ReplayPlaybackMachine.reduce(&state, event: .endScrub(isActive: true, reduceMotion: false))
+        #expect(endEff == [.startTimer])
+        #expect(state.playPhase == .playing)
+        #expect(state.isTimerRunning)
+        #expect(state.lastScrubBucket == -1)
+        #expect(state.wasInsideAnomaly == false)
+
+        // Scrub to 1.0 then endScrub stays paused (does NOT emit .startTimer)
+        _ = ReplayPlaybackMachine.reduce(&state, event: .beginScrub)
+        _ = ReplayPlaybackMachine.reduce(&state, event: .scrub(progress: 1.0, timeline: tl))
+        let endAtOne = ReplayPlaybackMachine.reduce(&state, event: .endScrub(isActive: true, reduceMotion: false))
+        #expect(endAtOne.isEmpty)
+        #expect(state.playPhase == .paused)
+        #expect(!state.isTimerRunning)
+        #expect(state.lastScrubBucket == -1)
+        #expect(state.wasInsideAnomaly == false)
+
+        // syncTimeline to new mission also resets scrub trackers and stops timer if running
+        _ = ReplayPlaybackMachine.reduce(&state, event: .scrub(progress: 0.55, timeline: tl))
+        #expect(state.wasInsideAnomaly == true)
+        #expect(state.lastScrubBucket == 11)
+        _ = ReplayPlaybackMachine.reduce(&state, event: .togglePlay(durationSec: 100, isActive: true, reduceMotion: false))
+        let switchEff = ReplayPlaybackMachine.reduce(
+            &state,
+            event: .syncTimeline(id: "m2", durationSec: 80, suggestedProgress: 0.25)
+        )
+        #expect(switchEff == [.stopTimer])
+        #expect(state.loadedTimelineId == "m2")
+        #expect(state.playPhase == .paused)
+        #expect(state.lastScrubBucket == -1)
+        #expect(state.wasInsideAnomaly == false)
+
+        // stepPrev / stepNext / cycleSpeed / setSpeed effects
+        #expect(ReplayPlaybackMachine.reduce(&state, event: .cycleSpeed) == [.haptic(.speedChange)])
+        #expect(state.speed == .x2)
+        #expect(ReplayPlaybackMachine.reduce(&state, event: .setSpeed(.x2)).isEmpty)
+        #expect(ReplayPlaybackMachine.reduce(&state, event: .setSpeed(.x4)) == [.haptic(.speedChange)])
+        #expect(ReplayPlaybackMachine.reduce(&state, event: .stepNext(timeline: tl)) == [.haptic(.stepEvent)])
+        #expect(ReplayPlaybackMachine.reduce(&state, event: .stepPrev(timeline: tl)) == [.haptic(.stepEvent)])
+    }
 }

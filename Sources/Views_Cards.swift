@@ -7,16 +7,57 @@ import AppKit
 
 // MARK: - Usage Overview Section
 
+private struct UsageFocusScope: Equatable, Sendable {
+    let tab: DisplayTab
+    let period: UsagePeriodScope
+    let monthKey: String
+    let visualMode: TelemetryVisualMode
+    let isPanelVisible: Bool
+}
+
 struct UsageOverviewSection: View {
     @ObservedObject var store: UsageStore
     var metricOverride: DisplayTab? = nil
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
     @Environment(\.telemetryPanelVisible) private var isPanelVisible
-    @State private var focusedModelId: String? = nil
+    @State private var modelFocus = ChartInspectionState<UsageFocusScope, String>(
+        scope: UsageFocusScope(
+            tab: .cost,
+            period: .month,
+            monthKey: "",
+            visualMode: .instrument,
+            isPanelVisible: false
+        )
+    )
 
     private var activeMetric: DisplayTab {
         metricOverride ?? store.selectedTab
+    }
+
+    private var focusScope: UsageFocusScope {
+        UsageFocusScope(
+            tab: activeMetric,
+            period: store.selectedPeriodScope,
+            monthKey: "\(store.viewingYear)-\(store.viewingMonth)",
+            visualMode: store.visualMode,
+            isPanelVisible: isPanelVisible
+        )
+    }
+
+    private var focusedModelId: String? {
+        guard isPanelVisible, modelFocus.scope == focusScope else { return nil }
+        return modelFocus.target
+    }
+
+    private var focusedModelIdBinding: Binding<String?> {
+        Binding(
+            get: { focusedModelId },
+            set: { next in
+                modelFocus.syncScope(focusScope)
+                modelFocus.setTarget(isPanelVisible ? next : nil)
+            }
+        )
     }
 
     var body: some View {
@@ -47,7 +88,7 @@ struct UsageOverviewSection: View {
                         selectedScope: $store.selectedPeriodScope,
                         year: store.viewingYear,
                         month: store.viewingMonth,
-                        focusedModelId: $focusedModelId
+                        focusedModelId: focusedModelIdBinding
                     )
                 } else if store.visualMode == .instrument && activeMetric == .tokens {
                     TokensInstrumentView(
@@ -56,7 +97,7 @@ struct UsageOverviewSection: View {
                         selectedScope: $store.selectedPeriodScope,
                         year: store.viewingYear,
                         month: store.viewingMonth,
-                        focusedModelId: $focusedModelId
+                        focusedModelId: focusedModelIdBinding
                     )
                 } else {
                 VStack(spacing: 0) {
@@ -83,7 +124,7 @@ struct UsageOverviewSection: View {
                     ModelLedgerSection(
                         metric: activeMetric,
                         usage: activeUsage,
-                        focusedModelId: $focusedModelId
+                        focusedModelId: focusedModelIdBinding
                     )
 
                     if let daily = bundle.dailyBreakdown, !daily.isEmpty {
@@ -122,7 +163,7 @@ struct UsageOverviewSection: View {
                         selectedScope: nil,
                         year: store.viewingYear,
                         month: store.viewingMonth,
-                        focusedModelId: $focusedModelId
+                        focusedModelId: focusedModelIdBinding
                     )
                 } else if store.visualMode == .instrument && activeMetric == .tokens {
                     TokensInstrumentView(
@@ -132,7 +173,7 @@ struct UsageOverviewSection: View {
                         selectedScope: nil,
                         year: store.viewingYear,
                         month: store.viewingMonth,
-                        focusedModelId: $focusedModelId
+                        focusedModelId: focusedModelIdBinding
                     )
                 } else {
                 VStack(spacing: 0) {
@@ -151,7 +192,7 @@ struct UsageOverviewSection: View {
                     ModelLedgerSection(
                         metric: activeMetric,
                         usage: bundle.month,
-                        focusedModelId: $focusedModelId
+                        focusedModelId: focusedModelIdBinding
                     )
 
                     if let daily = bundle.dailyBreakdown, !daily.isEmpty {
@@ -181,12 +222,12 @@ struct UsageOverviewSection: View {
             }
         }
         }
-        .onChange(of: store.selectedTab) { _ in focusedModelId = nil }
-        .onChange(of: store.viewingMonth) { _ in focusedModelId = nil }
-        .onChange(of: store.viewingYear) { _ in focusedModelId = nil }
-        .onChange(of: store.selectedPeriodScope) { _ in focusedModelId = nil }
-        .onChange(of: store.visualMode) { _ in focusedModelId = nil }
-        .onChange(of: isPanelVisible) { visible in if !visible { focusedModelId = nil } }
+        .onChange(of: focusScope) { nextScope in
+            modelFocus.syncScope(nextScope)
+        }
+        .onDisappear {
+            modelFocus.reset()
+        }
     }
 
     private var apiEquivFootnote: some View {
@@ -608,7 +649,7 @@ struct DailyChart: View {
     private var daysInMonth: Int { AppDate.daysInMonth(year: year, month: month) ?? 30 }
 
     private var dayLookup: [Int: DailyUsage] {
-        Dictionary(uniqueKeysWithValues: data.map { ($0.day, $0) })
+        Dictionary(data.map { ($0.day, $0) }, uniquingKeysWith: { _, latest in latest })
     }
 
     private var maxValue: Double {

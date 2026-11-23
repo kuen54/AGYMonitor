@@ -1,5 +1,4 @@
 import AppKit
-import AVFoundation
 import Foundation
 import SwiftUI
 
@@ -18,76 +17,29 @@ extension EnvironmentValues {
     }
 }
 
-// MARK: - Bespoke 5-Tab Instrument Haptic Grammar
-
-/// Tactile feedback cues bound strictly to the `Instrument` visual style.
-/// Combines macOS's three native Taptic Engine patterns (`.alignment`, `.levelChange`, `.generic`)
-/// with cancellable 2-beat micro-cadences so each of the 5 Instrument tabs has its own physical feel.
-enum InstrumentHapticCue: Equatable, Sendable {
-    // Global Instrument Chrome
-    case tabDetent           // Crisp Swiss bezel tab / stepper click
-    case modeEngage          // Engaging Instrument mode or cycling studio theme dial
-
-    // Tab 01 Cost — Geological Strata & Ridge
-    case costRidgeDay        // Traversing daily elevation points along the ridgeline
-    case costRidgePeak       // Reaching the monthly peak summit
-    case costStrataShift     // Locking onto a Borehole model stratum or switching scope
-
-    // Tab 02 Tokens — Fluid Flow & Pulse Matrix
-    case tokenStreamLock     // Soft fluid lock onto a Folded Token Stream model or channel
-    case tokenMatrixCell     // Active (non-empty) cell in the throughput spectrogram
-    case tokenMatrixPeak     // High-throughput peak cell
-
-    // Tab 03 Time — Chronometer & Topography
-    case chronometerCrown    // Watch-crown sweep across Polar rings or Month Elevation bars
-    case chronometerPin      // Solid bezel lock when pinning a Polar ring or hitting Month Peak
-    case chronometerUnpin    // Gentle release when unpinning or scrubbing lower 24h diurnal bins
-    case contourRidgeStep    // Crossing active cells/ridges on the Year Marching-Squares contour
-    case contourPeakLock     // Reaching an [H] meteorological peak on the Year contour
-
-    // Tab 04 Sessions — Tactical Agent Radar
-    case radarBeaconLock     // Targeting a busy/idle radar beacon or keyboard ↑↓ selection
-    case radarAlertLock      // Double-tap "beep-lock" on an amber WAITING beacon
-    case radarJumpEngage     // Clicking a radar beacon to jump to its terminal/IDE
-
-    // Tab 05 Plan — 270° Orbital Phase Dials
-    case orbitalDialInspect  // Inspecting a healthy 270° orbital quota dial
-    case orbitalDeficitWarn  // Double-tap tactile warning on a burn-pace deficit / critical dial
-    case creditsTick         // Soft detent across 7D horizon / AI Credits pool strips
-}
-
 // MARK: - Craft Engine (Instrument Force Touch Grammar + Pure-Code Acoustic Chimes)
 
 /// Tactile and acoustic craft feedback engine for AGYMonitor.
-/// - Instrument Force Touch cues throttle per-cue and cancel any pending cadence beat on new input
-///   so rapid scrubbing feels like precision horology rather than buzzing.
-/// - Acoustic cockpit chimes synthesize whisper-quiet PCM buffers in pure code (zero
-///   bundled audio files) and tear down AVAudioEngine after idle playback so idle CPU
-///   and audio hardware usage remain 0%.
+/// - Instrument Force Touch cues are governed by pure `HapticCadenceMachine` (`Core_CraftState.swift`)
+///   for deterministic throttling, salient landmark interrupts, and generation-guarded 2-beat cadences.
+/// - Acoustic cockpit chimes synthesize whisper-quiet 16-bit PCM RIFF/WAV waveforms in pure code
+///   (zero bundled audio files, zero `AVAudioEngine` graph/route-change crash risk) played via
+///   in-memory `NSSound(data:)` and governed by `AcousticEngineLifecycleMachine` (`Core_CraftState.swift`)
+///   for multi-chime drain accumulation and idle teardown.
 @MainActor
 final class CraftEngine {
     static let shared = CraftEngine()
 
-    private struct HapticRecipe {
-        let primary: NSHapticFeedbackManager.FeedbackPattern
-        let followUp: (pattern: NSHapticFeedbackManager.FeedbackPattern, delay: TimeInterval)?
-        let minInterval: TimeInterval
-        /// Landmarks (peaks, pins, alerts, explicit mode/tab actions) may cut through an
-        /// active scrub cue after `salientInterruptFloor` so fast sweeps never miss summits.
-        let isSalient: Bool
-    }
-
-    private static let salientInterruptFloor: TimeInterval = 0.018
     private static let sampleRate: Double = 44_100.0
-    private static let idleTeardownDelay: TimeInterval = 0.50
 
-    private var lastHapticUptime: TimeInterval = 0
-    private var lastHapticCue: InstrumentHapticCue?
+    private var hapticState = HapticCadenceState()
     private var pendingCadenceWorkItem: DispatchWorkItem?
-    private var triggerState = AcousticTriggerState()
 
-    private var audioEngine: AVAudioEngine?
-    private var playerNode: AVAudioPlayerNode?
+    private var triggerState = AcousticTriggerState()
+    private var acousticEngineState = AcousticEngineState()
+
+    private var activeSounds: [NSSound] = []
+    private var cachedCueWAVs: [AcousticCue: (data: Data, duration: Double)] = [:]
     private var teardownWorkItem: DispatchWorkItem?
 
     private init() {}
@@ -101,212 +53,184 @@ final class CraftEngine {
 
     /// Cancels any queued second beat of a double-tap cadence immediately.
     func cancelPendingHapticCadence() {
-        pendingCadenceWorkItem?.cancel()
-        pendingCadenceWorkItem = nil
+        dispatchHaptic(.cancel)
     }
 
     /// Performs a bespoke Force Touch cue with per-cue throttling and clean cadence cancellation.
     func perform(_ cue: InstrumentHapticCue, enabled: Bool) {
-        guard enabled else {
-            cancelPendingHapticCadence()
-            return
-        }
+        dispatchHaptic(.perform(
+            cue: cue,
+            enabled: enabled,
+            now: ProcessInfo.processInfo.systemUptime
+        ))
+    }
 
-        let recipe = Self.recipe(for: cue)
-        let now = ProcessInfo.processInfo.systemUptime
-        let elapsed = now - lastHapticUptime
-        let requiredInterval: TimeInterval = (recipe.isSalient && lastHapticCue != cue)
-            ? min(recipe.minInterval, Self.salientInterruptFloor)
-            : recipe.minInterval
+    private func dispatchHaptic(_ event: HapticCadenceEvent) {
+        let effects = HapticCadenceMachine.reduce(&hapticState, event: event)
+        for effect in effects {
+            switch effect {
+            case .trigger(let pattern):
+                NSHapticFeedbackManager.defaultPerformer.perform(
+                    Self.nsPattern(for: pattern),
+                    performanceTime: .now
+                )
 
-        guard elapsed >= requiredInterval else { return }
+            case .scheduleFollowUp(let generation, let pattern, let delay):
+                pendingCadenceWorkItem?.cancel()
+                let work = DispatchWorkItem { [weak self] in
+                    guard let self = self else { return }
+                    self.pendingCadenceWorkItem = nil
+                    self.dispatchHaptic(.followUpFired(generation: generation, pattern: pattern))
+                }
+                pendingCadenceWorkItem = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
 
-        cancelPendingHapticCadence()
-        lastHapticUptime = now
-        lastHapticCue = cue
-
-        NSHapticFeedbackManager.defaultPerformer.perform(recipe.primary, performanceTime: .now)
-
-        if let followUp = recipe.followUp {
-            let work = DispatchWorkItem { [weak self] in
-                guard let self = self else { return }
-                self.pendingCadenceWorkItem = nil
-                NSHapticFeedbackManager.defaultPerformer.perform(followUp.pattern, performanceTime: .now)
+            case .cancelFollowUp:
+                pendingCadenceWorkItem?.cancel()
+                pendingCadenceWorkItem = nil
             }
-            pendingCadenceWorkItem = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + followUp.delay, execute: work)
         }
     }
 
-    private static func recipe(for cue: InstrumentHapticCue) -> HapticRecipe {
-        switch cue {
-        // Global Instrument Chrome
-        case .tabDetent:
-            return HapticRecipe(primary: .alignment, followUp: nil, minInterval: 0.040, isSalient: true)
-        case .modeEngage:
-            return HapticRecipe(primary: .levelChange, followUp: nil, minInterval: 0.080, isSalient: true)
-
-        // Tab 01 Cost
-        case .costRidgeDay:
-            return HapticRecipe(primary: .alignment, followUp: nil, minInterval: 0.038, isSalient: false)
-        case .costRidgePeak:
-            return HapticRecipe(primary: .levelChange, followUp: nil, minInterval: 0.075, isSalient: true)
-        case .costStrataShift:
-            return HapticRecipe(primary: .levelChange, followUp: nil, minInterval: 0.055, isSalient: true)
-
-        // Tab 02 Tokens
-        case .tokenStreamLock:
-            return HapticRecipe(primary: .generic, followUp: nil, minInterval: 0.050, isSalient: false)
-        case .tokenMatrixCell:
-            return HapticRecipe(primary: .alignment, followUp: nil, minInterval: 0.042, isSalient: false)
-        case .tokenMatrixPeak:
-            return HapticRecipe(primary: .levelChange, followUp: nil, minInterval: 0.075, isSalient: true)
-
-        // Tab 03 Time
-        case .chronometerCrown:
-            return HapticRecipe(primary: .alignment, followUp: nil, minInterval: 0.035, isSalient: false)
-        case .chronometerPin:
-            return HapticRecipe(primary: .levelChange, followUp: nil, minInterval: 0.065, isSalient: true)
-        case .chronometerUnpin:
-            return HapticRecipe(primary: .generic, followUp: nil, minInterval: 0.055, isSalient: false)
-        case .contourRidgeStep:
-            return HapticRecipe(primary: .alignment, followUp: nil, minInterval: 0.075, isSalient: false)
-        case .contourPeakLock:
-            return HapticRecipe(primary: .levelChange, followUp: nil, minInterval: 0.085, isSalient: true)
-
-        // Tab 04 Sessions
-        case .radarBeaconLock:
-            return HapticRecipe(primary: .alignment, followUp: nil, minInterval: 0.045, isSalient: false)
-        case .radarAlertLock:
-            return HapticRecipe(
-                primary: .alignment,
-                followUp: (pattern: .levelChange, delay: 0.055),
-                minInterval: 0.120,
-                isSalient: true
-            )
-        case .radarJumpEngage:
-            return HapticRecipe(primary: .levelChange, followUp: nil, minInterval: 0.080, isSalient: true)
-
-        // Tab 05 Plan
-        case .orbitalDialInspect:
-            return HapticRecipe(primary: .alignment, followUp: nil, minInterval: 0.055, isSalient: false)
-        case .orbitalDeficitWarn:
-            return HapticRecipe(
-                primary: .levelChange,
-                followUp: (pattern: .alignment, delay: 0.060),
-                minInterval: 0.140,
-                isSalient: true
-            )
-        case .creditsTick:
-            return HapticRecipe(primary: .generic, followUp: nil, minInterval: 0.050, isSalient: false)
+    private static func nsPattern(for kind: HapticPatternKind) -> NSHapticFeedbackManager.FeedbackPattern {
+        switch kind {
+        case .alignment:   return .alignment
+        case .levelChange: return .levelChange
+        case .generic:     return .generic
         }
     }
 
     // MARK: Session Acoustic Edge Transitions
 
+    /// Clears the acoustic edge-detector baseline (e.g. before initial scan or after monitoring stops).
+    func resetAcousticBaseline() {
+        triggerState.reset()
+    }
+
     /// Feeds live session transition sets into the pure `AcousticTriggerState` edge detector
-    /// and plays a whisper-quiet synthesized cue only on newly triggered edge events.
+    /// and plays a whisper-quiet synthesized cue only on newly triggered post-scan edge events.
     func handleSessionTransition(
         waitingIds: Set<String>,
         doneUnseenIds: Set<String>,
+        hasCompletedInitialScan: Bool = true,
         enabled: Bool
     ) {
-        // Always advance the pure baseline state so enabling chimes later never fires stale sessions.
-        let cue = triggerState.update(waitingIds: waitingIds, doneUnseenIds: doneUnseenIds)
+        // Always advance the pure baseline state once initial scan completes so enabling
+        // chimes later never fires stale sessions.
+        let cue = triggerState.update(
+            waitingIds: waitingIds,
+            doneUnseenIds: doneUnseenIds,
+            hasCompletedInitialScan: hasCompletedInitialScan
+        )
         guard enabled, let cue = cue else { return }
-        playCue(cue, enabled: true)
+        playAcoustic(cue, enabled: true)
     }
 
     // MARK: Pure-Code Synthesized Acoustic Chimes
 
-    /// Plays a whisper-quiet, click-free synthesized chime and tears down the audio engine
-    /// cleanly once playback finishes. Gracefully no-ops in headless / no-audio environments.
-    func playCue(_ cue: AcousticCue, enabled: Bool) {
+    /// Plays a whisper-quiet, click-free synthesized WAV chime via `NSSound(data:)` and clears
+    /// active sound handles once all queued chimes drain. Gracefully no-ops in headless / no-audio environments.
+    func playAcoustic(_ cue: AcousticCue, enabled: Bool) {
         guard enabled else { return }
-        guard let buffer = makeCueBuffer(for: cue) else { return }
-
-        teardownWorkItem?.cancel()
-        teardownWorkItem = nil
-
-        guard let (engine, player) = ensureAudioGraph(format: buffer.format) else {
-            teardownAudioGraph()
-            return
-        }
-
-        if !engine.isRunning {
-            do {
-                try engine.start()
-            } catch {
-                teardownAudioGraph()
-                return
-            }
-        }
-
-        player.scheduleBuffer(buffer, at: nil, options: [])
-        if !player.isPlaying {
-            player.play()
-        }
-
-        let duration = Double(buffer.frameLength) / buffer.format.sampleRate
-        let work = DispatchWorkItem { [weak self] in
-            self?.teardownAudioGraph()
-        }
-        teardownWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + duration + Self.idleTeardownDelay, execute: work)
+        dispatchAcousticEngine(.play(
+            cue: cue,
+            bufferDuration: Self.cueDuration(for: cue),
+            now: ProcessInfo.processInfo.systemUptime
+        ))
     }
 
-    private func ensureAudioGraph(format: AVAudioFormat) -> (AVAudioEngine, AVAudioPlayerNode)? {
-        if let engine = audioEngine, let player = playerNode {
-            return (engine, player)
+    /// Compatibility alias forwarding to `playAcoustic(_:enabled:)`.
+    func playCue(_ cue: AcousticCue, enabled: Bool) {
+        playAcoustic(cue, enabled: enabled)
+    }
+
+    /// Stops and releases active acoustic chimes immediately when chimes are disabled in preferences.
+    func teardownAudioEngine() {
+        dispatchAcousticEngine(.disabled)
+    }
+
+    /// Cleanly cancels pending haptic cadences and stops active acoustic chimes on app termination.
+    func shutdown() {
+        cancelPendingHapticCadence()
+        dispatchAcousticEngine(.terminate)
+    }
+
+    private func dispatchAcousticEngine(_ event: AcousticEngineEvent) {
+        let effects = AcousticEngineLifecycleMachine.reduce(&acousticEngineState, event: event)
+        var playFailed = false
+        for effect in effects {
+            switch effect {
+            case .cancelTeardown:
+                teardownWorkItem?.cancel()
+                teardownWorkItem = nil
+
+            case .ensureGraphAndPlay(let cue):
+                if !playCueWAV(for: cue) {
+                    playFailed = true
+                }
+
+            case .scheduleTeardown(let generation, let delay):
+                guard !playFailed else { continue }
+                teardownWorkItem?.cancel()
+                let work = DispatchWorkItem { [weak self] in
+                    guard let self = self else { return }
+                    self.teardownWorkItem = nil
+                    self.dispatchAcousticEngine(.teardownFired(generation: generation))
+                }
+                teardownWorkItem = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+
+            case .teardownGraph:
+                teardownAudioGraph()
+            }
         }
-
-        let engine = AVAudioEngine()
-        let outputFormat = engine.outputNode.outputFormat(forBus: 0)
-        guard outputFormat.sampleRate > 0, outputFormat.channelCount > 0 else {
-            return nil
+        if playFailed {
+            dispatchAcousticEngine(.configurationChanged)
         }
+    }
 
-        let player = AVAudioPlayerNode()
-        engine.attach(player)
-        engine.connect(player, to: engine.mainMixerNode, format: format)
-        engine.prepare()
-
-        self.audioEngine = engine
-        self.playerNode = player
-        return (engine, player)
+    private func playCueWAV(for cue: AcousticCue) -> Bool {
+        let wav: (data: Data, duration: Double)
+        if let cached = cachedCueWAVs[cue] {
+            wav = cached
+        } else {
+            let synthesized = Self.synthesizePCM16WAV(for: cue)
+            guard !synthesized.data.isEmpty else { return false }
+            cachedCueWAVs[cue] = synthesized
+            wav = synthesized
+        }
+        guard let sound = NSSound(data: wav.data) else { return false }
+        activeSounds.removeAll { !$0.isPlaying }
+        guard sound.play() else { return false }
+        activeSounds.append(sound)
+        return true
     }
 
     private func teardownAudioGraph() {
         teardownWorkItem?.cancel()
         teardownWorkItem = nil
-        playerNode?.stop()
-        audioEngine?.stop()
-        audioEngine?.reset()
-        playerNode = nil
-        audioEngine = nil
+        for sound in activeSounds {
+            sound.stop()
+        }
+        activeSounds.removeAll()
     }
 
-    private func makeCueBuffer(for cue: AcousticCue) -> AVAudioPCMBuffer? {
-        guard let format = AVAudioFormat(standardFormatWithSampleRate: Self.sampleRate, channels: 1) else {
-            return nil
-        }
-
-        let duration: Double
+    private static func cueDuration(for cue: AcousticCue) -> Double {
         switch cue {
-        case .waitingPing:   duration = 0.18
-        case .turnDoneChord: duration = 0.24
+        case .waitingPing:   return 0.18
+        case .turnDoneChord: return 0.24
         }
+    }
 
-        let frameCount = AVAudioFrameCount((duration * Self.sampleRate).rounded())
-        guard frameCount > 0,
-              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount),
-              let samples = buffer.floatChannelData?[0] else {
-            return nil
-        }
-        buffer.frameLength = frameCount
+    /// Synthesizes a canonical 44-byte RIFF/WAVE header + 16-bit signed mono PCM waveform
+    /// in memory with exact zero start/end samples to guarantee click-free playback.
+    static func synthesizePCM16WAV(for cue: AcousticCue) -> (data: Data, duration: Double) {
+        let duration = cueDuration(for: cue)
+        let n = Int((duration * sampleRate).rounded())
+        guard n > 1 else { return (Data(), 0.0) }
 
-        let n = Int(frameCount)
         let twoPi = 2.0 * Double.pi
+        var floatSamples = [Double](repeating: 0.0, count: n)
 
         switch cue {
         case .waitingPing:
@@ -315,7 +239,7 @@ final class CraftEngine {
             let attack = 0.0045
             let releaseTail = 0.014
             for i in 0..<n {
-                let t = Double(i) / Self.sampleRate
+                let t = Double(i) / sampleRate
                 let attackEnv = t < attack ? 0.5 * (1.0 - cos(Double.pi * t / attack)) : 1.0
                 let decayEnv = exp(-t / 0.056)
                 let rem = duration - t
@@ -324,8 +248,7 @@ final class CraftEngine {
 
                 let fundamental = sin(twoPi * 440.0 * t)
                 let overtone = sin(twoPi * 880.0 * t) * exp(-t / 0.036)
-                let sample = peak * env * (0.72 * fundamental + 0.28 * overtone)
-                samples[i] = Float(sample)
+                floatSamples[i] = peak * env * (0.72 * fundamental + 0.28 * overtone)
             }
 
         case .turnDoneChord:
@@ -335,7 +258,7 @@ final class CraftEngine {
             let secondOnset = 0.018
             let releaseTail = 0.018
             for i in 0..<n {
-                let t = Double(i) / Self.sampleRate
+                let t = Double(i) / sampleRate
                 let rem = duration - t
                 let tailEnv = rem < releaseTail ? 0.5 * (1.0 - cos(Double.pi * max(0.0, rem) / releaseTail)) : 1.0
 
@@ -353,14 +276,49 @@ final class CraftEngine {
                     voice2 = 0.0
                 }
 
-                let sample = peak * tailEnv * (0.56 * voice1 + 0.44 * voice2)
-                samples[i] = Float(sample)
+                floatSamples[i] = peak * tailEnv * (0.56 * voice1 + 0.44 * voice2)
             }
         }
 
         // Guarantee exact zero boundary samples to prevent any hardware click/pop.
-        samples[0] = 0
-        samples[n - 1] = 0
-        return buffer
+        floatSamples[0] = 0.0
+        floatSamples[n - 1] = 0.0
+
+        let sampleRateU32 = UInt32(sampleRate)
+        let channelsU16: UInt16 = 1
+        let bitsPerSampleU16: UInt16 = 16
+        let blockAlignU16 = channelsU16 * (bitsPerSampleU16 / 8)
+        let byteRateU32 = sampleRateU32 * UInt32(blockAlignU16)
+        let dataByteCount = UInt32(n * Int(blockAlignU16))
+        let riffChunkSize = 36 + dataByteCount
+
+        var wav = Data(capacity: 44 + Int(dataByteCount))
+        func appendLE<T: FixedWidthInteger>(_ value: T) {
+            var le = value.littleEndian
+            withUnsafeBytes(of: &le) { wav.append(contentsOf: $0) }
+        }
+
+        // 44-byte RIFF/WAVE PCM header
+        wav.append(contentsOf: [0x52, 0x49, 0x46, 0x46]) // "RIFF"
+        appendLE(riffChunkSize)
+        wav.append(contentsOf: [0x57, 0x41, 0x56, 0x45]) // "WAVE"
+        wav.append(contentsOf: [0x66, 0x6D, 0x74, 0x20]) // "fmt "
+        appendLE(UInt32(16))                             // PCM fmt chunk size
+        appendLE(UInt16(1))                              // AudioFormat = 1 (Linear PCM)
+        appendLE(channelsU16)                            // NumChannels = 1
+        appendLE(sampleRateU32)                          // SampleRate = 44100
+        appendLE(byteRateU32)                            // ByteRate = 88200
+        appendLE(blockAlignU16)                          // BlockAlign = 2
+        appendLE(bitsPerSampleU16)                       // BitsPerSample = 16
+        wav.append(contentsOf: [0x64, 0x61, 0x74, 0x61]) // "data"
+        appendLE(dataByteCount)
+
+        for sample in floatSamples {
+            let clamped = sample.isFinite ? max(-1.0, min(1.0, sample)) : 0.0
+            let pcm = Int16((clamped * 32767.0).rounded())
+            appendLE(pcm)
+        }
+
+        return (wav, duration)
     }
 }

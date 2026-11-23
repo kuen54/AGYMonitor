@@ -162,8 +162,10 @@ func formatQuotaResetDuration(_ date: Date) -> String {
 struct PlanAccountStrip: View {
     let email: String?
     let isOfflineCached: Bool
+    var isRefreshing: Bool = false
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
+    @Environment(\.telemetryStaticRender) private var isStaticRender
 
     var body: some View {
         HStack(spacing: 5) {
@@ -181,6 +183,13 @@ struct PlanAccountStrip: View {
             }
 
             Spacer(minLength: 4)
+
+            if isRefreshing && !isStaticRender {
+                ProgressView()
+                    .controlSize(.mini)
+                    .scaleEffect(0.55)
+                    .frame(width: 10, height: 10)
+            }
 
             if isOfflineCached {
                 HStack(spacing: 4) {
@@ -348,13 +357,32 @@ struct SubscriptionView: View {
     var body: some View {
         VStack(spacing: 0) {
             switch store.effectiveQuotaPhase {
-            case .ready(let q, _, _, let notice):
-                quotaSections(q, notice: notice)
+            case .ready(let q, _, _, let notice, let isRefreshing):
+                quotaSections(q, notice: notice, isRefreshing: isRefreshing)
             case .failed(let err, let retryAt):
-                stateMessage(
-                    text: errorText(for: err, retryAt: retryAt),
-                    showRetry: true
-                )
+                if err == .rateLimited, let retryAt = retryAt, retryAt > Date() {
+                    if isPanelVisible && !isStaticRender {
+                        TimelineView(.periodic(from: Date(timeIntervalSinceReferenceDate: 0), by: 15.0)) { ctx in
+                            stateMessage(
+                                text: errorText(for: err, retryAt: retryAt, now: ctx.date),
+                                showRetry: true,
+                                retryEnabled: retryAt <= ctx.date
+                            )
+                        }
+                    } else {
+                        stateMessage(
+                            text: errorText(for: err, retryAt: retryAt),
+                            showRetry: true,
+                            retryEnabled: false
+                        )
+                    }
+                } else {
+                    stateMessage(
+                        text: errorText(for: err, retryAt: retryAt),
+                        showRetry: true,
+                        retryEnabled: true
+                    )
+                }
             case .noAccount:
                 stateMessage(
                     text: loc("subNoToken"),
@@ -388,7 +416,7 @@ struct SubscriptionView: View {
     }
 
     @ViewBuilder
-    private func quotaSections(_ q: OAuthUsage, notice: QuotaRefreshNotice) -> some View {
+    private func quotaSections(_ q: OAuthUsage, notice: QuotaRefreshNotice, isRefreshing: Bool) -> some View {
         let geminiWeeklyLimits = q.scopedModelLimits.filter { $0.scope?.model?.id == "gemini_weekly" }
         let claudeWeeklyLimits = q.scopedModelLimits.filter { $0.scope?.model?.id == "claude_partner_weekly" }
         let customScopedLimits = q.scopedModelLimits.filter {
@@ -416,7 +444,11 @@ struct SubscriptionView: View {
         }()
 
         if nonEmpty(q.accountEmail) != nil || q.isOfflineCached {
-            PlanAccountStrip(email: q.accountEmail, isOfflineCached: q.isOfflineCached)
+            PlanAccountStrip(
+                email: q.accountEmail,
+                isOfflineCached: q.isOfflineCached,
+                isRefreshing: isRefreshing
+            )
             HairlineRule(showCrosshairs: true)
         }
 
@@ -571,10 +603,19 @@ struct SubscriptionView: View {
             EmptyView()
         case .rateLimited(let retryAt):
             HairlineRule(showCrosshairs: false)
-            noticeRow(text: errorText(for: .rateLimited, retryAt: retryAt), showRetry: false)
+            let isExpired = retryAt.map { $0 <= Date() } ?? true
+            noticeRow(
+                text: errorText(for: .rateLimited, retryAt: retryAt),
+                showRetry: isExpired,
+                isRefreshing: isRefreshing
+            )
         case .staleError(let err):
             HairlineRule(showCrosshairs: false)
-            noticeRow(text: errorText(for: err, retryAt: nil), showRetry: err != .rateLimited)
+            noticeRow(
+                text: errorText(for: err, retryAt: nil),
+                showRetry: err != .rateLimited,
+                isRefreshing: isRefreshing
+            )
         }
 
         HairlineRule(showCrosshairs: false)
@@ -600,7 +641,7 @@ struct SubscriptionView: View {
         .padding(.vertical, 6)
     }
 
-    private func noticeRow(text: String, showRetry: Bool) -> some View {
+    private func noticeRow(text: String, showRetry: Bool, isRefreshing: Bool) -> some View {
         HStack(spacing: 6) {
             Rectangle()
                 .fill(theme.signalAmber)
@@ -611,19 +652,42 @@ struct SubscriptionView: View {
                 .foregroundColor(theme.inkSecondary)
             Spacer()
             if showRetry {
-                Text(loc("retry").uppercased())
-                    .font(.system(size: 8, weight: .medium, design: .monospaced))
-                    .tracking(0.7)
-                    .foregroundColor(theme.accent)
-                    .contentShape(Rectangle())
-                    .onTapGesture { store.refreshQuota(force: true) }
+                if isRefreshing {
+                    HStack(spacing: 4) {
+                        if !isStaticRender {
+                            ProgressView()
+                                .controlSize(.mini)
+                                .scaleEffect(0.55)
+                                .frame(width: 10, height: 10)
+                        }
+                        Text(loc("retry").uppercased())
+                            .font(.system(size: 8, weight: .medium, design: .monospaced))
+                            .tracking(0.7)
+                            .foregroundColor(theme.inkMuted)
+                    }
+                    .opacity(0.75)
+                } else {
+                    Text(loc("retry").uppercased())
+                        .font(.system(size: 8, weight: .medium, design: .monospaced))
+                        .tracking(0.7)
+                        .foregroundColor(theme.accent)
+                        .contentShape(Rectangle())
+                        .onTapGesture { store.refreshQuota(force: true) }
+                        .accessibilityAddTraits(.isButton)
+                        .accessibilityLabel(loc("retry"))
+                }
+            } else if isRefreshing && !isStaticRender {
+                ProgressView()
+                    .controlSize(.mini)
+                    .scaleEffect(0.55)
+                    .frame(width: 10, height: 10)
             }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 7)
     }
 
-    private func stateMessage(text: String, showRetry: Bool = false) -> some View {
+    private func stateMessage(text: String, showRetry: Bool = false, retryEnabled: Bool = true) -> some View {
         HStack(spacing: 8) {
             Rectangle()
                 .fill(theme.signalAmber)
@@ -638,29 +702,39 @@ struct SubscriptionView: View {
                 Text(loc("retry").uppercased())
                     .font(.system(size: 8, weight: .medium, design: .monospaced))
                     .tracking(0.8)
-                    .foregroundColor(theme.accent)
+                    .foregroundColor(retryEnabled ? theme.accent : theme.inkMuted)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
                     .background(theme.surfaceRaised.opacity(theme.isDark ? 0.35 : 0.55))
                     .overlay(
                         Rectangle()
-                            .strokeBorder(theme.accent.opacity(0.55), lineWidth: 0.75)
+                            .strokeBorder(
+                                retryEnabled ? theme.accent.opacity(0.55) : theme.hairlineStrong.opacity(0.55),
+                                lineWidth: 0.75
+                            )
                     )
+                    .opacity(retryEnabled ? 1.0 : 0.5)
                     .contentShape(Rectangle())
-                    .onTapGesture { store.refreshQuota(force: true) }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(loc("retry"))
+                    .accessibilityAddTraits(.isButton)
+                    .onTapGesture {
+                        guard retryEnabled else { return }
+                        store.refreshQuota(force: true)
+                    }
             }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 16)
     }
 
-    private func errorText(for error: CoreQuotaError?, retryAt: Date?) -> String {
+    private func errorText(for error: CoreQuotaError?, retryAt: Date?, now: Date = Date()) -> String {
         switch error {
         case .unauthorized:
             return loc("quotaTokenExpired")
         case .rateLimited:
-            if let retryAt = retryAt, retryAt > Date() {
-                return String(format: loc("quotaRateLimitedRetry"), retryCountdown(retryAt))
+            if let retryAt = retryAt, retryAt > now {
+                return String(format: loc("quotaRateLimitedRetry"), retryCountdown(retryAt, now: now))
             }
             return loc("quotaRateLimited")
         case .decodeFailure:
@@ -670,8 +744,8 @@ struct SubscriptionView: View {
         }
     }
 
-    private func retryCountdown(_ date: Date) -> String {
-        let s = max(0, date.timeIntervalSinceNow)
+    private func retryCountdown(_ date: Date, now: Date = Date()) -> String {
+        let s = max(0, date.timeIntervalSince(now))
         if s < 60 { return "<1m" }
         if s < 3600 { return "\(Int(s / 60))m" }
         let h = Int(s / 3600), m = Int((s.truncatingRemainder(dividingBy: 3600)) / 60)

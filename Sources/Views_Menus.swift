@@ -73,10 +73,14 @@ struct LanguageSwitcher: NSViewRepresentable {
 struct OptionsMenu: NSViewRepresentable {
     @ObservedObject var store: UsageStore
     let loc: Localizer
+    var onClose: (() -> Void)? = nil
 
     func makeNSView(context: Context) -> NSButton {
         let btn = NSButton(frame: NSRect(x: 0, y: 0, width: 24, height: 22))
-        btn.image = NSImage(systemSymbolName: "ellipsis", accessibilityDescription: nil)
+        let desc = loc("optionsMenuHelp")
+        btn.image = NSImage(systemSymbolName: "ellipsis", accessibilityDescription: desc)
+        btn.setAccessibilityLabel(desc)
+        btn.toolTip = desc
         btn.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 10.5, weight: .semibold)
         btn.imageScaling = .scaleProportionallyDown
         btn.isBordered = false
@@ -91,18 +95,30 @@ struct OptionsMenu: NSViewRepresentable {
     func updateNSView(_ btn: NSButton, context: Context) {
         context.coordinator.loc = loc
         context.coordinator.notchVM = context.environment.notchViewModel
+        context.coordinator.onClose = onClose
+        let desc = loc("optionsMenuHelp")
+        if btn.toolTip != desc {
+            btn.image = NSImage(systemSymbolName: "ellipsis", accessibilityDescription: desc)
+            btn.setAccessibilityLabel(desc)
+            btn.toolTip = desc
+        }
         let theme = context.environment.agyTheme
         btn.contentTintColor = NSColor(theme.inkSecondary)
         btn.needsDisplay = true
     }
 
-    func makeCoordinator() -> Coordinator { Coordinator(store: store, loc: loc) }
+    func makeCoordinator() -> Coordinator { Coordinator(store: store, loc: loc, onClose: onClose) }
 
     class Coordinator: NSObject, NSMenuDelegate {
         let store: UsageStore
         var loc: Localizer
+        var onClose: (() -> Void)?
         weak var notchVM: NotchViewModel?
-        init(store: UsageStore, loc: Localizer) { self.store = store; self.loc = loc }
+        init(store: UsageStore, loc: Localizer, onClose: (() -> Void)? = nil) {
+            self.store = store
+            self.loc = loc
+            self.onClose = onClose
+        }
 
         @objc func showMenu(_ sender: NSButton) {
             let menu = NSMenu()
@@ -296,14 +312,14 @@ struct OptionsMenu: NSViewRepresentable {
             applyWpItem.target = self
             menu.addItem(applyWpItem)
 
-            let hasPreviousWallpaper = (craftPrefs.previousWallpaperPath != nil)
+            let canRestoreWallpaper = store.canRestorePreviousWallpaper
             let restoreWpItem = NSMenuItem(
                 title: loc("craftWallpaperRestore"),
-                action: hasPreviousWallpaper ? #selector(restorePreviousWallpaper) : nil,
+                action: canRestoreWallpaper ? #selector(restorePreviousWallpaper) : nil,
                 keyEquivalent: ""
             )
-            restoreWpItem.target = hasPreviousWallpaper ? self : nil
-            restoreWpItem.isEnabled = hasPreviousWallpaper
+            restoreWpItem.target = canRestoreWallpaper ? self : nil
+            restoreWpItem.isEnabled = canRestoreWallpaper
             menu.addItem(restoreWpItem)
 
             return menu
@@ -352,16 +368,16 @@ struct OptionsMenu: NSViewRepresentable {
             let menu = NSMenu()
             menu.autoenablesItems = false
 
-            let checkTitle = updateState.isChecking
+            let checkTitle = updateState.isManualChecking
                 ? loc("updateMenuChecking")
                 : loc("updateMenuCheck")
             let checkUpdates = NSMenuItem(
                 title: checkTitle,
-                action: updateState.isChecking ? nil : #selector(checkForUpdates),
+                action: updateState.isManualChecking ? nil : #selector(checkForUpdates),
                 keyEquivalent: ""
             )
-            checkUpdates.target = updateState.isChecking ? nil : self
-            checkUpdates.isEnabled = !updateState.isChecking
+            checkUpdates.target = updateState.isManualChecking ? nil : self
+            checkUpdates.isEnabled = !updateState.isManualChecking
             menu.addItem(checkUpdates)
 
             let autoCheck = NSMenuItem(
@@ -417,7 +433,11 @@ struct OptionsMenu: NSViewRepresentable {
 
         @objc func exportSpecimenCard() {
             notchVM?.releaseModalLock(.optionsMenu)
-            notchVM?.onRequestClose?()
+            if let onClose = onClose {
+                onClose()
+            } else {
+                notchVM?.onRequestClose?()
+            }
             let targetStore = store
             Task { @MainActor in
                 SpecimenWindowController.shared.present(store: targetStore)
@@ -480,18 +500,32 @@ struct OptionsMenu: NSViewRepresentable {
         }
 
         @objc func clearArchive() {
-            notchVM?.acquireModalLock(.clearArchiveAlert)
-            NSApp.activate(ignoringOtherApps: true)
-            defer { notchVM?.releaseModalLock(.clearArchiveAlert) }
+            notchVM?.releaseModalLock(.optionsMenu)
+            if let onClose = onClose {
+                onClose()
+            } else {
+                notchVM?.onRequestClose?()
+            }
 
-            let alert = NSAlert()
-            alert.messageText = loc("archiveClearTitle")
-            alert.informativeText = loc("archiveClearBody")
-            alert.alertStyle = .warning
-            alert.addButton(withTitle: loc("archiveClearConfirm"))
-            alert.addButton(withTitle: loc("archiveClearCancel"))
-            if alert.runModal().rawValue == 1000 {
-                store.clearArchive()
+            let targetStore = store
+            let targetLoc = loc
+            DispatchQueue.main.async {
+                if #available(macOS 14.0, *) {
+                    NSApp.activate()
+                } else {
+                    NSApp.activate(ignoringOtherApps: true)
+                }
+
+                let alert = NSAlert()
+                alert.messageText = targetLoc("archiveClearTitle")
+                alert.informativeText = targetLoc("archiveClearBody")
+                alert.alertStyle = .warning
+                alert.addButton(withTitle: targetLoc("archiveClearConfirm"))
+                alert.addButton(withTitle: targetLoc("archiveClearCancel"))
+                alert.window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+                if alert.runModal() == .alertFirstButtonReturn {
+                    targetStore.clearArchive()
+                }
             }
         }
 

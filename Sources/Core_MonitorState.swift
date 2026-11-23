@@ -52,7 +52,11 @@ public struct SessionMonitorLifecycleState: Equatable, Sendable {
     /// dispatches can NEVER publish stale snapshots after shutdown.
     public var runGeneration: Int
     /// Sorted list of directories currently attached to the active `FSEventStream`.
-    public var watchedDirs: [String]
+    /// Mutated exclusively by `SessionMonitorLifecycleMachine`.
+    public fileprivate(set) var watchedDirs: [String]
+    /// Sorted list of directories last attempted for FSEvents so failed starts don't
+    /// thrash on every scan tick while still allowing brand-new directories to attach immediately.
+    public fileprivate(set) var lastAttemptedDirs: [String]
 
     public init(
         isStarted: Bool = false,
@@ -62,7 +66,8 @@ public struct SessionMonitorLifecycleState: Equatable, Sendable {
         pollInterval: TimeInterval? = nil,
         lastLiveCount: Int = 0,
         runGeneration: Int = 0,
-        watchedDirs: [String] = []
+        watchedDirs: [String] = [],
+        lastAttemptedDirs: [String] = []
     ) {
         self.isStarted = isStarted
         self.isActive = isActive
@@ -71,7 +76,8 @@ public struct SessionMonitorLifecycleState: Equatable, Sendable {
         self.pollInterval = pollInterval
         self.lastLiveCount = lastLiveCount
         self.runGeneration = runGeneration
-        self.watchedDirs = watchedDirs
+        self.watchedDirs = Array(Set(watchedDirs)).sorted()
+        self.lastAttemptedDirs = Array(Set(lastAttemptedDirs)).sorted()
     }
 }
 
@@ -79,7 +85,8 @@ public enum SessionMonitorLifecycleEvent: Equatable, Sendable {
     case start(now: Date)
     case stop
     case setActive(Bool, now: Date)
-    case fsWatcherAttempted(healthy: Bool, at: Date)
+    case fsWatcherAttempted(healthy: Bool, watchedDirs: [String], at: Date)
+    case reconcileWatchedDirs([String])
     case fsEventReceived
     case fsCoalesceFired(now: Date)
     case pollTimerFired(now: Date)
@@ -88,6 +95,7 @@ public enum SessionMonitorLifecycleEvent: Equatable, Sendable {
 
 public enum SessionMonitorLifecycleEffect: Equatable, Sendable {
     case startFSWatcher
+    case restartFSEvents(dirs: [String])
     case stopFSWatcher
     case scheduleFSCoalesce
     case cancelFSCoalesce
@@ -119,6 +127,7 @@ public enum SessionMonitorLifecycleMachine {
             state.fsHealthy = false
             state.pollInterval = nil
             state.watchedDirs = []
+            state.lastAttemptedDirs = []
             state.runGeneration += 1
             return [.cancelFSCoalesce, .setPollTimer(nil), .stopFSWatcher]
 
@@ -126,23 +135,63 @@ public enum SessionMonitorLifecycleMachine {
             guard state.isActive != active else { return [] }
             state.isActive = active
             guard state.isStarted else { return [] }
-            var effects: [SessionMonitorLifecycleEffect] = []
-            if SessionPollCadence.shouldRetryFSWatcher(
-                started: state.isStarted,
-                fsHealthy: state.fsHealthy,
-                now: now,
-                lastAttemptAt: state.lastFSAttemptAt
-            ) {
-                state.lastFSAttemptAt = now
-                effects.append(.startFSWatcher)
+            if active {
+                var effects: [SessionMonitorLifecycleEffect] = []
+                if SessionPollCadence.shouldRetryFSWatcher(
+                    started: state.isStarted,
+                    fsHealthy: state.fsHealthy,
+                    now: now,
+                    lastAttemptAt: state.lastFSAttemptAt
+                ) {
+                    state.lastFSAttemptAt = now
+                    effects.append(.startFSWatcher)
+                }
+                effects.append(.runScan)
+                return effects
             }
-            effects.append(.runScan)
-            return effects
-
-        case .fsWatcherAttempted(let healthy, let at):
-            state.lastFSAttemptAt = at
-            state.fsHealthy = state.isStarted ? healthy : false
+            // Closing panel: relax poll timer cleanly (e.g. 2s -> 6s) without spawning a redundant scan.
             return reconcilePollEffects(&state)
+
+        case .fsWatcherAttempted(let healthy, let dirs, let at):
+            state.lastFSAttemptAt = at
+            let normalized = Array(Set(dirs)).sorted()
+            if state.isStarted && healthy {
+                state.fsHealthy = true
+                state.watchedDirs = normalized
+                state.lastAttemptedDirs = normalized
+            } else {
+                state.fsHealthy = false
+                state.watchedDirs = []
+                state.lastAttemptedDirs = state.isStarted ? normalized : []
+            }
+            return reconcilePollEffects(&state)
+
+        case .reconcileWatchedDirs(let candidateDirs):
+            guard state.isStarted else { return [] }
+            let normalized = Array(Set(candidateDirs)).sorted()
+            guard !normalized.isEmpty else {
+                if state.fsHealthy || !state.watchedDirs.isEmpty {
+                    state.fsHealthy = false
+                    state.watchedDirs = []
+                    state.lastAttemptedDirs = []
+                    var effects: [SessionMonitorLifecycleEffect] = [.stopFSWatcher]
+                    effects.append(contentsOf: reconcilePollEffects(&state))
+                    return effects
+                }
+                return []
+            }
+            // Even when `fsHealthy == true` (e.g. CLI-only setup where Desktop/IDE brain dir appears later),
+            // newly discovered or removed directories trigger `.restartFSEvents(dirs:)`.
+            if state.fsHealthy {
+                guard normalized != state.watchedDirs else { return [] }
+                state.lastAttemptedDirs = normalized
+                return [.restartFSEvents(dirs: normalized)]
+            }
+            // Unhealthy watcher: immediately attach if the directory set changed (e.g. [] -> ["/cli"]),
+            // but avoid thrashing on the exact same failing directory set (30s retry handles that).
+            guard normalized != state.lastAttemptedDirs else { return [] }
+            state.lastAttemptedDirs = normalized
+            return [.restartFSEvents(dirs: normalized)]
 
         case .fsEventReceived:
             guard state.isStarted else { return [] }
@@ -688,6 +737,17 @@ public enum PopoverAnchorSessionMode: Equatable, Sendable {
     case statusItem(displayId: UInt32, anchorRect: ScreenRect)
     case fallback(displayId: UInt32, anchorRect: ScreenRect)
 
+    public init(decision: PopoverAnchorDecision) {
+        switch decision {
+        case .statusItem(let displayId, let buttonRect):
+            self = .statusItem(displayId: displayId, anchorRect: buttonRect)
+        case .fallbackMenuBar(let displayId, let anchorRect, _):
+            self = .fallback(displayId: displayId, anchorRect: anchorRect)
+        case .unavailable:
+            self = .none
+        }
+    }
+
     public var displayId: UInt32? {
         switch self {
         case .none: return nil
@@ -708,81 +768,220 @@ public enum PopoverAnchorSessionMode: Equatable, Sendable {
     }
 }
 
-/// Pure open-session anchor tracker for `AppDelegate` (zero shadow booleans).
-/// Tracks the active anchor mode, bounds live drift recovery to `maxReanchorAttempts`
-/// (default 2) per open session, and guards programmatic close/re-show re-entrancy.
-public struct PopoverAnchorSessionState: Equatable, Sendable {
-    public private(set) var mode: PopoverAnchorSessionMode
-    public private(set) var reanchorAttempts: Int
-    public private(set) var isReanchoring: Bool
-    public private(set) var suppressedStatusItemClickUntil: Date?
-    public let maxReanchorAttempts: Int
+// MARK: - Control-Center Floating MenuBarPanel Lifecycle State Machine
 
-    public init(maxReanchorAttempts: Int = 2) {
-        self.mode = .none
-        self.reanchorAttempts = 0
-        self.isReanchoring = false
-        self.suppressedStatusItemClickUntil = nil
-        self.maxReanchorAttempts = max(0, maxReanchorAttempts)
+public enum MenuBarPanelPhase: Equatable, Sendable {
+    case closed
+    case opening(token: UInt64)
+    case open
+    case closing(token: UInt64)
+
+    /// True while the panel is presented or fading in (monitors & height sync active).
+    public var isVisibleOrOpening: Bool {
+        switch self {
+        case .opening, .open:
+            return true
+        case .closed, .closing:
+            return false
+        }
     }
+}
 
-    public mutating func beginSession(decision: PopoverAnchorDecision) {
-        reanchorAttempts = 0
-        isReanchoring = false
-        suppressedStatusItemClickUntil = nil
-        applyDecision(decision)
-    }
+/// Pure lifecycle state for `AppDelegate`'s borderless floating `MenuBarPanel`.
+/// Consolidates phase, monotonic animation token, anchor mode, measured height,
+/// nested `NSMenu` tracking depth, and status-item click-bounce suppression.
+public struct MenuBarPanelState: Equatable, Sendable {
+    public static let minHeight: Double = 180.0
+    public static let defaultHeight: Double = 560.0
 
-    /// Records that a fallback-anchored `.transient` popover was dismissed by `leftMouseDown`
-    /// inside `statusItem.button`, so the matching `leftMouseUp` completes the toggle-close
-    /// instead of immediately bouncing the popover back open.
-    public mutating func noteTransientCloseFromStatusItemClick(
-        at now: Date,
-        window: TimeInterval = 0.5
+    public var phase: MenuBarPanelPhase
+    public var animationTokenCounter: UInt64
+    public var anchorMode: PopoverAnchorSessionMode
+    public var measuredHeight: Double
+    public var activeMenuTrackingDepth: Int
+    public var suppressedStatusItemClickUntil: Date?
+
+    public init(
+        phase: MenuBarPanelPhase = .closed,
+        animationTokenCounter: UInt64 = 0,
+        anchorMode: PopoverAnchorSessionMode = .none,
+        measuredHeight: Double = MenuBarPanelState.defaultHeight,
+        activeMenuTrackingDepth: Int = 0,
+        suppressedStatusItemClickUntil: Date? = nil
     ) {
-        suppressedStatusItemClickUntil = now.addingTimeInterval(max(0.0, window))
+        self.phase = phase
+        self.animationTokenCounter = animationTokenCounter
+        self.anchorMode = anchorMode
+        self.measuredHeight = (measuredHeight.isFinite && measuredHeight > 1.0)
+            ? max(Self.minHeight, ceil(measuredHeight))
+            : Self.defaultHeight
+        self.activeMenuTrackingDepth = max(0, activeMenuTrackingDepth)
+        self.suppressedStatusItemClickUntil = suppressedStatusItemClickUntil
     }
 
-    /// Consumes a pending status-item click suppression if `now` is within the click window.
+    public var isVisibleOrOpening: Bool { phase.isVisibleOrOpening }
+    public var isMenuTrackingActive: Bool { activeMenuTrackingDepth > 0 }
+
+    /// Consumes a pending status-item click suppression window recorded when resign-key
+    /// dismissed the panel on `leftMouseDown` over `statusItem.button`, preventing the
+    /// matching `leftMouseUp` from immediately bouncing the panel back open.
     public mutating func consumeSuppressedStatusItemClick(at now: Date) -> Bool {
         defer { suppressedStatusItemClickUntil = nil }
         guard let until = suppressedStatusItemClickUntil else { return false }
         return now <= until
     }
+}
 
-    /// Consumes one bounded re-anchor attempt for an active open session.
-    /// Returns `true` if recovery is allowed, or `false` if closed, already re-anchoring,
-    /// or the per-session attempt budget is exhausted.
-    public mutating func consumeReanchorAttempt() -> Bool {
-        guard mode != .none, !isReanchoring, reanchorAttempts < maxReanchorAttempts else {
-            return false
+public enum MenuBarPanelEvent: Equatable, Sendable {
+    case openRequested(anchorMode: PopoverAnchorSessionMode, height: Double, animated: Bool)
+    case openAnimationFinished(token: UInt64)
+    case closeRequested(animated: Bool, suppressStatusItemClickUntil: Date?)
+    case closeAnimationFinished(token: UInt64)
+    case heightMeasured(Double)
+    case menuTrackingBegan
+    case menuTrackingEnded
+    case appDeactivated
+    case outsideClick
+    case escapePressed
+    case terminate
+}
+
+public enum MenuBarPanelEffect: Equatable, Sendable {
+    case presentPanel(animated: Bool, token: UInt64)
+    case dismissPanel(animated: Bool, token: UInt64)
+    /// Emitted when an animated close completes with a still-current token so the shell
+    /// orders the panel out and resets alpha without maintaining a parallel token check.
+    case orderOutPanel
+    case attachDismissMonitors
+    case detachDismissMonitors
+    case updatePanelHeight(Double)
+    case syncAppPresentationShown
+    case syncAppPresentationClosed
+}
+
+public enum MenuBarPanelMachine {
+
+    @discardableResult
+    public static func reduce(
+        _ state: inout MenuBarPanelState,
+        event: MenuBarPanelEvent
+    ) -> [MenuBarPanelEffect] {
+        switch event {
+        case .openRequested(let anchorMode, let height, let animated):
+            guard anchorMode != .none else { return [] }
+            let wasVisible = state.phase.isVisibleOrOpening
+            if height.isFinite && height > 1.0 {
+                state.measuredHeight = max(MenuBarPanelState.minHeight, ceil(height))
+            }
+            state.anchorMode = anchorMode
+            state.suppressedStatusItemClickUntil = nil
+            state.animationTokenCounter &+= 1
+            let token = state.animationTokenCounter
+            state.phase = animated ? .opening(token: token) : .open
+
+            var effects: [MenuBarPanelEffect] = []
+            if wasVisible {
+                effects.append(.detachDismissMonitors)
+            }
+            effects.append(.presentPanel(animated: animated, token: token))
+            if !wasVisible {
+                effects.append(.syncAppPresentationShown)
+            }
+            effects.append(.attachDismissMonitors)
+            return effects
+
+        case .openAnimationFinished(let token):
+            guard case .opening(let activeToken) = state.phase, activeToken == token else {
+                return []
+            }
+            state.phase = .open
+            return []
+
+        case .closeRequested(let animated, let suppressUntil):
+            return performClose(&state, animated: animated, suppressStatusItemClickUntil: suppressUntil)
+
+        case .closeAnimationFinished(let token):
+            guard case .closing(let activeToken) = state.phase, activeToken == token else {
+                return []
+            }
+            state.phase = .closed
+            return [.orderOutPanel]
+
+        case .heightMeasured(let rawHeight):
+            guard rawHeight.isFinite, rawHeight > 1.0 else { return [] }
+            let clamped = max(MenuBarPanelState.minHeight, ceil(rawHeight))
+            guard abs(clamped - state.measuredHeight) > 0.5 else { return [] }
+            state.measuredHeight = clamped
+            guard state.phase.isVisibleOrOpening else { return [] }
+            return [.updatePanelHeight(clamped)]
+
+        case .menuTrackingBegan:
+            state.activeMenuTrackingDepth += 1
+            return []
+
+        case .menuTrackingEnded:
+            state.activeMenuTrackingDepth = max(0, state.activeMenuTrackingDepth - 1)
+            return []
+
+        case .appDeactivated, .outsideClick, .escapePressed:
+            guard state.phase.isVisibleOrOpening, state.activeMenuTrackingDepth == 0 else {
+                return []
+            }
+            return performClose(&state, animated: true, suppressStatusItemClickUntil: nil)
+
+        case .terminate:
+            state.activeMenuTrackingDepth = 0
+            state.suppressedStatusItemClickUntil = nil
+            state.anchorMode = .none
+            guard state.phase != .closed else { return [] }
+            let wasVisible = state.phase.isVisibleOrOpening
+            state.animationTokenCounter &+= 1
+            let token = state.animationTokenCounter
+            state.phase = .closed
+            var effects: [MenuBarPanelEffect] = [.detachDismissMonitors]
+            if wasVisible {
+                effects.append(.syncAppPresentationClosed)
+            }
+            effects.append(.dismissPanel(animated: false, token: token))
+            return effects
         }
-        reanchorAttempts += 1
-        isReanchoring = true
-        return true
     }
 
-    /// Completes an in-flight re-anchor and records the resulting anchor mode while
-    /// preserving the consumed `reanchorAttempts` count for the remainder of the session.
-    public mutating func finishReanchor(decision: PopoverAnchorDecision) {
-        isReanchoring = false
-        applyDecision(decision)
-    }
+    private static func performClose(
+        _ state: inout MenuBarPanelState,
+        animated: Bool,
+        suppressStatusItemClickUntil: Date?
+    ) -> [MenuBarPanelEffect] {
+        switch state.phase {
+        case .closed:
+            return []
 
-    public mutating func popoverClosed() {
-        mode = .none
-        reanchorAttempts = 0
-        isReanchoring = false
-    }
+        case .closing:
+            // If an animated fade-out is already in flight and an immediate non-animated close
+            // arrives (e.g. Space switch or display disconnect), snap closed immediately.
+            guard !animated else { return [] }
+            if let until = suppressStatusItemClickUntil {
+                state.suppressedStatusItemClickUntil = until
+            }
+            state.anchorMode = .none
+            state.animationTokenCounter &+= 1
+            let token = state.animationTokenCounter
+            state.phase = .closed
+            return [.dismissPanel(animated: false, token: token)]
 
-    private mutating func applyDecision(_ decision: PopoverAnchorDecision) {
-        switch decision {
-        case .statusItem(let displayId, let buttonRect):
-            mode = .statusItem(displayId: displayId, anchorRect: buttonRect)
-        case .fallbackMenuBar(let displayId, let anchorRect, _):
-            mode = .fallback(displayId: displayId, anchorRect: anchorRect)
-        case .unavailable:
-            mode = .none
+        case .opening, .open:
+            if let until = suppressStatusItemClickUntil {
+                state.suppressedStatusItemClickUntil = until
+            }
+            state.anchorMode = .none
+            state.animationTokenCounter &+= 1
+            let token = state.animationTokenCounter
+            state.phase = animated ? .closing(token: token) : .closed
+            return [
+                .detachDismissMonitors,
+                .syncAppPresentationClosed,
+                .dismissPanel(animated: animated, token: token),
+            ]
         }
     }
 }
@@ -1081,36 +1280,6 @@ public enum MenuBarAnchorResolver {
             width: currentFrame.width,
             height: clampedH
         )
-    }
-
-    /// Checks whether a live `_NSPopoverWindow` frame is still anchored to `expectedAnchorRect`
-    /// on `hostDisplay` (catching AppKit top-left clamps, menu-bar retraction drift, and
-    /// cross-display drift).
-    public static func isPopoverFrameAnchored(
-        popoverFrame: ScreenRect,
-        expectedAnchorRect: ScreenRect,
-        hostDisplay: MenuBarDisplayDescriptor
-    ) -> Bool {
-        guard popoverFrame.isFinite,
-              popoverFrame.width >= 1.0,
-              popoverFrame.height >= 1.0,
-              expectedAnchorRect.isFinite,
-              hostDisplay.frame.isFinite else {
-            return false
-        }
-        guard hostDisplay.frame.contains(x: popoverFrame.midX, y: popoverFrame.midY) else {
-            return false
-        }
-        let horizontalTolerance = 24.0
-        guard expectedAnchorRect.midX >= popoverFrame.minX - horizontalTolerance,
-              expectedAnchorRect.midX <= popoverFrame.maxX + horizontalTolerance else {
-            return false
-        }
-        let verticalTolerance = 20.0
-        guard abs(popoverFrame.maxY - expectedAnchorRect.minY) <= verticalTolerance else {
-            return false
-        }
-        return true
     }
 }
 

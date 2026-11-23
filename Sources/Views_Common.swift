@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import QuartzCore
 
 // Shared view primitives: Antigravity model-class fallback palette, AGY // TELEMETRY
 // drafting primitives (HairlineRule, DotGraticule, Vector Strata Patterns,
@@ -119,11 +120,11 @@ struct SessionAwareLogo: View {
     /// closed popover, or hidden fullscreen notch pill) so the logo drops to 0 Hz.
     var isActive: Bool = true
 
-    @State private var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    @Environment(\.telemetryReduceMotion) private var reduceMotion
     @Environment(\.telemetryStaticRender) private var isStaticRender
 
-    private static let levitatePeriod: Double = 1.8
-    private static let breathePeriod: Double = 2.6
+    fileprivate static let levitatePeriod: Double = 1.8
+    fileprivate static let breathePeriod: Double = 2.6
 
     private var logoMark: some View {
         LogoShape().fill(color).frame(width: size, height: size)
@@ -139,66 +140,15 @@ struct SessionAwareLogo: View {
     }
 
     @ViewBuilder private var animatedLogo: some View {
-        switch visualState.animation {
-        case .levitate:
-            // Pure Canvas at 12fps: avoids 120Hz NSHostingView AutoLayout passes & dynamic color churn.
-            TimelineView(.animation(minimumInterval: 1.0 / 12.0)) { ctx in
-                let t = ctx.date.timeIntervalSinceReferenceDate
-                let rawProgress = (t / Self.levitatePeriod).truncatingRemainder(dividingBy: 1.0)
-                let progress = rawProgress < 0 ? rawProgress + 1.0 : rawProgress
-                let wave = sin(2 * Double.pi * progress)
-                let yOffset = CGFloat(-size * 0.08 * wave)
-                let scale = CGFloat(1.0 + 0.04 * wave)
-                let sweepY = CGFloat(1.35 - 1.70 * progress)
-
-                Canvas { context, canvasSize in
-                    let w = canvasSize.width
-                    let h = canvasSize.height
-
-                    // Ground shadow capsule
-                    let capW = w * 0.28 * CGFloat(1.0 - 0.35 * progress)
-                    let capH = max(1.3, h * 0.085)
-                    let capY = h * 0.5 + h * CGFloat(0.28 + 0.16 * progress) - capH * 0.5
-                    let capRect = CGRect(x: (w - capW) * 0.5, y: capY, width: capW, height: capH)
-                    context.fill(
-                        Path(roundedRect: capRect, cornerRadius: capH * 0.5),
-                        with: .color(color.opacity(0.75 * (1.0 - progress)))
-                    )
-
-                    // Levitating logo mark + upward optical sheen
-                    context.drawLayer { layer in
-                        layer.translateBy(x: w * 0.5, y: h * 0.5 + yOffset)
-                        layer.scaleBy(x: scale, y: scale)
-                        layer.translateBy(x: -w * 0.5, y: -h * 0.5)
-
-                        let logoPath = AGYLogo.swiftUIPath(in: CGRect(origin: .zero, size: canvasSize))
-                        layer.fill(logoPath, with: .color(color.opacity(0.84)))
-                        layer.fill(
-                            logoPath,
-                            with: .linearGradient(
-                                Gradient(stops: [
-                                    .init(color: .clear, location: 0.0),
-                                    .init(color: Color(red: 0.45, green: 0.88, blue: 1.0).opacity(0.85), location: 0.35),
-                                    .init(color: Color.white.opacity(0.95), location: 0.50),
-                                    .init(color: Color(red: 0.45, green: 0.88, blue: 1.0).opacity(0.85), location: 0.65),
-                                    .init(color: .clear, location: 1.0),
-                                ]),
-                                startPoint: CGPoint(x: w * 0.5, y: h * (sweepY + 0.38)),
-                                endPoint: CGPoint(x: w * 0.5, y: h * (sweepY - 0.38))
-                            )
-                        )
-                    }
-                }
-                .frame(width: size, height: size)
-            }
-        case .breatheOpacity:
-            TimelineView(.animation(minimumInterval: 1.0 / 8.0)) { ctx in
-                let t = ctx.date.timeIntervalSinceReferenceDate
-                let phase = (sin(2 * Double.pi * t / Self.breathePeriod) + 1) / 2
-                logoMark.opacity(0.55 + 0.45 * phase)
-            }
-        case .idle:
+        if isStaticRender || visualState.animation == .idle {
             logoMark
+        } else {
+            CoreAnimationLogoView(
+                mode: visualState.animation,
+                size: size,
+                color: color
+            )
+            .frame(width: size, height: size)
         }
     }
 
@@ -222,10 +172,423 @@ struct SessionAwareLogo: View {
                         .offset(x: dotSize * 0.3, y: -dotSize * 0.3)
                 }
             }
-            .onReceive(NSWorkspace.shared.notificationCenter.publisher(
-                for: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification)) { _ in
-                reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+}
+
+/// Pure GPU-composited Core Animation logo renderer for `.levitate` and `.breatheOpacity`.
+/// Runs entirely on the WindowServer GPU with 0 main-thread frame ticks and 0 AppKit layout passes.
+private struct CoreAnimationLogoView: NSViewRepresentable {
+    let mode: LogoAnimationMode
+    let size: CGFloat
+    let color: Color
+
+    func makeNSView(context: Context) -> CoreAnimationLogoNSView {
+        let view = CoreAnimationLogoNSView(size: size)
+        view.configure(mode: mode, size: size, color: color)
+        return view
+    }
+
+    func updateNSView(_ nsView: CoreAnimationLogoNSView, context: Context) {
+        nsView.configure(mode: mode, size: size, color: color)
+    }
+
+    func sizeThatFits(
+        _ proposal: ProposedViewSize,
+        nsView: CoreAnimationLogoNSView,
+        context: Context
+    ) -> CGSize? {
+        CGSize(width: size, height: size)
+    }
+
+    static func dismantleNSView(_ nsView: CoreAnimationLogoNSView, coordinator: ()) {
+        nsView.stopAllAnimations()
+    }
+}
+
+private final class CoreAnimationLogoNSView: NSView {
+    private static let shadowAnimKey = "agy.logo.shadow"
+    private static let levitateAnimKey = "agy.logo.levitate"
+    private static let sheenAnimKey = "agy.logo.sheen"
+    private static let breatheAnimKey = "agy.logo.breathe"
+
+    private static let sheenColors: [CGColor] = [
+        NSColor(srgbRed: 1.0, green: 1.0, blue: 1.0, alpha: 0.0).cgColor,
+        NSColor(srgbRed: 0.45, green: 0.88, blue: 1.0, alpha: 0.85).cgColor,
+        NSColor(srgbRed: 1.0, green: 1.0, blue: 1.0, alpha: 0.95).cgColor,
+        NSColor(srgbRed: 0.45, green: 0.88, blue: 1.0, alpha: 0.85).cgColor,
+        NSColor(srgbRed: 1.0, green: 1.0, blue: 1.0, alpha: 0.0).cgColor,
+    ]
+    private static let sheenLocations: [NSNumber] = [0.0, 0.35, 0.50, 0.65, 1.0]
+
+    private let shadowLayer = CAShapeLayer()
+    private let logoContainerLayer = CALayer()
+    private let baseLogoLayer = CAShapeLayer()
+    private let sheenHostLayer = CALayer()
+    private let sheenMaskLayer = CAShapeLayer()
+    private let sheenGradientLayer = CAGradientLayer()
+
+    private var logoSize: CGFloat
+    private var appliedMode: LogoAnimationMode = .idle
+    private var appliedSize: CGFloat = 0
+    private var appliedSwiftUIColor: Color?
+    private var appliedCGColor: CGColor?
+    private var animationsInstalled = false
+
+    override var isFlipped: Bool { true }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: logoSize, height: logoSize)
+    }
+
+    init(size: CGFloat) {
+        self.logoSize = size
+        super.init(frame: NSRect(x: 0, y: 0, width: size, height: size))
+        wantsLayer = true
+        layerContentsRedrawPolicy = .never
+        setupLayerHierarchy()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
+    }
+
+    deinit {
+        shadowLayer.removeAllAnimations()
+        logoContainerLayer.removeAllAnimations()
+        baseLogoLayer.removeAllAnimations()
+        sheenGradientLayer.removeAllAnimations()
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    override func removeFromSuperview() {
+        stopAllAnimations()
+        super.removeFromSuperview()
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil {
+            stopAllAnimations()
+        }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard window != nil else { return }
+        syncContentsScale()
+        if appliedMode != .idle && !animationsInstalled {
+            applyAnimations(for: appliedMode, size: appliedSize)
+        }
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        syncContentsScale()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        guard let color = appliedSwiftUIColor else { return }
+        let resolved = resolvedCGColor(for: color)
+        guard !Self.cgColorsEqual(resolved, appliedCGColor) else { return }
+        appliedCGColor = resolved
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        shadowLayer.fillColor = resolved
+        baseLogoLayer.fillColor = resolved
+        CATransaction.commit()
+    }
+
+    func configure(mode: LogoAnimationMode, size: CGFloat, color: Color) {
+        let resolved = resolvedCGColor(for: color)
+        let modeChanged = (mode != appliedMode)
+        let sizeChanged = abs(size - appliedSize) > 0.01
+        let colorChanged = !Self.cgColorsEqual(resolved, appliedCGColor)
+
+        appliedSwiftUIColor = color
+
+        // Fast-path: identical (mode, size, cgColor) — never restart running GPU animations.
+        if !modeChanged && !sizeChanged && !colorChanged {
+            if mode != .idle && !animationsInstalled && window != nil {
+                applyAnimations(for: mode, size: size)
             }
+            return
+        }
+
+        // Color-only update: tint layers atomically without disrupting running animations.
+        if !modeChanged && !sizeChanged && colorChanged {
+            appliedCGColor = resolved
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            shadowLayer.fillColor = resolved
+            baseLogoLayer.fillColor = resolved
+            CATransaction.commit()
+            return
+        }
+
+        if abs(size - logoSize) > 0.01 {
+            logoSize = size
+            invalidateIntrinsicContentSize()
+        }
+
+        appliedMode = mode
+        appliedSize = size
+        appliedCGColor = resolved
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+
+        if sizeChanged {
+            updateGeometry(for: size)
+        }
+
+        shadowLayer.fillColor = resolved
+        baseLogoLayer.fillColor = resolved
+
+        switch mode {
+        case .levitate:
+            shadowLayer.isHidden = false
+            shadowLayer.opacity = 0.75
+            baseLogoLayer.opacity = 0.84
+            sheenHostLayer.isHidden = false
+            applyAnimations(for: .levitate, size: size)
+
+        case .breatheOpacity:
+            shadowLayer.isHidden = true
+            sheenHostLayer.isHidden = true
+            baseLogoLayer.opacity = 1.0
+            applyAnimations(for: .breatheOpacity, size: size)
+
+        case .idle:
+            stopAllAnimations()
+            shadowLayer.isHidden = true
+            sheenHostLayer.isHidden = true
+            baseLogoLayer.opacity = 1.0
+        }
+
+        CATransaction.commit()
+    }
+
+    func stopAllAnimations() {
+        shadowLayer.removeAllAnimations()
+        logoContainerLayer.removeAllAnimations()
+        baseLogoLayer.removeAllAnimations()
+        sheenGradientLayer.removeAllAnimations()
+        animationsInstalled = false
+    }
+
+    private func setupLayerHierarchy() {
+        guard let root = self.layer else { return }
+        let disabledActions: [String: CAAction] = [
+            "bounds": NSNull(),
+            "position": NSNull(),
+            "transform": NSNull(),
+            "opacity": NSNull(),
+            "hidden": NSNull(),
+            "fillColor": NSNull(),
+            "path": NSNull(),
+            "sublayers": NSNull(),
+        ]
+
+        root.masksToBounds = false
+        root.actions = disabledActions
+
+        shadowLayer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+        shadowLayer.actions = disabledActions
+
+        logoContainerLayer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+        logoContainerLayer.masksToBounds = false
+        logoContainerLayer.actions = disabledActions
+
+        baseLogoLayer.actions = disabledActions
+
+        sheenHostLayer.masksToBounds = false
+        sheenHostLayer.actions = disabledActions
+
+        sheenMaskLayer.fillColor = NSColor.white.cgColor
+        sheenMaskLayer.actions = disabledActions
+        sheenHostLayer.mask = sheenMaskLayer
+
+        sheenGradientLayer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+        sheenGradientLayer.colors = Self.sheenColors
+        sheenGradientLayer.locations = Self.sheenLocations
+        sheenGradientLayer.startPoint = CGPoint(x: 0.5, y: 1.0)
+        sheenGradientLayer.endPoint = CGPoint(x: 0.5, y: 0.0)
+        sheenGradientLayer.actions = disabledActions
+        sheenHostLayer.addSublayer(sheenGradientLayer)
+
+        logoContainerLayer.addSublayer(baseLogoLayer)
+        logoContainerLayer.addSublayer(sheenHostLayer)
+
+        root.addSublayer(shadowLayer)
+        root.addSublayer(logoContainerLayer)
+
+        syncContentsScale()
+    }
+
+    private func updateGeometry(for size: CGFloat) {
+        let fullRect = CGRect(x: 0, y: 0, width: size, height: size)
+        // Flipped NSView gives the root layer top-down coordinates (`isGeometryFlipped == true`),
+        // so `flippedForCoreAnimation: false` renders the logo right-side up.
+        let logoPath = AGYLogo.cgPath(in: fullRect, flippedForCoreAnimation: false)
+
+        let capW = size * 0.28
+        let capH = max(1.3, size * 0.085)
+        let capBounds = CGRect(x: 0, y: 0, width: capW, height: capH)
+        shadowLayer.bounds = capBounds
+        shadowLayer.position = CGPoint(x: size * 0.5, y: size * 0.5 + size * 0.28)
+        shadowLayer.path = CGPath(
+            roundedRect: capBounds,
+            cornerWidth: capH * 0.5,
+            cornerHeight: capH * 0.5,
+            transform: nil
+        )
+
+        logoContainerLayer.bounds = fullRect
+        logoContainerLayer.position = CGPoint(x: size * 0.5, y: size * 0.5)
+
+        baseLogoLayer.frame = fullRect
+        baseLogoLayer.path = logoPath
+
+        sheenHostLayer.frame = fullRect
+        sheenMaskLayer.frame = fullRect
+        sheenMaskLayer.path = logoPath
+
+        sheenGradientLayer.bounds = CGRect(x: 0, y: 0, width: size, height: size * 0.76)
+        sheenGradientLayer.position = CGPoint(x: size * 0.5, y: size * 1.35)
+    }
+
+    private func applyAnimations(for mode: LogoAnimationMode, size: CGFloat) {
+        stopAllAnimations()
+        guard size > 0 else { return }
+
+        switch mode {
+        case .levitate:
+            let period = SessionAwareLogo.levitatePeriod
+            let linear = CAMediaTimingFunction(name: .linear)
+
+            // 1. Ground shadow capsule: X-scale 1.0 -> 0.65, drift down +0.28h -> +0.44h, fade 0.75 -> 0
+            let shadowScaleX = CABasicAnimation(keyPath: "transform.scale.x")
+            shadowScaleX.fromValue = 1.0
+            shadowScaleX.toValue = 0.65
+
+            let shadowDriftY = CABasicAnimation(keyPath: "transform.translation.y")
+            shadowDriftY.fromValue = 0.0
+            shadowDriftY.toValue = size * 0.16
+
+            let shadowOpacity = CABasicAnimation(keyPath: "opacity")
+            shadowOpacity.fromValue = 0.75
+            shadowOpacity.toValue = 0.0
+
+            let shadowGroup = CAAnimationGroup()
+            shadowGroup.animations = [shadowScaleX, shadowDriftY, shadowOpacity]
+            shadowGroup.duration = period
+            shadowGroup.repeatCount = .infinity
+            shadowGroup.timingFunction = linear
+            shadowGroup.isRemovedOnCompletion = false
+            shadowLayer.add(shadowGroup, forKey: Self.shadowAnimKey)
+
+            // 2. Levitating logo container: smooth sine wave translation.y & scale
+            let sampleCount = 16
+            var keyTimes: [NSNumber] = []
+            var yValues: [NSNumber] = []
+            var scaleValues: [NSNumber] = []
+            keyTimes.reserveCapacity(sampleCount + 1)
+            yValues.reserveCapacity(sampleCount + 1)
+            scaleValues.reserveCapacity(sampleCount + 1)
+            for i in 0...sampleCount {
+                let progress = Double(i) / Double(sampleCount)
+                let wave = sin(2.0 * Double.pi * progress)
+                keyTimes.append(NSNumber(value: progress))
+                yValues.append(NSNumber(value: Double(-size * 0.08) * wave))
+                scaleValues.append(NSNumber(value: 1.0 + 0.04 * wave))
+            }
+
+            let floatY = CAKeyframeAnimation(keyPath: "transform.translation.y")
+            floatY.values = yValues
+            floatY.keyTimes = keyTimes
+
+            let floatScale = CAKeyframeAnimation(keyPath: "transform.scale")
+            floatScale.values = scaleValues
+            floatScale.keyTimes = keyTimes
+
+            let levitateGroup = CAAnimationGroup()
+            levitateGroup.animations = [floatY, floatScale]
+            levitateGroup.duration = period
+            levitateGroup.repeatCount = .infinity
+            levitateGroup.timingFunction = linear
+            levitateGroup.isRemovedOnCompletion = false
+            logoContainerLayer.add(levitateGroup, forKey: Self.levitateAnimKey)
+
+            // 3. Upward optical sheen swept across the logo mask every 1.8s
+            let sheenSweep = CABasicAnimation(keyPath: "position.y")
+            sheenSweep.fromValue = size * 1.35
+            sheenSweep.toValue = -size * 0.35
+            sheenSweep.duration = period
+            sheenSweep.repeatCount = .infinity
+            sheenSweep.timingFunction = linear
+            sheenSweep.isRemovedOnCompletion = false
+            sheenGradientLayer.add(sheenSweep, forKey: Self.sheenAnimKey)
+
+            animationsInstalled = true
+
+        case .breatheOpacity:
+            let breathe = CABasicAnimation(keyPath: "opacity")
+            breathe.fromValue = 0.55
+            breathe.toValue = 1.0
+            breathe.duration = SessionAwareLogo.breathePeriod * 0.5
+            breathe.autoreverses = true
+            breathe.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            breathe.repeatCount = .infinity
+            breathe.isRemovedOnCompletion = false
+            baseLogoLayer.add(breathe, forKey: Self.breatheAnimKey)
+
+            animationsInstalled = true
+
+        case .idle:
+            break
+        }
+    }
+
+    private func syncContentsScale() {
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
+        layer?.contentsScale = scale
+        shadowLayer.contentsScale = scale
+        logoContainerLayer.contentsScale = scale
+        baseLogoLayer.contentsScale = scale
+        sheenHostLayer.contentsScale = scale
+        sheenMaskLayer.contentsScale = scale
+        sheenGradientLayer.contentsScale = scale
+    }
+
+    private func resolvedCGColor(for swiftUIColor: Color) -> CGColor {
+        let nsColor = NSColor(swiftUIColor)
+        var resolved = nsColor.cgColor
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            resolved = nsColor.usingColorSpace(.sRGB)?.cgColor ?? nsColor.cgColor
+        }
+        return resolved
+    }
+
+    private static func cgColorsEqual(_ lhs: CGColor?, _ rhs: CGColor?) -> Bool {
+        switch (lhs, rhs) {
+        case (nil, nil):
+            return true
+        case let (a?, b?):
+            guard let ca = a.components, let cb = b.components, ca.count == cb.count else {
+                return a == b
+            }
+            for i in 0..<ca.count where abs(ca[i] - cb[i]) > 0.001 {
+                return false
+            }
+            return true
+        default:
+            return false
+        }
     }
 }
 
@@ -409,7 +772,40 @@ final class PointingCursorCoordinator {
 final class TelemetryArtworkCache {
     static let shared = TelemetryArtworkCache()
 
-    private var lru = BoundedLRUState<AnyHashable, NSImage>(maxEntries: 24)
+    private var lru = BoundedLRUState<AnyHashable, NSImage>(maxEntries: 16)
+    private let memoryPressureSource: DispatchSourceMemoryPressure
+
+    init() {
+        let source = DispatchSource.makeMemoryPressureSource(
+            eventMask: [.warning, .critical],
+            queue: .main
+        )
+        self.memoryPressureSource = source
+        source.setEventHandler { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let event = self.memoryPressureSource.data
+                if event.contains(.critical) {
+                    self.clear()
+                } else if event.contains(.warning) {
+                    self.trim(to: 4)
+                }
+            }
+        }
+        source.resume()
+    }
+
+    deinit {
+        memoryPressureSource.cancel()
+    }
+
+    func trim(to maxCount: Int) {
+        lru.trim(to: maxCount)
+    }
+
+    func clear() {
+        lru.removeAll()
+    }
 
     func image<K: Hashable, V: View>(
         for key: K,
@@ -431,6 +827,20 @@ final class TelemetryArtworkCache {
         lru.set(img, for: box)
         return img
     }
+}
+
+/// Safe finite `Double` → `Int` conversion that never traps on `NaN`, `Inf`, or out-of-range values.
+@inline(__always)
+func safeRoundedInt(
+    _ value: Double,
+    min minVal: Int = -1_000_000_000_000_000,
+    max maxVal: Int = 1_000_000_000_000_000
+) -> Int {
+    guard value.isFinite else { return 0 }
+    let rounded = value.rounded()
+    if rounded <= Double(minVal) { return minVal }
+    if rounded >= Double(maxVal) { return maxVal }
+    return Int(rounded)
 }
 
 /// Renders a heavy static Canvas artwork once into `TelemetryArtworkCache` at 2x Retina scale
@@ -463,9 +873,15 @@ struct CachedTelemetryArtwork<Key: Hashable, Content: View>: View {
     }
 
     var body: some View {
-        if isStaticRender || width < 2 || height < 2 {
+        let hasValidBounds = width.isFinite && height.isFinite
+            && width >= 2 && height >= 2
+            && width <= 8192 && height <= 8192
+        if isStaticRender || !hasValidBounds {
             content()
-                .frame(width: width, height: height)
+                .frame(
+                    width: width.isFinite ? max(0, width) : 0,
+                    height: height.isFinite ? max(0, height) : 0
+                )
         } else {
             let sizedKey = SizedKey(
                 key: key,
@@ -907,6 +1323,9 @@ struct ToolbarIconButton: View {
             )
             .contentShape(Rectangle())
             .help(helpText)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(helpText)
+            .accessibilityAddTraits(.isButton)
             .onHover { hovering = $0 }
             .onTapGesture(perform: action)
     }
@@ -948,6 +1367,9 @@ struct RefreshToolbarButton: View {
         )
         .contentShape(Rectangle())
         .help(helpText)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(helpText)
+        .accessibilityAddTraits(.isButton)
         .onHover { hovering = $0 }
         .onTapGesture(perform: action)
     }
@@ -1020,6 +1442,16 @@ extension DisplayTab {
         case .subscription: return loc("tabPlanShort")
         }
     }
+
+    func accessibilityTitle(_ loc: Localizer) -> String {
+        switch self {
+        case .cost:         return loc("cost")
+        case .tokens:       return loc("tokens")
+        case .time:         return loc("timeTab")
+        case .session:      return loc("sessionTab")
+        case .subscription: return loc("subTab")
+        }
+    }
 }
 
 /// Full-bleed 5-column drafting tab grid bounded by edge-to-edge 1px hairlines.
@@ -1089,6 +1521,9 @@ struct TelemetryTabBar: View {
                         }
                     )
                     .contentShape(Rectangle())
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(tab.accessibilityTitle(loc))
+                    .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
                     .onHover { inside in hovered = inside ? tab : (hovered == tab ? nil : hovered) }
                     .onTapGesture {
                         guard selection != tab else { return }
@@ -1184,6 +1619,9 @@ struct TelemetrySegmentedStrip<Value: Hashable>: View {
                             }
                         )
                         .contentShape(Rectangle())
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel(label(item))
+                        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
                         .onHover { inside in hovered = inside ? item : (hovered == item ? nil : hovered) }
                         .onTapGesture {
                             guard selection != item else { return }

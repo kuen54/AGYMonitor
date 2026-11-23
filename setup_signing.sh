@@ -44,7 +44,7 @@ openssl req -x509 -newkey rsa:2048 -nodes \
 # OpenSSL 3.x defaults to PKCS#12 algorithms macOS `security import` rejects with
 # "MAC verification failed". Pin the legacy SHA1/3DES PBE + SHA1 MAC the keychain
 # accepts, and use a transient password (an empty p12 password also trips the MAC check).
-P12_PASS="agymonitor-transient"
+P12_PASS="$(openssl rand -hex 16)"
 openssl pkcs12 -export -legacy \
     -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES -macalg SHA1 \
     -inkey "$TMP/key.pem" -in "$TMP/cert.pem" \

@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import Darwin
 
 // MARK: - Session Jumper (app layer)
 //
@@ -24,9 +25,16 @@ enum JumpReason: String, Equatable {
 }
 
 final class SessionJumper {
-    private let queue = DispatchQueue(label: "com.kuen54.AGYMonitor.jump", qos: .userInitiated)
+    /// Concurrent queue so rapid clicks genuinely supersede a blocked 30s `osascript`
+    /// TCC prompt via `JumpRequestGate` without queueing behind the stalled request.
+    private let queue = DispatchQueue(
+        label: "com.kuen54.AGYMonitor.jump",
+        qos: .userInitiated,
+        attributes: .concurrent
+    )
     private let gateLock = NSLock()
     private var requestGate = JumpRequestGate()
+    private var activeOsascriptPid: pid_t = 0
 
     func jump(
         session: SessionInfo,
@@ -36,17 +44,32 @@ final class SessionJumper {
     ) {
         gateLock.lock()
         let generation = requestGate.beginRequest()
+        let stalePid = activeOsascriptPid
+        activeOsascriptPid = 0
         gateLock.unlock()
+
+        if stalePid > 0 {
+            kill(stalePid, SIGTERM)
+        }
 
         queue.async { [weak self] in
             guard let self = self else { return }
             guard self.isLatestRequest(generation) else { return }
-            let outcome = self.perform(session: session, target: target, knownTitle: knownTitle)
-            guard self.isLatestRequest(generation) else { return }
-            if let completion = completion {
-                DispatchQueue.main.async { [weak self] in
-                    guard let self = self, self.isLatestRequest(generation) else { return }
+            self.perform(
+                session: session,
+                target: target,
+                knownTitle: knownTitle,
+                generation: generation
+            ) { [weak self] outcome in
+                guard let self = self, self.isLatestRequest(generation) else { return }
+                guard let completion = completion else { return }
+                if Thread.isMainThread {
                     completion(outcome)
+                } else {
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self = self, self.isLatestRequest(generation) else { return }
+                        completion(outcome)
+                    }
                 }
             }
         }
@@ -60,26 +83,70 @@ final class SessionJumper {
 
     // MARK: - Dispatch by surface / terminal
 
-    private func perform(session: SessionInfo, target: SessionTarget, knownTitle: String?) -> JumpOutcome {
+    private func perform(
+        session: SessionInfo,
+        target: SessionTarget,
+        knownTitle: String?,
+        generation: Int,
+        completion: @escaping (JumpOutcome) -> Void
+    ) {
+        guard isLatestRequest(generation) else { return }
+
         if isDesktopOrIDESession(session: session, target: target) {
-            return jumpAntigravityApp(session: session, target: target)
+            jumpAntigravityApp(
+                session: session,
+                target: target,
+                generation: generation,
+                completion: completion
+            )
+            return
         }
 
         switch target.terminal {
-        case .otty:          return jumpOtty(session: session, target: target, knownTitle: knownTitle)
-        case .appleTerminal: return jumpAppleScript(target: target, kind: .appleTerminal)
-        case .iterm2:        return jumpAppleScript(target: target, kind: .iterm2)
-        case .ghostty:       return jumpGhostty(target: target)
-        case .wezterm:       return jumpWezterm(target: target)
-        case .kitty:         return jumpKitty(target: target)
-        case .alacritty:     return activateApp(target, reason: .unsupported)
-        case .antigravity:   return jumpAntigravityApp(session: session, target: target)
+        case .otty:
+            jumpOtty(
+                session: session,
+                target: target,
+                knownTitle: knownTitle,
+                generation: generation,
+                completion: completion
+            )
+        case .appleTerminal:
+            jumpAppleScript(target: target, kind: .appleTerminal, generation: generation, completion: completion)
+        case .iterm2:
+            jumpAppleScript(target: target, kind: .iterm2, generation: generation, completion: completion)
+        case .ghostty:
+            jumpGhostty(target: target, generation: generation, completion: completion)
+        case .wezterm:
+            jumpWezterm(target: target, generation: generation, completion: completion)
+        case .kitty:
+            jumpKitty(target: target, generation: generation, completion: completion)
+        case .alacritty:
+            activateApp(target, reason: .unsupported, generation: generation, completion: completion)
+        case .antigravity:
+            jumpAntigravityApp(
+                session: session,
+                target: target,
+                generation: generation,
+                completion: completion
+            )
         case .unknown:
             // Also handle CLI inside Antigravity IDE's integrated terminal cleanly
             if let appName = target.appName?.lowercased(), appName.contains("antigravity") {
-                return jumpAntigravityApp(session: session, target: target)
+                jumpAntigravityApp(
+                    session: session,
+                    target: target,
+                    generation: generation,
+                    completion: completion
+                )
+                return
             }
-            return activateApp(target, reason: target.multiplexed ? .ambiguous : .unsupported)
+            activateApp(
+                target,
+                reason: target.multiplexed ? .ambiguous : .unsupported,
+                generation: generation,
+                completion: completion
+            )
         }
     }
 
@@ -90,87 +157,115 @@ final class SessionJumper {
 
     // MARK: - Antigravity Desktop & Antigravity IDE Activation
 
-    private func jumpAntigravityApp(session: SessionInfo, target: SessionTarget) -> JumpOutcome {
-        // 1. Running PID activation
-        if activateAppPid(target) {
-            return .focusedPane
-        }
-
+    private func jumpAntigravityApp(
+        session: SessionInfo,
+        target: SessionTarget,
+        generation: Int,
+        completion: @escaping (JumpOutcome) -> Void
+    ) {
         let surface = target.surface ?? session.entrypoint ?? ""
         let preferIDE = surface == "antigravity-ide"
             || (target.appName?.lowercased().contains("ide") == true)
 
-        // 2. Running application lookup by bundle ID or localized name
         let candidateBundleIds: [String] = [
             target.bundleId,
             preferIDE ? "com.google.antigravity.ide" : "com.google.antigravity",
             preferIDE ? "com.google.antigravity-ide" : nil,
         ].compactMap { $0 }
 
-        var activatedByWorkspace = false
-        DispatchQueue.main.sync {
+        let targetNames = preferIDE
+            ? ["Antigravity IDE", "Antigravity"]
+            : ["Antigravity", "Antigravity IDE"]
+
+        // 1 & 2. Activate running PID, bundle ID, or localized name asynchronously on main (never `main.sync`).
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, self.isLatestRequest(generation) else { return }
+
+            if let pid = target.appPid, pid > 0,
+               let running = NSRunningApplication(processIdentifier: pid_t(pid)),
+               self.activateRunningApp(running) {
+                completion(.focusedPane)
+                return
+            }
+
             for bid in candidateBundleIds {
                 if let running = NSRunningApplication.runningApplications(withBundleIdentifier: bid).first,
-                   running.activate(options: [.activateIgnoringOtherApps]) {
-                    activatedByWorkspace = true
+                   self.activateRunningApp(running) {
+                    completion(.focusedPane)
                     return
                 }
             }
-            let targetNames = preferIDE
-                ? ["Antigravity IDE", "Antigravity"]
-                : ["Antigravity", "Antigravity IDE"]
+
             for want in targetNames {
                 if let running = NSWorkspace.shared.runningApplications.first(where: {
                     $0.localizedName?.caseInsensitiveCompare(want) == .orderedSame
-                }), running.activate(options: [.activateIgnoringOtherApps]) {
-                    activatedByWorkspace = true
+                }), self.activateRunningApp(running) {
+                    completion(.focusedPane)
                     return
                 }
             }
-        }
-        if activatedByWorkspace {
-            return .focusedPane
-        }
 
-        // 3. Launch / bring forward app bundle via `open` (if cwd exists, open workspace in app, or plain app raise)
-        let appPaths = preferIDE
-            ? ["/Applications/Antigravity IDE.app", "/Applications/Antigravity.app"]
-            : ["/Applications/Antigravity.app", "/Applications/Antigravity IDE.app"]
+            // 3. Launch / bring forward app bundle via `/usr/bin/open` off-main
+            self.queue.async { [weak self] in
+                guard let self = self, self.isLatestRequest(generation) else { return }
+                let appPaths = preferIDE
+                    ? ["/Applications/Antigravity IDE.app", "/Applications/Antigravity.app"]
+                    : ["/Applications/Antigravity.app", "/Applications/Antigravity IDE.app"]
 
-        for appPath in appPaths where FileManager.default.fileExists(atPath: appPath) {
-            if let (s, _) = run("/usr/bin/open", ["-a", appPath]), s == 0 {
-                return .focusedPane
+                for appPath in appPaths where FileManager.default.fileExists(atPath: appPath) {
+                    guard self.isLatestRequest(generation) else { return }
+                    if let (s, _) = self.run("/usr/bin/open", ["-a", appPath]), s == 0 {
+                        completion(.focusedPane)
+                        return
+                    }
+                }
+                if let bid = target.bundleId, self.isLatestRequest(generation),
+                   let (s, _) = self.run("/usr/bin/open", ["-b", bid]), s == 0 {
+                    completion(.focusedPane)
+                    return
+                }
+                if let name = target.appName, self.isLatestRequest(generation),
+                   let (s, _) = self.run("/usr/bin/open", ["-a", name]), s == 0 {
+                    completion(.focusedPane)
+                    return
+                }
+                completion(.failed(.launchFailed))
             }
         }
-        if let bid = target.bundleId, let (s, _) = run("/usr/bin/open", ["-b", bid]), s == 0 {
-            return .focusedPane
-        }
-        if let name = target.appName, let (s, _) = run("/usr/bin/open", ["-a", name]), s == 0 {
-            return .focusedPane
-        }
-        return .failed(.launchFailed)
     }
 
     // MARK: - Otty (zero TCC)
 
-    private func jumpOtty(session: SessionInfo, target: SessionTarget, knownTitle: String?) -> JumpOutcome {
+    private func jumpOtty(
+        session: SessionInfo,
+        target: SessionTarget,
+        knownTitle: String?,
+        generation: Int,
+        completion: @escaping (JumpOutcome) -> Void
+    ) {
         guard let cli = ottyCliPath(target) else {
-            return activateApp(target, reason: .unsupported)
+            activateApp(target, reason: .unsupported, generation: generation, completion: completion)
+            return
         }
-        guard let (_, listOut) = run(cli, ["pane", "list", "--json"]),
+        guard isLatestRequest(generation),
+              let (_, listOut) = run(cli, ["pane", "list", "--json"]),
               let panes = SessionLogic.parseOttyPanes(listOut) else {
-            return activateApp(target, reason: .ambiguous)
+            guard isLatestRequest(generation) else { return }
+            activateApp(target, reason: .ambiguous, generation: generation, completion: completion)
+            return
         }
+        guard isLatestRequest(generation) else { return }
         let aiTitle = (knownTitle?.isEmpty == false)
             ? knownTitle
             : AITitleReader.latestAITitle(sessionId: session.sessionId)
         switch SessionLogic.matchOttyPane(cwd: session.cwd, title: aiTitle, panes: panes) {
         case .exact(let paneId):
+            guard isLatestRequest(generation) else { return }
             _ = run(cli, ["pane", "focus", paneId, "--json"])
-            _ = activateAppPid(target)
-            return .focusedPane
+            activatePidAsync(target, generation: generation)
+            completion(.focusedPane)
         case .ambiguous, .none:
-            return activateApp(target, reason: .ambiguous)
+            activateApp(target, reason: .ambiguous, generation: generation, completion: completion)
         }
     }
 
@@ -186,74 +281,228 @@ final class SessionJumper {
 
     // MARK: - Apple Terminal / iTerm2 (AppleScript, exact by TTY)
 
-    private func jumpAppleScript(target: SessionTarget, kind: TerminalKind) -> JumpOutcome {
+    private func jumpAppleScript(
+        target: SessionTarget,
+        kind: TerminalKind,
+        generation: Int,
+        completion: @escaping (JumpOutcome) -> Void
+    ) {
         guard let dev = SessionLogic.devTTY(target.tty) else {
-            return activateApp(target, reason: .noTarget)
+            activateApp(target, reason: .noTarget, generation: generation, completion: completion)
+            return
         }
         let script = kind == .iterm2
             ? SessionLogic.itermFocusScript(devTTY: dev)
             : SessionLogic.appleTerminalFocusScript(devTTY: dev)
-        guard let res = ProcessRunner.runDetailed("/usr/bin/osascript", ["-e", script], timeout: 30.0) else {
-            return activateApp(target, reason: .unsupported)
+        guard let res = runCancellableOsascript(script, generation: generation, timeout: 30.0) else {
+            guard isLatestRequest(generation) else { return }
+            activateApp(target, reason: .unsupported, generation: generation, completion: completion)
+            return
         }
+        guard isLatestRequest(generation) else { return }
         if res.timedOut {
-            return activateApp(target, reason: .ambiguous)
+            activateApp(target, reason: .ambiguous, generation: generation, completion: completion)
+            return
         }
         let out = res.output.trimmingCharacters(in: .whitespacesAndNewlines)
         if res.status == 0 {
-            if out == "ok" { return .focusedPane }
-            return activateApp(target, reason: .ambiguous)
+            if out == "ok" {
+                completion(.focusedPane)
+                return
+            }
+            activateApp(target, reason: .ambiguous, generation: generation, completion: completion)
+            return
         }
-        return activateApp(target, reason: .permissionDenied)
+        activateApp(target, reason: .permissionDenied, generation: generation, completion: completion)
+    }
+
+    /// Runs `/usr/bin/osascript -e <script>` while registering its PID under `gateLock`
+    /// so a newer click immediately sends `SIGTERM` and supersedes a blocked TCC prompt.
+    private func runCancellableOsascript(
+        _ script: String,
+        generation: Int,
+        timeout: TimeInterval
+    ) -> (status: Int32, output: String, timedOut: Bool)? {
+        guard isLatestRequest(generation) else { return nil }
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        task.arguments = ["-e", script]
+        let outPipe = Pipe()
+        task.standardOutput = outPipe
+        task.standardError = FileHandle.nullDevice
+        do {
+            try task.run()
+        } catch {
+            return nil
+        }
+
+        let pid = task.processIdentifier
+        gateLock.lock()
+        let stillLatest = requestGate.isLatest(generation)
+        if stillLatest {
+            activeOsascriptPid = pid
+        }
+        gateLock.unlock()
+
+        if !stillLatest {
+            if pid > 0 { kill(pid, SIGTERM) }
+            _ = (try? outPipe.fileHandleForReading.readToEnd()) ?? Data()
+            task.waitUntilExit()
+            return nil
+        }
+
+        let stateLock = NSLock()
+        var finished = false
+        var timedOut = false
+        var killWork: DispatchWorkItem?
+
+        let watchdog = DispatchWorkItem {
+            stateLock.lock()
+            let alreadyDone = finished
+            if !alreadyDone { timedOut = true }
+            stateLock.unlock()
+            guard !alreadyDone, pid > 0 else { return }
+
+            kill(pid, SIGTERM)
+            let escalator = DispatchWorkItem {
+                stateLock.lock()
+                let done = finished
+                stateLock.unlock()
+                if !done && pid > 0 {
+                    kill(pid, SIGKILL)
+                }
+            }
+            stateLock.lock()
+            if !finished {
+                killWork = escalator
+                stateLock.unlock()
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2.0, execute: escalator)
+            } else {
+                stateLock.unlock()
+            }
+        }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout, execute: watchdog)
+
+        let data = (try? outPipe.fileHandleForReading.readToEnd()) ?? Data()
+        task.waitUntilExit()
+
+        stateLock.lock()
+        finished = true
+        let didTimeout = timedOut
+        let pendingKill = killWork
+        killWork = nil
+        stateLock.unlock()
+
+        watchdog.cancel()
+        pendingKill?.cancel()
+
+        gateLock.lock()
+        if activeOsascriptPid == pid {
+            activeOsascriptPid = 0
+        }
+        gateLock.unlock()
+
+        guard let out = String(data: data, encoding: .utf8) else { return nil }
+        return (task.terminationStatus, out, didTimeout)
     }
 
     // MARK: - Ghostty / WezTerm / Kitty
 
-    private func jumpGhostty(target: SessionTarget) -> JumpOutcome {
-        return activateApp(target, reason: .ambiguous)
+    private func jumpGhostty(
+        target: SessionTarget,
+        generation: Int,
+        completion: @escaping (JumpOutcome) -> Void
+    ) {
+        activateApp(target, reason: .ambiguous, generation: generation, completion: completion)
     }
 
-    private func jumpWezterm(target: SessionTarget) -> JumpOutcome {
+    private func jumpWezterm(
+        target: SessionTarget,
+        generation: Int,
+        completion: @escaping (JumpOutcome) -> Void
+    ) {
         guard let dev = SessionLogic.devTTY(target.tty), let cli = which("wezterm") else {
-            return activateApp(target, reason: target.tty == nil ? .noTarget : .unsupported)
+            activateApp(
+                target,
+                reason: target.tty == nil ? .noTarget : .unsupported,
+                generation: generation,
+                completion: completion
+            )
+            return
         }
-        guard let (_, listJSON) = run(cli, ["cli", "list", "--format", "json"]) else {
-            return activateApp(target, reason: .ambiguous)
+        guard isLatestRequest(generation),
+              let (_, listJSON) = run(cli, ["cli", "list", "--format", "json"]) else {
+            guard isLatestRequest(generation) else { return }
+            activateApp(target, reason: .ambiguous, generation: generation, completion: completion)
+            return
         }
+        guard isLatestRequest(generation) else { return }
         if let paneId = SessionLogic.matchWeztermPaneId(devTTY: dev, jsonString: listJSON) {
             _ = run(cli, ["cli", "activate-pane", "--pane-id", paneId])
-            _ = activateAppPid(target)
-            return .focusedPane
+            activatePidAsync(target, generation: generation)
+            completion(.focusedPane)
+            return
         }
-        return activateApp(target, reason: .ambiguous)
+        activateApp(target, reason: .ambiguous, generation: generation, completion: completion)
     }
 
-    private func jumpKitty(target: SessionTarget) -> JumpOutcome {
-        return activateApp(target, reason: .ambiguous)
+    private func jumpKitty(
+        target: SessionTarget,
+        generation: Int,
+        completion: @escaping (JumpOutcome) -> Void
+    ) {
+        activateApp(target, reason: .ambiguous, generation: generation, completion: completion)
     }
 
     // MARK: - Universal Fallback: Raise Owning App
 
-    private func activateApp(_ target: SessionTarget, reason: JumpReason) -> JumpOutcome {
-        if activateAppPid(target) { return .appOnly(reason) }
-        if let id = target.bundleId, let (s, _) = run("/usr/bin/open", ["-b", id]), s == 0 {
-            return .appOnly(reason)
-        }
-        if let name = target.appName, let (s, _) = run("/usr/bin/open", ["-a", name]), s == 0 {
-            return .appOnly(reason)
-        }
-        return .failed(.launchFailed)
-    }
-
-    private func activateAppPid(_ target: SessionTarget) -> Bool {
-        guard let pid = target.appPid, pid > 0 else { return false }
-        var ok = false
-        DispatchQueue.main.sync {
-            if let app = NSRunningApplication(processIdentifier: pid_t(pid)) {
-                ok = app.activate(options: [.activateIgnoringOtherApps])
+    private func activateApp(
+        _ target: SessionTarget,
+        reason: JumpReason,
+        generation: Int,
+        completion: @escaping (JumpOutcome) -> Void
+    ) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, self.isLatestRequest(generation) else { return }
+            if let pid = target.appPid, pid > 0,
+               let app = NSRunningApplication(processIdentifier: pid_t(pid)),
+               self.activateRunningApp(app) {
+                completion(.appOnly(reason))
+                return
+            }
+            self.queue.async { [weak self] in
+                guard let self = self, self.isLatestRequest(generation) else { return }
+                if let id = target.bundleId, let (s, _) = self.run("/usr/bin/open", ["-b", id]), s == 0 {
+                    completion(.appOnly(reason))
+                    return
+                }
+                if let name = target.appName, self.isLatestRequest(generation),
+                   let (s, _) = self.run("/usr/bin/open", ["-a", name]), s == 0 {
+                    completion(.appOnly(reason))
+                    return
+                }
+                completion(.failed(.launchFailed))
             }
         }
-        return ok
+    }
+
+    private func activatePidAsync(_ target: SessionTarget, generation: Int) {
+        guard let pid = target.appPid, pid > 0 else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, self.isLatestRequest(generation) else { return }
+            if let app = NSRunningApplication(processIdentifier: pid_t(pid)) {
+                self.activateRunningApp(app)
+            }
+        }
+    }
+
+    @discardableResult
+    private func activateRunningApp(_ app: NSRunningApplication) -> Bool {
+        if #available(macOS 14.0, *) {
+            return app.activate()
+        } else {
+            return app.activate(options: .activateIgnoringOtherApps)
+        }
     }
 
     // MARK: - Process Helpers

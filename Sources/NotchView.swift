@@ -181,7 +181,7 @@ struct CompactNotchView: View {
             wingButton(wing)
                 .padding(.leading, Self.innerPad)
                 .padding(.trailing, Self.outerPad)
-        } else if sessionStore.liveTPS.isWorking && sessionStore.liveTPS.currentTPS >= 0.5 {
+        } else if sessionStore.liveTPS.shouldShowInNotch {
             workingTPSBlock(sessionStore.liveTPS)
                 .padding(.leading, Self.innerPad)
                 .padding(.trailing, Self.outerPad)

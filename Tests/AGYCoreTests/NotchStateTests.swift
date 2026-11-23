@@ -33,12 +33,14 @@ struct NotchStateTests {
         #expect(state.phase == .closedPill)
         #expect(e2.contains(.cancelOpenDwell))
 
-        // Hover again and let dwell fire -> opens panel & activates session monitor
+        // Hover again and let dwell fire -> opens panel & activates session monitor (NO focusPanel on passive hover!)
         NotchMachine.reduce(&state, event: .pointerMoved(insideHover))
         let e3 = NotchMachine.reduce(&state, event: .openDwellFired(insideHover))
         #expect(state.phase == .open)
         #expect(state.isOpen)
+        #expect(!state.awaitingPointerEntry)
         #expect(e3.contains(.setInteractive(true)))
+        #expect(!e3.contains(.focusPanel))
         #expect(e3.contains(.syncSessionMonitor(active: true)))
         #expect(e3.contains(.refreshUsage))
 
@@ -101,16 +103,21 @@ struct NotchStateTests {
         var state = NotchState(phase: .openingDwell)
         let eRev = NotchMachine.reduce(&state, event: .explicitReveal)
         #expect(state.phase == .open)
+        #expect(state.awaitingPointerEntry)
         #expect(eRev.contains(.cancelOpenDwell))
         #expect(eRev.contains(.cancelCloseGrace))
         #expect(eRev.contains(.refreshUsage))
+        #expect(eRev.contains(.focusPanel))
 
-        // Simulate grace countdown then explicitToggle / reveal cancels close
+        // Enter contentRect to clear awaitingPointerEntry, then leave to enter closingGrace
+        NotchMachine.reduce(&state, event: .pointerMoved(insideContent))
+        #expect(!state.awaitingPointerEntry)
         NotchMachine.reduce(&state, event: .pointerMoved(outsideOnScreen))
         #expect(state.phase == .closingGrace)
 
         let eClose = NotchMachine.reduce(&state, event: .explicitToggle)
         #expect(state.phase == .closedPill)
+        #expect(!state.awaitingPointerEntry)
         #expect(eClose.contains(.cancelOpenDwell))
         #expect(eClose.contains(.cancelCloseGrace))
         #expect(eClose.contains(.setInteractive(false)))
@@ -172,9 +179,20 @@ struct NotchStateTests {
         // User triggers ⌥⇧A (explicitReveal) while mouse stays outside -> MUST invalidate lastPointerSample
         _ = NotchMachine.reduce(&state, event: .explicitReveal)
         #expect(state.phase == .open)
+        #expect(state.awaitingPointerEntry)
         #expect(state.lastPointerSample == nil)
 
-        // Subsequent mouse move outside MUST NOT be dropped -> immediately enters closingGrace
+        // Subsequent mouse move outside MUST NOT be dropped (re-applies presentation),
+        // while awaitingPointerEntry holds the notch open until the cursor enters contentRect
+        let holdEff = NotchMachine.reduce(&state, event: .pointerMoved(outsideOnScreen))
+        #expect(!holdEff.isEmpty)
+        #expect(state.phase == .open)
+        #expect(!holdEff.contains(.scheduleCloseGrace))
+        #expect(state.lastPointerSample == outsideOnScreen)
+
+        // Once pointer enters contentRect, awaitingPointerEntry clears and leaving starts closingGrace
+        _ = NotchMachine.reduce(&state, event: .pointerMoved(insideContent))
+        #expect(!state.awaitingPointerEntry)
         let closeEff = NotchMachine.reduce(&state, event: .pointerMoved(outsideOnScreen))
         #expect(state.phase == .closingGrace)
         #expect(closeEff.contains(.scheduleCloseGrace))
@@ -255,5 +273,249 @@ struct NotchStateTests {
         #expect(!v2.changed)
         let v3 = NotchCoordinatorMachine.updateVisibility(&coord, displayId: 10, visible: false)
         #expect(v3.changed && v3.shouldAnimate)
+    }
+
+    @Test("NotchCoordinatorMachine.reconcileScreens reconciles fullscreen changes on kept displays and invalidates pointer samples")
+    func reconcileScreensHandlesKeptFullscreenAndPointerInvalidation() {
+        var coord = NotchCoordinatorState()
+        NotchCoordinatorMachine.start(&coord)
+
+        let d1Normal = NotchDisplayDescriptor(displayId: 10, isBuiltin: true, isMain: true, isFullscreen: false)
+        let d2FS = NotchDisplayDescriptor(displayId: 20, isBuiltin: false, isMain: false, isFullscreen: true)
+        let d3Open = NotchDisplayDescriptor(displayId: 30, isBuiltin: false, isMain: false, isFullscreen: false)
+        _ = NotchCoordinatorMachine.reconcileScreens(&coord, descriptors: [d1Normal, d2FS, d3Open])
+
+        // Display 10 enters openingDwell; Display 30 opens and caches a pointer sample
+        var st1 = coord.displays[10]!
+        _ = NotchMachine.reduce(&st1, event: .pointerMoved(insideHover))
+        #expect(st1.phase == .openingDwell)
+        coord.displays[10] = st1
+
+        var st3 = coord.displays[30]!
+        _ = NotchMachine.reduce(&st3, event: .explicitReveal)
+        _ = NotchMachine.reduce(&st3, event: .pointerMoved(insideContent))
+        #expect(st3.lastPointerSample == insideContent)
+        coord.displays[30] = st3
+
+        // Reconcile: Display 10 enters fullscreen, Display 20 exits fullscreen, Display 30 stays normal
+        let d1FS = NotchDisplayDescriptor(displayId: 10, isBuiltin: true, isMain: true, isFullscreen: true)
+        let d2Normal = NotchDisplayDescriptor(displayId: 20, isBuiltin: false, isMain: false, isFullscreen: false)
+        let plan = NotchCoordinatorMachine.reconcileScreens(&coord, descriptors: [d1FS, d2Normal, d3Open])
+
+        #expect(plan.kept == [10, 20, 30])
+        // Display 10 canceled open dwell and hid
+        #expect(coord.displays[10]?.isFullscreen == true)
+        #expect(coord.displays[10]?.phase == .hidden)
+        #expect(coord.displays[10]?.lastPointerSample == nil)
+        #expect(plan.keptEffects[10] == [.cancelOpenDwell, .applyPanelPresentation])
+
+        // Display 20 exited fullscreen to closedPill
+        #expect(coord.displays[20]?.isFullscreen == false)
+        #expect(coord.displays[20]?.phase == .closedPill)
+        #expect(plan.keptEffects[20] == [.applyPanelPresentation])
+
+        // Display 30 kept open state, invalidated stale pointer sample, emitted no fullscreen effects
+        #expect(coord.displays[30]?.phase == .open)
+        #expect(coord.displays[30]?.lastPointerSample == nil)
+        #expect(plan.keptEffects[30] == nil)
+
+        // Direct invalidatePointerSample helper clears cached sample without swallowing next move
+        var st3Again = coord.displays[30]!
+        _ = NotchMachine.reduce(&st3Again, event: .pointerMoved(insideContent))
+        coord.displays[30] = st3Again
+        #expect(coord.displays[30]?.lastPointerSample == insideContent)
+
+        NotchCoordinatorMachine.invalidatePointerSample(&coord, displayId: 30)
+        #expect(coord.displays[30]?.lastPointerSample == nil)
+        // Unknown display ID is a safe no-op
+        NotchCoordinatorMachine.invalidatePointerSample(&coord, displayId: 999)
+
+        var st3Post = coord.displays[30]!
+        let reprocessed = NotchMachine.reduce(&st3Post, event: .pointerMoved(insideContent))
+        #expect(!reprocessed.isEmpty)
+    }
+
+    @Test("NotchGeometryState.compactWindowSize fits builtin/synthetic pills, wide wings, active Live Wings, and clamps to maxWidth")
+    func compactWindowSizeBoundsAndClamping() {
+        #expect(NotchTiming.panelShrinkDelay == 0.42)
+        #expect(NotchPanelBackingMode.compact != NotchPanelBackingMode.expanded)
+
+        // 1. Built-in MacBook notch (180x32, default wings 39/56, no Live Wing)
+        let builtin = NotchGeometryState.compactWindowSize(
+            maxWidth: 600,
+            closedNotchWidth: 180,
+            closedNotchHeight: 32,
+            leftWingWidth: 39,
+            rightWingWidth: 56,
+            hasActiveWing: false
+        )
+        // symmetricHalfSpan = 90 + 56 + 48 = 194 -> 388, floor = 180 + 260 = 440; height = max(56, 60) = 60
+        #expect(builtin.width == 440)
+        #expect(builtin.height == 60)
+        // Must comfortably fit asymmetric compactGapOffset shift with margin
+        #expect(builtin.width / 2.0 >= 180.0 / 2.0 + 56.0 + 48.0)
+
+        // Taller built-in notch (e.g. 14"/16" MBP 38pt height -> 38 + 24 = 62pt)
+        let tallBuiltin = NotchGeometryState.compactWindowSize(
+            maxWidth: 600,
+            closedNotchWidth: 180,
+            closedNotchHeight: 38,
+            leftWingWidth: 39,
+            rightWingWidth: 56,
+            hasActiveWing: false
+        )
+        #expect(tallBuiltin.height == 62)
+
+        // 2. Synthetic external display pill (200x25, default wings, no Live Wing)
+        let synthetic = NotchGeometryState.compactWindowSize(
+            maxWidth: 600,
+            closedNotchWidth: 200,
+            closedNotchHeight: 25,
+            leftWingWidth: 39,
+            rightWingWidth: 56,
+            hasActiveWing: false
+        )
+        // floor = 200 + 260 = 460; height = max(49, 60) = 60 (~18.7x fewer pixels than 600x860)
+        #expect(synthetic.width == 460)
+        #expect(synthetic.height == 60)
+        #expect(synthetic.width * synthetic.height < (600.0 * 860.0) / 15.0)
+
+        // 3. Asymmetric wide right wing (e.g. working TPS sparkline pill right=120, left=39)
+        let wideTPS = NotchGeometryState.compactWindowSize(
+            maxWidth: 600,
+            closedNotchWidth: 200,
+            closedNotchHeight: 25,
+            leftWingWidth: 39,
+            rightWingWidth: 120,
+            hasActiveWing: false
+        )
+        // symmetricHalfSpan = 100 + 120 + 48 = 268 -> 536 > 460
+        #expect(wideTPS.width == 536)
+        #expect(wideTPS.height == 60)
+
+        // 4. Active Live Wing alert expands margin from +48 to +96 per side
+        let activeWing = NotchGeometryState.compactWindowSize(
+            maxWidth: 600,
+            closedNotchWidth: 180,
+            closedNotchHeight: 32,
+            leftWingWidth: 92,
+            rightWingWidth: 108,
+            hasActiveWing: true
+        )
+        // symmetricHalfSpan = 90 + 108 + 96 = 294 -> 588
+        #expect(activeWing.width == 588)
+        #expect(activeWing.height == 60)
+
+        // 5. Clamping to maxWidth when Live Wing exceeds 600pt (or on a narrow display)
+        let clampedWide = NotchGeometryState.compactWindowSize(
+            maxWidth: 600,
+            closedNotchWidth: 200,
+            closedNotchHeight: 32,
+            leftWingWidth: 140,
+            rightWingWidth: 160,
+            hasActiveWing: true
+        )
+        #expect(clampedWide.width == 600)
+
+        let narrowDisplay = NotchGeometryState.compactWindowSize(
+            maxWidth: 320,
+            closedNotchWidth: 200,
+            closedNotchHeight: 25,
+            leftWingWidth: 39,
+            rightWingWidth: 56,
+            hasActiveWing: false
+        )
+        #expect(narrowDisplay.width == 320)
+        #expect(narrowDisplay.height == 60)
+    }
+
+    @Test("Explicit reveal/toggle holds open via awaitingPointerEntry, emits focusPanel only on explicit open, and clears on entry or dismissal")
+    func explicitRevealPointerHoldFocusAndDismissal() {
+        var state = NotchState()
+
+        // 1. Passive hover dwell open must NOT set awaitingPointerEntry or emit focusPanel
+        _ = NotchMachine.reduce(&state, event: .pointerMoved(insideHover))
+        let hoverEff = NotchMachine.reduce(&state, event: .openDwellFired(insideHover))
+        #expect(state.phase == .open)
+        #expect(!state.awaitingPointerEntry)
+        #expect(!hoverEff.contains(.focusPanel))
+        _ = NotchMachine.reduce(&state, event: .explicitClose)
+        #expect(state.phase == .closedPill)
+
+        // 2. Explicit toggle open sets awaitingPointerEntry and emits focusPanel AFTER setInteractive(true)
+        let toggleOpenEff = NotchMachine.reduce(&state, event: .explicitToggle)
+        #expect(state.phase == .open)
+        #expect(state.awaitingPointerEntry)
+        let interactiveIdx = toggleOpenEff.firstIndex(of: .setInteractive(true))
+        let focusIdx = toggleOpenEff.firstIndex(of: .focusPanel)
+        #expect(interactiveIdx != nil && focusIdx != nil && interactiveIdx! < focusIdx!)
+
+        // Moving pointer outside (both on-screen and off-screen) holds .open without closingGrace
+        let moveOut1 = NotchMachine.reduce(&state, event: .pointerMoved(outsideOnScreen))
+        #expect(state.phase == .open)
+        #expect(state.awaitingPointerEntry)
+        #expect(!moveOut1.contains(.scheduleCloseGrace))
+
+        let moveOut2 = NotchMachine.reduce(&state, event: .pointerMoved(.outside))
+        #expect(state.phase == .open)
+        #expect(state.awaitingPointerEntry)
+        #expect(!moveOut2.contains(.scheduleCloseGrace))
+
+        // Entering contentRect clears awaitingPointerEntry; leaving afterwards transitions to closingGrace
+        let enterEff = NotchMachine.reduce(&state, event: .pointerMoved(insideContent))
+        #expect(state.phase == .open)
+        #expect(!state.awaitingPointerEntry)
+        #expect(!enterEff.contains(.scheduleCloseGrace))
+
+        let leaveEff = NotchMachine.reduce(&state, event: .pointerMoved(outsideOnScreen))
+        #expect(state.phase == .closingGrace)
+        #expect(leaveEff.contains(.scheduleCloseGrace))
+        _ = NotchMachine.reduce(&state, event: .closeGraceFired(outsideOnScreen))
+        #expect(state.phase == .closedPill)
+
+        // 3. Dismissal via outsideClick clears awaitingPointerEntry and closes immediately
+        _ = NotchMachine.reduce(&state, event: .explicitReveal)
+        #expect(state.awaitingPointerEntry)
+        let outsideEff = NotchMachine.reduce(&state, event: .outsideClick)
+        #expect(state.phase == .closedPill)
+        #expect(!state.awaitingPointerEntry)
+        #expect(outsideEff.contains(.setInteractive(false)))
+        #expect(outsideEff.contains(.resignKeyIfNeeded))
+
+        // 4. Dismissal via escapePressed clears awaitingPointerEntry and closes immediately
+        _ = NotchMachine.reduce(&state, event: .explicitReveal)
+        #expect(state.awaitingPointerEntry)
+        let escEff = NotchMachine.reduce(&state, event: .escapePressed)
+        #expect(state.phase == .closedPill)
+        #expect(!state.awaitingPointerEntry)
+        #expect(escEff.contains(.setInteractive(false)))
+        #expect(escEff.contains(.resignKeyIfNeeded))
+
+        // 5. Dismissal via explicitClose clears awaitingPointerEntry
+        _ = NotchMachine.reduce(&state, event: .explicitReveal)
+        #expect(state.awaitingPointerEntry)
+        let closeEff = NotchMachine.reduce(&state, event: .explicitClose)
+        #expect(state.phase == .closedPill)
+        #expect(!state.awaitingPointerEntry)
+        #expect(closeEff.contains(.resignKeyIfNeeded))
+
+        // 6. Fullscreen / Space change clears awaitingPointerEntry so outside moves can close normally
+        _ = NotchMachine.reduce(&state, event: .explicitReveal)
+        #expect(state.awaitingPointerEntry)
+        _ = NotchMachine.reduce(&state, event: .fullscreenChanged(true))
+        #expect(!state.awaitingPointerEntry)
+        let postFSEff = NotchMachine.reduce(&state, event: .pointerMoved(outsideOnScreen))
+        #expect(state.phase == .closingGrace)
+        #expect(postFSEff.contains(.scheduleCloseGrace))
+        _ = NotchMachine.reduce(&state, event: .explicitClose)
+        #expect(state.phase == .hidden)
+
+        // 7. Modal lock pins open against outsideClick & escapePressed
+        _ = NotchMachine.reduce(&state, event: .fullscreenChanged(false))
+        _ = NotchMachine.reduce(&state, event: .explicitReveal)
+        _ = NotchMachine.reduce(&state, event: .modalLockAcquired(.optionsMenu))
+        #expect(NotchMachine.reduce(&state, event: .outsideClick).isEmpty)
+        #expect(NotchMachine.reduce(&state, event: .escapePressed).isEmpty)
+        #expect(state.phase == .open)
     }
 }

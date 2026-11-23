@@ -35,7 +35,10 @@ final class GlobalHotKeyManager {
             userData,
             &eventHandlerRef
         )
-        guard installStatus == noErr else { return false }
+        guard installStatus == noErr else {
+            self.onTrigger = nil
+            return false
+        }
 
         let keyID = EventHotKeyID(signature: Self.signature, id: Self.hotKeyID)
         let modifiers = UInt32(optionKey | shiftKey)

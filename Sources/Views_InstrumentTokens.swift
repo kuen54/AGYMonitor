@@ -66,6 +66,7 @@ struct TokensInstrumentView: View {
 
             FoldedTokenFlowChart(
                 usage: usage,
+                scopeKey: "\(year)-\(month)-\(activeScope.rawValue)",
                 focusedModelId: $focusedModelId
             )
 
@@ -215,6 +216,9 @@ struct TokensInstrumentView: View {
         }
         .fixedSize(horizontal: false, vertical: true)
         .animation(scopeAnimation, value: binding.wrappedValue)
+        .onDisappear {
+            hoveredScope = nil
+        }
     }
 
     private func activeScopeSublabel(scope: UsagePeriodScope, tokens: Int, monthTotal: Int) -> String {
@@ -286,6 +290,7 @@ fileprivate func sampleTokenRidgeCrestNormY(outerPoints: [Point2D], at nx: Doubl
 
 struct FoldedTokenFlowChart: View {
     let usage: PeriodUsage
+    let scopeKey: String
     @Binding var focusedModelId: String?
 
     @Environment(\.localizer) private var loc
@@ -319,8 +324,9 @@ struct FoldedTokenFlowChart: View {
     fileprivate static let leftBarX: CGFloat = 15.0
     fileprivate static let barW: CGFloat = 2.5
 
-    init(usage: PeriodUsage, focusedModelId: Binding<String?>) {
+    init(usage: PeriodUsage, scopeKey: String = "", focusedModelId: Binding<String?>) {
         self.usage = usage
+        self.scopeKey = scopeKey
         self._focusedModelId = focusedModelId
 
         let built = InstrumentMath.buildTokenFlowLayout(
@@ -329,7 +335,7 @@ struct FoldedTokenFlowChart: View {
             nodeGap: 0.042
         )
         self.layout = built
-        self.modelById = Dictionary(uniqueKeysWithValues: usage.models.map { ($0.id, $0) })
+        self.modelById = Dictionary(usage.models.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
         self.channelTotals = [
             .cacheRead: usage.totalCacheRead,
             .input: usage.totalInput,
@@ -380,7 +386,8 @@ struct FoldedTokenFlowChart: View {
     }
 
     var body: some View {
-        let anyFocus = (focusedModelId != nil || hoveredChannel != nil)
+        let currentModelId = activeFocusedModelId
+        let anyFocus = (currentModelId != nil || hoveredChannel != nil)
         let flowKey = FlowArtworkKey(
             leftIds: leftNodeIds,
             leftVals: layout.leftNodes.map(\.value),
@@ -422,7 +429,7 @@ struct FoldedTokenFlowChart: View {
                             if anyFocus {
                                 FoldedFlowFocusCanvas(
                                     layout: layout,
-                                    focusedModelId: focusedModelId,
+                                    focusedModelId: currentModelId,
                                     hoveredChannel: hoveredChannel,
                                     theme: theme
                                 )
@@ -439,10 +446,34 @@ struct FoldedTokenFlowChart: View {
         .padding(.horizontal, 14)
         .padding(.top, 11)
         .padding(.bottom, 10)
+        .onChange(of: focusedModelId) { nextId in
+            if let id = nextId {
+                if leftNodeIds.contains(id) {
+                    if flowFocus != .model(id) {
+                        flowFocus.setModel(id)
+                    }
+                } else {
+                    flowFocus.reset()
+                    focusedModelId = nil
+                }
+            } else if flowFocus.modelId != nil {
+                flowFocus.setModel(nil)
+            }
+        }
+        .onChange(of: scopeKey) { _ in
+            flowFocus.reset()
+            if focusedModelId != nil { focusedModelId = nil }
+        }
         .onChange(of: leftNodeIds) { ids in
             flowFocus.reconcile(validModelIds: Set(ids))
             if focusedModelId != flowFocus.modelId {
                 focusedModelId = flowFocus.modelId
+            }
+        }
+        .onChange(of: rightNodeIds) { ids in
+            if let ch = flowFocus.channel,
+               !ids.contains(where: { Self.channelFromNodeId($0) == ch }) {
+                flowFocus.setChannel(nil)
             }
         }
         .onChange(of: isPanelVisible) { visible in
@@ -479,7 +510,7 @@ struct FoldedTokenFlowChart: View {
                     .font(.system(size: 8, weight: .semibold, design: .monospaced))
                     .monospacedDigit()
                     .foregroundColor(theme.accentSecondary)
-            } else if let fid = focusedModelId, let m = modelById[fid] {
+            } else if let fid = activeFocusedModelId, let m = modelById[fid] {
                 let hit = UsageTelemetryLogic.cacheHitPercent(input: m.inputTokens, cacheRead: m.cacheRead)
                     .map { "HIT \(Int($0.rounded()))%" } ?? formatTokensShort(m.totalTokens).uppercased()
                 Text("\(m.shortCode) · \(formatTokensShort(m.totalTokens).uppercased()) · \(hit)")
@@ -502,19 +533,20 @@ struct FoldedTokenFlowChart: View {
     }
 
     private var leftModelColumn: some View {
+        let currentModelId = activeFocusedModelId
         let connectedToHoveredChannel: Set<String> = {
             guard let ch = hoveredChannel else { return [] }
             return Set(layout.links.filter { $0.channel == ch }.map(\.modelId))
         }()
-        let anyFocus = (focusedModelId != nil || hoveredChannel != nil)
+        let anyFocus = (currentModelId != nil || hoveredChannel != nil)
 
         return ZStack(alignment: .topLeading) {
             ForEach(Array(layout.leftNodes.enumerated()), id: \.element.id) { idx, node in
-                let isFocused = (focusedModelId == node.id)
+                let isFocused = (currentModelId == node.id)
                 let isDominant = (node.id == dominantModelId)
                 let isChannelLinked = (hoveredChannel != nil && connectedToHoveredChannel.contains(node.id))
                 let isDimmed: Bool = {
-                    if let fid = focusedModelId { return fid != node.id }
+                    if let fid = currentModelId { return fid != node.id }
                     if hoveredChannel != nil { return !isChannelLinked }
                     return false
                 }()
@@ -592,21 +624,22 @@ struct FoldedTokenFlowChart: View {
     }
 
     private var rightChannelColumn: some View {
+        let currentModelId = activeFocusedModelId
         let connectedToFocusedModel: Set<TokenChannel> = {
-            guard let fid = focusedModelId else { return [] }
+            guard let fid = currentModelId else { return [] }
             return Set(layout.links.filter { $0.modelId == fid }.map(\.channel))
         }()
-        let anyFocus = (hoveredChannel != nil || focusedModelId != nil)
+        let anyFocus = (hoveredChannel != nil || currentModelId != nil)
 
         return ZStack(alignment: .topLeading) {
             ForEach(Array(layout.rightNodes.enumerated()), id: \.element.id) { idx, node in
                 let ch = Self.channelFromNodeId(node.id)
                 let isFocused = (ch != nil && hoveredChannel == ch)
                 let isDominant = (ch == dominantChannel)
-                let isModelLinked = (ch != nil && focusedModelId != nil && connectedToFocusedModel.contains(ch!))
+                let isModelLinked = (ch != nil && currentModelId != nil && connectedToFocusedModel.contains(ch!))
                 let isDimmed: Bool = {
                     if hoveredChannel != nil { return !isFocused }
-                    if focusedModelId != nil { return !isModelLinked }
+                    if currentModelId != nil { return !isModelLinked }
                     return false
                 }()
                 let pct = layout.totalTokens > 0
@@ -1351,7 +1384,7 @@ private enum TokenThroughputRidgeCache {
 
     static func ridge(dailyValues: [Double], layerCount: Int, samplesPerDay: Int) -> TopographicRidgeResult {
         let key = Key(
-            values: dailyValues.map { Int($0.rounded()) },
+            values: dailyValues.map { safeRoundedInt($0) },
             layerCount: layerCount,
             samplesPerDay: samplesPerDay
         )
@@ -1428,7 +1461,7 @@ struct TokenDensityMatrix: View {
         self.focusedModelId = focusedModelId
 
         let totalDays = AppDate.daysInMonth(year: year, month: month) ?? 30
-        let lookup = Dictionary(uniqueKeysWithValues: data.map { ($0.day, $0) })
+        let lookup = Dictionary(data.map { ($0.day, $0) }, uniquingKeysWith: { _, latest in latest })
 
         var totalVals = [Double](repeating: 0, count: totalDays)
         var totalInts = [Int](repeating: 0, count: totalDays)
@@ -1505,7 +1538,7 @@ struct TokenDensityMatrix: View {
                     CachedTelemetryArtwork(
                         key: SpectrogramArtworkKey(
                             tokens: dailyTokenKey,
-                            avgTokens: Int(snapshot.avgValue.rounded()),
+                            avgTokens: safeRoundedInt(snapshot.avgValue, min: 0),
                             theme: theme.cacheKey
                         ),
                         width: geo.size.width,
@@ -1559,12 +1592,15 @@ struct TokenDensityMatrix: View {
         .onChange(of: isPanelVisible) { visible in
             if !visible { inspection.reset() }
         }
+        .onDisappear {
+            inspection.reset()
+        }
     }
 
     private var headerRow: some View {
         let monthStr = String(format: "%04d.%02d", year, month)
-        let avgText = formatTokensShort(Int(snapshot.avgValue)).uppercased()
-        let maxText = formatTokensShort(Int(snapshot.maxValue)).uppercased()
+        let avgText = formatTokensShort(safeRoundedInt(snapshot.avgValue, min: 0)).uppercased()
+        let maxText = formatTokensShort(safeRoundedInt(snapshot.maxValue, min: 0)).uppercased()
 
         return HStack(spacing: 5) {
             Text("02.2")
@@ -1579,7 +1615,7 @@ struct TokenDensityMatrix: View {
 
             if let day = hoveredDay, day >= 1, day <= snapshot.daysInMonth {
                 let idx = day - 1
-                let val = Int(snapshot.values[idx])
+                let val = safeRoundedInt(snapshot.values[idx], min: 0)
                 let suffix: String = {
                     if let hit = snapshot.dayCacheHit[idx] {
                         return " · HIT \(hit)%"
@@ -2186,7 +2222,7 @@ private struct TokenSpectrogramOverlayCanvas: View {
                 let tagY = max(10, min(baseY - 17, pt.y - 6))
                 let align: UnitPoint = labelRight ? .leading : .trailing
 
-                let primaryStr = String(format: "D%02d  %@", day, formatTokensShort(Int(val)).uppercased())
+                let primaryStr = String(format: "D%02d  %@", day, formatTokensShort(safeRoundedInt(val, min: 0)).uppercased())
                 let secondaryStr: String = {
                     if let hit = snapshot.dayCacheHit[idx] {
                         return String(format: "HIT %d%%  Y%.2f", hit, anchor.y)
@@ -2259,7 +2295,7 @@ private struct TokenSpectrogramOverlayCanvas: View {
                 let textX = labelRight ? min(size.width - 2, elbowX + 9) : max(2, elbowX - 9)
                 let align: UnitPoint = labelRight ? .leading : .trailing
 
-                let line1 = Text(String(format: "PK.%02d  %@", pIdx + 1, formatTokensShort(Int(ridge.peakValue)).uppercased()))
+                let line1 = Text(String(format: "PK.%02d  %@", pIdx + 1, formatTokensShort(safeRoundedInt(ridge.peakValue, min: 0)).uppercased()))
                     .font(.system(size: 7.8, weight: .semibold, design: .monospaced))
                     .foregroundColor(theme.accent)
                 let line2 = Text(String(format: "X%.2f  Y%.2f", anchor.x, anchor.y))

@@ -611,4 +611,67 @@ struct InstrumentTests {
         #expect(tooNarrow.peakWindowStartBin == nil)
         #expect(tooNarrow.peakWindowEndBin == nil)
     }
+
+    @Test("InstrumentMath filters and clamps NaN/Infinity without trapping or emitting non-finite geometry")
+    func nonFiniteInputsNeverTrapOrEmitNaN() {
+        // 1. Topographic ridges with NaN, +Inf, -Inf mixed with valid values
+        let mixedRidges = InstrumentMath.buildTopographicRidges(
+            dailyValues: [.nan, 2.0, .infinity, -.infinity, 10.0, 5.0]
+        )
+        #expect(mixedRidges.peakIndex == 4)
+        #expect(mixedRidges.peakValue == 10.0)
+        #expect(mixedRidges.dayAnchors.allSatisfy { $0.x.isFinite && $0.y.isFinite })
+        for layer in mixedRidges.layers {
+            #expect(layer.factor.isFinite)
+            #expect(layer.points.allSatisfy { $0.x.isFinite && $0.y.isFinite })
+        }
+
+        // All non-finite ridges -> cleanly empty
+        let onlyBadRidges = InstrumentMath.buildTopographicRidges(dailyValues: [.nan, .infinity, -.infinity])
+        #expect(onlyBadRidges.layers.isEmpty)
+        #expect(onlyBadRidges.peakIndex == nil)
+
+        // 2. Borehole slices with NaN, +Inf, -Inf, and overflowing sum
+        let mixedSlices = InstrumentMath.buildBoreholeSlices(
+            items: [
+                ("nan", .nan),
+                ("inf", .infinity),
+                ("negInf", -.infinity),
+                ("carbon", 30.0),
+                ("flash", 70.0),
+            ],
+            minSliceFraction: .nan
+        )
+        #expect(mixedSlices.map(\.id) == ["carbon", "flash"])
+        #expect(mixedSlices.allSatisfy { $0.fraction.isFinite && $0.yStart.isFinite && $0.yEnd.isFinite })
+
+        let overflowSlices = InstrumentMath.buildBoreholeSlices(
+            items: [("a", Double.greatestFiniteMagnitude), ("b", Double.greatestFiniteMagnitude)]
+        )
+        #expect(overflowSlices.isEmpty)
+
+        // 3. densityLevel never traps on +Inf/+Inf or NaN
+        #expect(InstrumentMath.densityLevel(value: .infinity, maxValue: .infinity) == 0)
+        #expect(InstrumentMath.densityLevel(value: .nan, maxValue: 10.0) == 0)
+        #expect(InstrumentMath.densityLevel(value: 10.0, maxValue: .infinity) == 0)
+        #expect(InstrumentMath.densityLevel(value: 10.0, maxValue: .nan) == 0)
+
+        // 4. Orbital gauge & hit-testing helpers never trap or return NaN
+        #expect(InstrumentMath.orbitalAngleRad(fraction: .nan).isFinite)
+        #expect(InstrumentMath.orbitalAngleRad(fraction: .infinity).isFinite)
+        let orb = InstrumentMath.orbitalGaugeAngles(
+            remainingFraction: .nan,
+            paceExpectedRemainingFraction: .infinity,
+            isOverPaceWarning: false
+        )
+        #expect(orb.remainingEndAngle.isFinite)
+        #expect(orb.paceAngle == nil)
+
+        #expect(InstrumentMath.hitTestBoreholeSlice(normalizedY: .nan, slices: mixedSlices) == nil)
+        #expect(InstrumentMath.hitTestLabelCenters(y: .nan, centers: [10.0, .nan], ids: ["a", "b"]) == nil)
+        #expect(InstrumentMath.hitTestLabelCenters(y: 10.0, centers: [.nan, 10.0], ids: ["a", "b"]) == "b")
+        #expect(InstrumentMath.hitTestPolarArc(dx: .nan, dy: 0, outerRadius: 50, ringStep: 5, ringCount: 7, arcs: []) == nil)
+        #expect(InstrumentMath.yearContourCell(x: .nan, y: 10, width: 100, height: 50, padY: 4) == nil)
+        #expect(InstrumentMath.yearContourCell(x: .infinity, y: .infinity, width: 100, height: 50, padY: .nan) == nil)
+    }
 }

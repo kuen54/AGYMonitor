@@ -33,8 +33,30 @@ public enum QuotaRefreshNotice: Equatable, Sendable {
 public enum QuotaPhase<Snapshot: Equatable & Sendable>: Equatable, Sendable {
     case noAccount
     case loading
-    case ready(snapshot: Snapshot, source: QuotaSource, updatedAt: Date?, notice: QuotaRefreshNotice)
+    case ready(
+        snapshot: Snapshot,
+        source: QuotaSource,
+        updatedAt: Date?,
+        notice: QuotaRefreshNotice,
+        isRefreshing: Bool
+    )
     case failed(error: CoreQuotaError, retryAt: Date?)
+
+    /// Convenience factory defaulting `isRefreshing` to `false`.
+    public static func ready(
+        snapshot: Snapshot,
+        source: QuotaSource,
+        updatedAt: Date?,
+        notice: QuotaRefreshNotice
+    ) -> QuotaPhase<Snapshot> {
+        .ready(
+            snapshot: snapshot,
+            source: source,
+            updatedAt: updatedAt,
+            notice: notice,
+            isRefreshing: false
+        )
+    }
 
     /// Keep the Plan tab accessible whenever an account surface exists, including `.unauthorized`.
     public var hasAccountSurface: Bool {
@@ -46,8 +68,26 @@ public enum QuotaPhase<Snapshot: Equatable & Sendable>: Equatable, Sendable {
         }
     }
 
+    /// True during initial `.loading` OR while refreshing on top of a `.ready` snapshot.
+    public var isLoading: Bool {
+        switch self {
+        case .loading:
+            return true
+        case .ready(_, _, _, _, let isRefreshing):
+            return isRefreshing
+        case .noAccount, .failed:
+            return false
+        }
+    }
+
+    /// True only while an in-flight refresh is running on top of an already-loaded `.ready` snapshot.
+    public var isRefreshing: Bool {
+        if case .ready(_, _, _, _, let isRefreshing) = self { return isRefreshing }
+        return false
+    }
+
     public var snapshot: Snapshot? {
-        if case .ready(let snapshot, _, _, _) = self { return snapshot }
+        if case .ready(let snapshot, _, _, _, _) = self { return snapshot }
         return nil
     }
 
@@ -55,7 +95,7 @@ public enum QuotaPhase<Snapshot: Equatable & Sendable>: Equatable, Sendable {
         switch self {
         case .failed(let err, _):
             return err
-        case .ready(_, _, _, let notice):
+        case .ready(_, _, _, let notice, _):
             switch notice {
             case .none:
                 return nil
@@ -73,7 +113,7 @@ public enum QuotaPhase<Snapshot: Equatable & Sendable>: Equatable, Sendable {
         switch self {
         case .failed(_, let retryAt):
             return retryAt
-        case .ready(_, _, _, .rateLimited(let retryAt)):
+        case .ready(_, _, _, .rateLimited(let retryAt), _):
             return retryAt
         case .ready, .noAccount, .loading:
             return nil
@@ -81,12 +121,12 @@ public enum QuotaPhase<Snapshot: Equatable & Sendable>: Equatable, Sendable {
     }
 
     public var updatedAt: Date? {
-        if case .ready(_, _, let updatedAt, _) = self { return updatedAt }
+        if case .ready(_, _, let updatedAt, _, _) = self { return updatedAt }
         return nil
     }
 
     public var isOfflineCached: Bool {
-        if case .ready(_, .offlineCache, _, _) = self { return true }
+        if case .ready(_, .offlineCache, _, _, _) = self { return true }
         return false
     }
 }
@@ -183,30 +223,56 @@ public enum QuotaStateReducer {
             switch phase {
             case .noAccount, .failed:
                 return .loading
-            case .loading, .ready:
-                return phase
+            case .loading:
+                return .loading
+            case .ready(let snapshot, let source, let updatedAt, let notice, _):
+                return .ready(
+                    snapshot: snapshot,
+                    source: source,
+                    updatedAt: updatedAt,
+                    notice: notice,
+                    isRefreshing: true
+                )
             }
 
         case .fetched(let snapshot, let source, let at, let notice):
-            return .ready(snapshot: snapshot, source: source, updatedAt: at, notice: notice)
+            return .ready(
+                snapshot: snapshot,
+                source: source,
+                updatedAt: at,
+                notice: notice,
+                isRefreshing: false
+            )
 
         case .fetchFailed(let error, let retryAt, _):
-            if case .ready(let snapshot, let source, let updatedAt, _) = phase {
+            if case .ready(let snapshot, let source, let updatedAt, _, _) = phase {
                 if error == .unauthorized && source == .live {
                     return .failed(error: .unauthorized, retryAt: nil)
                 }
                 let notice: QuotaRefreshNotice = (error == .rateLimited)
                     ? .rateLimited(retryAt: retryAt)
                     : .staleError(error)
-                return .ready(snapshot: snapshot, source: source, updatedAt: updatedAt, notice: notice)
+                return .ready(
+                    snapshot: snapshot,
+                    source: source,
+                    updatedAt: updatedAt,
+                    notice: notice,
+                    isRefreshing: false
+                )
             }
             return .failed(error: error, retryAt: retryAt)
 
         case .cooldownExpired(let now):
             switch phase {
-            case .ready(let snapshot, let source, let updatedAt, .rateLimited(let retryAt)):
+            case .ready(let snapshot, let source, let updatedAt, .rateLimited(let retryAt), let isRefreshing):
                 if let retryAt = retryAt, retryAt <= now {
-                    return .ready(snapshot: snapshot, source: source, updatedAt: updatedAt, notice: .none)
+                    return .ready(
+                        snapshot: snapshot,
+                        source: source,
+                        updatedAt: updatedAt,
+                        notice: .none,
+                        isRefreshing: isRefreshing
+                    )
                 }
                 return phase
             case .failed(.rateLimited, let retryAt):
@@ -221,19 +287,66 @@ public enum QuotaStateReducer {
     }
 
     /// Pure gate for deciding whether entering the Plan tab should trigger a quota refresh.
-    /// Prevents redundant synchronous token probes while already loading or actively cooling down
-    /// from an HTTP 429 rate limit.
+    /// Prevents redundant synchronous token probes while already loading/refreshing or actively
+    /// cooling down from an HTTP 429 rate limit.
     public static func shouldAutoRefreshOnTabEntry<Snapshot: Equatable & Sendable>(
         phase: QuotaPhase<Snapshot>,
         cooldownUntil: Date?,
         now: Date = Date(),
         minFreshInterval: TimeInterval = 30
     ) -> Bool {
-        if case .loading = phase { return false }
+        if phase.isLoading { return false }
         if let until = cooldownUntil, until > now { return false }
         if let retryAt = phase.retryAt, retryAt > now { return false }
         guard let updatedAt = phase.updatedAt else { return true }
         return now.timeIntervalSince(updatedAt) > minFreshInterval
+    }
+}
+
+// MARK: - Quota Fetch Generation Guard
+
+/// Monotonic generation tracker for in-flight quota fetches so an account logout
+/// (`.noAccount` -> `invalidate()`) or a superseding refresh can NEVER resurrect stale
+/// quota snapshots in the Plan tab.
+public struct QuotaFetchGenerationState: Equatable, Sendable {
+    public private(set) var generation: UInt64
+    public private(set) var activeGeneration: UInt64?
+
+    public init(generation: UInt64 = 0, activeGeneration: UInt64? = nil) {
+        self.generation = generation
+        self.activeGeneration = activeGeneration
+    }
+
+    public var hasActiveFetch: Bool { activeGeneration != nil }
+
+    /// Starts a new fetch, returning a monotonic token that supersedes earlier in-flight fetches.
+    @discardableResult
+    public mutating func beginFetch() -> UInt64 {
+        generation &+= 1
+        if generation == 0 { generation = 1 }
+        activeGeneration = generation
+        return generation
+    }
+
+    /// Invalidates any in-flight fetch (e.g. on logout / `.noAccount`).
+    public mutating func invalidate() {
+        generation &+= 1
+        if generation == 0 { generation = 1 }
+        activeGeneration = nil
+    }
+
+    /// True iff `gen` is still the current active, non-invalidated fetch generation.
+    public func isCurrent(_ gen: UInt64) -> Bool {
+        activeGeneration == gen && generation == gen
+    }
+
+    /// Marks `gen` completed if it is still current. Returns `true` if the caller should apply
+    /// the fetch result, or `false` if this fetch was superseded or invalidated.
+    @discardableResult
+    public mutating func complete(_ gen: UInt64) -> Bool {
+        guard isCurrent(gen) else { return false }
+        activeGeneration = nil
+        return true
     }
 }
 

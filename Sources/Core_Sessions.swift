@@ -319,6 +319,30 @@ public struct AGYSwarmMember: Equatable, Sendable {
     }
 }
 
+/// One subagent descriptor decoded from `.system_generated/subagents/<id>.json`.
+public struct SubagentRecord: Equatable, Sendable {
+    public let conversationId: String
+    public let state: String
+    public let typeName: String?
+    public let role: String?
+
+    public var isAlive: Bool {
+        state.uppercased() == "SUBAGENT_STATE_ALIVE"
+    }
+
+    public init(
+        conversationId: String,
+        state: String,
+        typeName: String? = nil,
+        role: String? = nil
+    ) {
+        self.conversationId = conversationId
+        self.state = state
+        self.typeName = typeName
+        self.role = role
+    }
+}
+
 // MARK: - Pure session logic
 
 public enum SessionLogic {
@@ -423,6 +447,21 @@ public enum SessionLogic {
         return stem
     }
 
+    /// Canonical presence lock path extractor shared by native `libproc` FD discovery
+    /// and `parseLsofPresence(_:)`. Extracts `<convId>` from paths ending in
+    /// `/.gemini/antigravity-cli/presence/<convId>.lock` (or any direct
+    /// `/presence/<convId>.lock` file), rejecting non-presence `.lock` files,
+    /// nested subdirectories under `/presence/`, and hidden or malformed names.
+    public static func extractPresenceLockId(fromPath path: String) -> String? {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.contains("/presence/"), trimmed.hasSuffix(".lock") else {
+            return nil
+        }
+        let parentDir = ((trimmed as NSString).deletingLastPathComponent as NSString).lastPathComponent
+        guard parentDir == "presence" else { return nil }
+        return conversationId(fromLockPath: trimmed)
+    }
+
     /// True when a `ps` `comm` string belongs to the Antigravity CLI (`agy`) or app.
     public static func isAGYProcess(comm: String) -> Bool {
         let trimmed = comm.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -493,8 +532,7 @@ public enum SessionLogic {
                 guard let pid = currentPid else { continue }
                 if currentFD == "cwd" {
                     cwdsByPid[pid] = payload
-                } else if payload.contains("/presence/") || payload.hasSuffix(".lock"),
-                          let convId = conversationId(fromLockPath: payload) {
+                } else if let convId = extractPresenceLockId(fromPath: payload) {
                     rawLocks.append((pid: pid, cmd: currentCmd, convId: convId, lockPath: payload))
                 }
             default:
@@ -529,8 +567,7 @@ public enum SessionLogic {
             guard let path = extractTrailingAbsolutePath(fromLsofTableLine: trimmed) else { continue }
             if fd == "cwd" {
                 cwdsByPid[pid] = path
-            } else if path.contains("/presence/") || path.hasSuffix(".lock"),
-                      let convId = conversationId(fromLockPath: path) {
+            } else if let convId = extractPresenceLockId(fromPath: path) {
                 rawLocks.append((pid: pid, cmd: cmd, convId: convId, lockPath: path))
             }
         }
@@ -815,6 +852,312 @@ public enum SessionLogic {
         members.contains { $0.isActivelyWorking }
     }
 
+    /// Parse `.system_generated/subagents/<id>.json` into a `SubagentRecord`.
+    /// Rejects malformed JSON or missing/empty `conversationId`.
+    public static func parseSubagentRecordJSON(_ data: Data) -> SubagentRecord? {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        let rawConvId = (root["conversationId"] as? String) ?? (root["conversation_id"] as? String)
+        guard let convId = rawConvId?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !convId.isEmpty else {
+            return nil
+        }
+        let state = (root["state"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let descriptor = (root["subagentDescriptor"] as? [String: Any])
+            ?? (root["subagent_descriptor"] as? [String: Any])
+        let rawTypeName = (descriptor?["typeName"] as? String) ?? (descriptor?["type_name"] as? String)
+        let rawRole = descriptor?["role"] as? String
+        return SubagentRecord(
+            conversationId: convId,
+            state: state,
+            typeName: TranscriptParse.cleaned(rawTypeName),
+            role: TranscriptParse.cleaned(rawRole)
+        )
+    }
+
+    /// Walk `parentById` up to `maxDepth` hops with cycle protection, returning the
+    /// highest non-empty ancestor conversation ID.
+    public static func resolveRootAncestor(
+        for id: String,
+        parentById: [String: String],
+        maxDepth: Int = 8
+    ) -> String {
+        guard maxDepth > 0 else { return id }
+        var current = id
+        var visited: Set<String> = [id]
+        var hops = 0
+        while hops < maxDepth {
+            guard let rawParent = parentById[current]?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !rawParent.isEmpty,
+                  visited.insert(rawParent).inserted else {
+                break
+            }
+            current = rawParent
+            hops += 1
+        }
+        return current
+    }
+
+    /// Determine whether a subagent / worker conversation is actively generating output.
+    ///
+    /// Guards against crashed/abandoned SQLite `RUNNING` / `not_fully_idle` rows by requiring
+    /// transcript recency whenever a transcript exists, while still supporting live subagents
+    /// whose SQLite `last_modified_time` is a sentinel (`0001-01-01`) or lags behind disk writes.
+    public static func isSubagentActivelyGenerating(
+        rawStatus: String?,
+        notFullyIdle: Bool,
+        killed: Bool,
+        isAliveDescriptor: Bool,
+        transcriptSummary: TranscriptSummary?,
+        transcriptFileMtime: Double?,
+        now: Double,
+        hasLiveRoot: Bool = true,
+        metaUpdatedAt: Double? = nil
+    ) -> Bool {
+        if killed {
+            return false
+        }
+
+        let validEpochFloor = 946_684_800.0 // 2000-01-01T00:00:00Z
+        var bestActivityAge: Double? = nil
+        func considerTimestamp(_ ts: Double?) {
+            guard let ts = ts, ts.isFinite, now.isFinite, ts > validEpochFloor else { return }
+            let age = now - ts
+            if let existing = bestActivityAge {
+                bestActivityAge = min(existing, age)
+            } else {
+                bestActivityAge = age
+            }
+        }
+        considerTimestamp(transcriptFileMtime)
+        considerTimestamp(transcriptSummary?.lastStepAt?.timeIntervalSince1970)
+        considerTimestamp(transcriptSummary?.recentOutputSamples.last?.timestamp)
+
+        let normalizedStatus = rawStatus?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        if notFullyIdle || normalizedStatus == "CASCADE_RUN_STATUS_RUNNING" {
+            if let age = bestActivityAge {
+                return age >= -5.0 && age <= 900.0
+            }
+            if hasLiveRoot {
+                return true
+            }
+            if let updatedAt = metaUpdatedAt, updatedAt.isFinite, now.isFinite, updatedAt > validEpochFloor {
+                let metaAge = now - updatedAt
+                return metaAge >= -5.0 && metaAge <= 900.0
+            }
+            return false
+        }
+
+        if transcriptSummary?.lastStepStatus == .running {
+            if let age = bestActivityAge {
+                return age >= -5.0 && age <= 180.0
+            }
+            return hasLiveRoot
+        }
+
+        if isAliveDescriptor {
+            if let mtime = transcriptFileMtime,
+               mtime.isFinite, now.isFinite, mtime > validEpochFloor,
+               (now - mtime) >= -5.0 && (now - mtime) <= 35.0,
+               transcriptSummary?.lastStepStatus != .error {
+                return true
+            }
+            if let sum = transcriptSummary,
+               !sum.pendingToolNames.isEmpty,
+               let lastAt = sum.lastStepAt,
+               now.isFinite,
+               lastAt.timeIntervalSince1970 > validEpochFloor,
+               (now - lastAt.timeIntervalSince1970) >= -5.0,
+               (now - lastAt.timeIntervalSince1970) <= 180.0 {
+                return true
+            }
+            if let latestSample = transcriptSummary?.recentOutputSamples.last,
+               latestSample.timestamp.isFinite, now.isFinite, latestSample.timestamp > validEpochFloor,
+               (now - latestSample.timestamp) >= -5.0 && (now - latestSample.timestamp) <= 35.0 {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Pure model representing one `conversation_summaries` row from a single Antigravity
+    /// surface database (`antigravity-cli`, `antigravity`, or `antigravity-ide`).
+    public struct SurfaceConversationSummary: Equatable, Sendable {
+        public var id: String
+        public var title: String
+        public var preview: String
+        public var stepCount: Int
+        public var updatedAtMs: Double?
+        public var cwd: String
+        public var rawStatus: String
+        public var notFullyIdle: Bool
+        public var killed: Bool
+        public var isInternal: Bool
+        public var parentConversationId: String
+        public var appDataDir: String
+        /// Raw `source` column (e.g. `"CORTEX_TRAJECTORY_SOURCE_CLI"` when Desktop mirrors a CLI session).
+        public var source: String
+        /// Surface database file this row was read from (`"antigravity-cli"`, `"antigravity"`, `"antigravity-ide"`).
+        public var dbSurface: String
+
+        /// True when a surface DB passively mirrors a conversation that belongs to another surface
+        /// (e.g. Desktop/IDE mirroring CLI via `CORTEX_TRAJECTORY_SOURCE_CLI`, or CLI mirroring a
+        /// Desktop row whose `app_data_dir` is `"antigravity"`). Passive mirrors frequently report
+        /// stale `IDLE` / `not_fully_idle = 0` / `killed = 0` and must never overwrite live owner state.
+        public var isCrossSurfaceMirror: Bool {
+            let dbNorm = dbSurface.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let appNorm = appDataDir.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let srcUpper = source.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+            if dbNorm != "antigravity-cli" && srcUpper.contains("CLI") {
+                return true
+            }
+            if !dbNorm.isEmpty && !appNorm.isEmpty && dbNorm != appNorm {
+                return true
+            }
+            return false
+        }
+
+        public var isActivelyRunning: Bool {
+            notFullyIdle || rawStatus.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() == "CASCADE_RUN_STATUS_RUNNING"
+        }
+
+        public init(
+            id: String,
+            title: String,
+            preview: String,
+            stepCount: Int,
+            updatedAtMs: Double?,
+            cwd: String,
+            rawStatus: String,
+            notFullyIdle: Bool,
+            killed: Bool,
+            isInternal: Bool,
+            parentConversationId: String,
+            appDataDir: String,
+            source: String = "",
+            dbSurface: String = ""
+        ) {
+            self.id = id
+            self.title = title
+            self.preview = preview
+            self.stepCount = stepCount
+            self.updatedAtMs = updatedAtMs
+            self.cwd = cwd
+            self.rawStatus = rawStatus
+            self.notFullyIdle = notFullyIdle
+            self.killed = killed
+            self.isInternal = isInternal
+            self.parentConversationId = parentConversationId
+            self.appDataDir = appDataDir
+            self.source = source
+            self.dbSurface = dbSurface
+        }
+    }
+
+    /// Merge two SQLite `conversation_summaries` rows for the same `conversation_id` across
+    /// surfaces without letting passive Desktop/IDE mirrors (`CORTEX_TRAJECTORY_SOURCE_CLI`)
+    /// clobber live CLI `RUNNING` / `not_fully_idle` / `killed` state.
+    public static func mergeConversationSummaryRows(
+        _ lhs: SurfaceConversationSummary,
+        _ rhs: SurfaceConversationSummary
+    ) -> SurfaceConversationSummary {
+        let lhsMirror = lhs.isCrossSurfaceMirror
+        let rhsMirror = rhs.isCrossSurfaceMirror
+
+        let rhsWinsLifecycle: Bool
+        if lhsMirror != rhsMirror {
+            // Authoritative owner row ALWAYS beats a cross-surface passive mirror for live status/killed/surface.
+            rhsWinsLifecycle = lhsMirror
+        } else if lhs.isActivelyRunning != rhs.isActivelyRunning
+                    && ((lhs.isActivelyRunning && lhs.updatedAtMs == nil)
+                        || (rhs.isActivelyRunning && rhs.updatedAtMs == nil)) {
+            // Freshly spawned RUNNING subagent with sentinel `0001-01-01` (`updatedAtMs == nil`)
+            // must not be wiped to IDLE by an older/sibling surface row before its first DB flush.
+            rhsWinsLifecycle = rhs.isActivelyRunning
+        } else {
+            let lhsUpdated = lhs.updatedAtMs ?? -1
+            let rhsUpdated = rhs.updatedAtMs ?? -1
+            if rhsUpdated != lhsUpdated {
+                rhsWinsLifecycle = rhsUpdated > lhsUpdated
+            } else if lhs.parentConversationId.isEmpty != rhs.parentConversationId.isEmpty {
+                rhsWinsLifecycle = !rhs.parentConversationId.isEmpty
+            } else {
+                rhsWinsLifecycle = rhs.isActivelyRunning && !lhs.isActivelyRunning
+            }
+        }
+
+        var primary = rhsWinsLifecycle ? rhs : lhs
+        let secondary = rhsWinsLifecycle ? lhs : rhs
+
+        // Killing a subagent/worker is permanent — a stale `killed = 0` mirror never resurrects it.
+        if secondary.killed {
+            primary.killed = true
+        }
+        if primary.parentConversationId.isEmpty && !secondary.parentConversationId.isEmpty {
+            primary.parentConversationId = secondary.parentConversationId
+        }
+        if secondary.isInternal || !primary.parentConversationId.isEmpty {
+            primary.isInternal = true
+        }
+        if primary.title.isEmpty && !secondary.title.isEmpty {
+            primary.title = secondary.title
+        }
+        if primary.preview.isEmpty && !secondary.preview.isEmpty {
+            primary.preview = secondary.preview
+        }
+        if primary.cwd.isEmpty && !secondary.cwd.isEmpty {
+            primary.cwd = secondary.cwd
+        }
+        if primary.appDataDir.isEmpty && !secondary.appDataDir.isEmpty {
+            primary.appDataDir = secondary.appDataDir
+        }
+        if let secMs = secondary.updatedAtMs, secMs > (primary.updatedAtMs ?? -1) {
+            primary.updatedAtMs = secMs
+        }
+        primary.stepCount = max(primary.stepCount, secondary.stepCount)
+        return primary
+    }
+
+    /// True when a `RUNNING` / `not_fully_idle` subagent row should be probed for live transcript
+    /// activity: accepts both recent timestamps (`< maxAgeMs`) AND sentinel `0001-01-01`
+    /// (`updatedAtMs == nil`) emitted by newly spawned CLI subagents before their first DB flush.
+    /// Actual liveness is still strictly gated downstream by `isSubagentActivelyGenerating` and
+    /// `isOrphanSubagentFresh` so abandoned rows never stick `liveTPS.isWorking == true`.
+    public static func shouldProbeRunningSubagentMeta(
+        updatedAtMs: Double?,
+        nowMs: Double,
+        maxAgeMs: Double = 15 * 60 * 1000
+    ) -> Bool {
+        guard let ts = updatedAtMs else { return true }
+        guard ts.isFinite, nowMs.isFinite else { return false }
+        return (nowMs - ts) < maxAgeMs
+    }
+
+    /// Strict recency gate for orphaned active subagents whose root conversation is not live
+    /// in `candidates`, preventing crashed/abandoned rows from keeping `liveTPS.isWorking` stuck.
+    public static func isOrphanSubagentFresh(
+        transcriptSummary: TranscriptSummary?,
+        transcriptFileMtime: Double?,
+        now: Double
+    ) -> Bool {
+        guard now.isFinite else { return false }
+        let validEpochFloor = 946_684_800.0
+        if let mtime = transcriptFileMtime,
+           mtime.isFinite, mtime > validEpochFloor,
+           (now - mtime) >= -5.0 && (now - mtime) <= 300.0,
+           transcriptSummary?.lastStepStatus != .error {
+            return true
+        }
+        if let latestSample = transcriptSummary?.recentOutputSamples.last,
+           latestSample.timestamp.isFinite, latestSample.timestamp > validEpochFloor,
+           (now - latestSample.timestamp) >= -5.0 && (now - latestSample.timestamp) <= 90.0 {
+            return true
+        }
+        return false
+    }
+
     // MARK: - Jump targeting (pure helpers)
 
     public static func appBundlePath(fromExecPath path: String) -> String? {
@@ -843,9 +1186,35 @@ public enum SessionLogic {
         return .unknown
     }
 
+    /// Allowlist-validated `/dev/<tty>` resolver matching `^(/dev/)?(tty[a-zA-Z0-9_]+|pts/[0-9]+|console)$`.
     public static func devTTY(_ tty: String?) -> String? {
-        guard let t = tty, !t.isEmpty, t != "??" else { return nil }
-        return t.hasPrefix("/dev/") ? t : "/dev/\(t)"
+        guard let raw = tty, !raw.isEmpty, raw != "??" else { return nil }
+        let suffix: Substring
+        if raw.hasPrefix("/dev/") {
+            suffix = raw.dropFirst("/dev/".count)
+        } else {
+            suffix = Substring(raw)
+        }
+        guard !suffix.isEmpty else { return nil }
+
+        let isValid: Bool
+        if suffix == "console" {
+            isValid = true
+        } else if suffix.hasPrefix("tty") {
+            let rest = suffix.dropFirst(3)
+            isValid = !rest.isEmpty && rest.allSatisfy { ch in
+                ch.isASCII && (ch.isLetter || ch.isNumber || ch == "_")
+            }
+        } else if suffix.hasPrefix("pts/") {
+            let rest = suffix.dropFirst(4)
+            isValid = !rest.isEmpty && rest.allSatisfy { ch in
+                ch.isASCII && ch.isNumber
+            }
+        } else {
+            isValid = false
+        }
+        guard isValid else { return nil }
+        return "/dev/\(suffix)"
     }
 
     public static func normalizeOttyTitle(_ s: String) -> String {
@@ -986,8 +1355,29 @@ public enum SessionLogic {
 
     // MARK: - AppleScript builders
 
+    /// Sanitizes an interpolated AppleScript string literal by escaping `\`,
+    /// removing `"`, and stripping ASCII control characters (`< 0x20` / `0x7F`).
+    private static func sanitizeAppleScriptLiteral(_ raw: String) -> String {
+        var out = ""
+        out.reserveCapacity(raw.count)
+        for scalar in raw.unicodeScalars {
+            if scalar.value < 0x20 || scalar.value == 0x7F {
+                continue
+            }
+            if scalar == "\"" {
+                continue
+            }
+            if scalar == "\\" {
+                out.append("\\\\")
+            } else {
+                out.unicodeScalars.append(scalar)
+            }
+        }
+        return out
+    }
+
     public static func appleTerminalFocusScript(devTTY: String) -> String {
-        let tty = devTTY.replacingOccurrences(of: "\"", with: "")
+        let tty = sanitizeAppleScriptLiteral(devTTY)
         return """
         tell application "Terminal"
             activate
@@ -1006,7 +1396,7 @@ public enum SessionLogic {
     }
 
     public static func itermFocusScript(devTTY: String) -> String {
-        let tty = devTTY.replacingOccurrences(of: "\"", with: "")
+        let tty = sanitizeAppleScriptLiteral(devTTY)
         return """
         tell application "iTerm2"
             activate
