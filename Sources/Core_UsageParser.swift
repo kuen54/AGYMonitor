@@ -105,13 +105,16 @@ public enum UsageParser {
 
     /// Parse `daily_breakdown` from JSON filtered by `yearMonth` ("YYYY-MM").
     public static func parseDailyBreakdown(_ json: [String: Any], yearMonth: String) -> [DailyUsage]? {
-        guard let breakdown = json["daily_breakdown"] as? [String: Any], !breakdown.isEmpty else {
+        guard AppDate.isValidMonthKey(yearMonth),
+              let breakdown = json["daily_breakdown"] as? [String: Any],
+              !breakdown.isEmpty else {
             return nil
         }
+        let prefix = yearMonth + "-"
         var result: [DailyUsage] = []
         for dateStr in breakdown.keys.sorted() {
-            guard !AppDate.isSentinelDayKey(dateStr),
-                  dateStr.hasPrefix(yearMonth),
+            guard AppDate.isValidDayKey(dateStr),
+                  dateStr.hasPrefix(prefix),
                   let dayData = breakdown[dateStr] as? [String: Any],
                   let day = parseDayEntry(dateStr, dayData) else { continue }
             result.append(day)
@@ -120,14 +123,14 @@ public enum UsageParser {
     }
 
     /// Parse the whole `daily_breakdown` with no month filter — used by the
-    /// archive sweep. Sentinel date keys ("0001-01-01") are skipped.
+    /// archive sweep. Invalid/malformed and sentinel date keys are skipped.
     public static func parseAllDailyBreakdown(_ json: [String: Any]) -> [DailyUsage]? {
         guard let breakdown = json["daily_breakdown"] as? [String: Any], !breakdown.isEmpty else {
             return nil
         }
         var result: [DailyUsage] = []
         for dateStr in breakdown.keys.sorted() {
-            guard !AppDate.isSentinelDayKey(dateStr),
+            guard AppDate.isValidDayKey(dateStr),
                   let dayData = breakdown[dateStr] as? [String: Any],
                   let day = parseDayEntry(dateStr, dayData) else { continue }
             result.append(day)
@@ -136,6 +139,10 @@ public enum UsageParser {
     }
 
     private static func parseDayEntry(_ dateStr: String, _ dayData: [String: Any]) -> DailyUsage? {
+        guard AppDate.isValidDayKey(dateStr),
+              let dayNum = Int(dateStr.suffix(2)) else {
+            return nil
+        }
         let dayCost = doubleVal(dayData["total_cost"])
         var models: [ModelUsage] = []
         var totalTokens = 0
@@ -144,7 +151,6 @@ public enum UsageParser {
             models = parsed.models
             totalTokens = parsed.totalTokens
         }
-        let dayNum = Int(dateStr.suffix(2)) ?? 1
         return DailyUsage(
             dateString: dateStr,
             day: dayNum,
@@ -211,7 +217,7 @@ public enum UsageParser {
               let daysRaw = section["days"] as? [String: Any] else { return nil }
         var days: [String: DayTimeUsage] = [:]
         for (dayKey, value) in daysRaw {
-            guard !AppDate.isSentinelDayKey(dayKey),
+            guard AppDate.isValidDayKey(dayKey),
                   let dayDict = value as? [String: Any],
                   let entriesRaw = dayDict["intervals"] as? [Any],
                   let total = intVal(dayDict["total_seconds"]) else { continue }
@@ -243,7 +249,7 @@ public enum UsageParser {
               let daysRaw = json["days"] as? [String: Any] else { return nil }
         var days: [String: Int] = [:]
         for (dayKey, value) in daysRaw {
-            guard !AppDate.isSentinelDayKey(dayKey),
+            guard AppDate.isValidDayKey(dayKey),
                   let seconds = intVal(value) else { continue }
             days[dayKey] = seconds
         }

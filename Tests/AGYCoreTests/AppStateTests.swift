@@ -12,19 +12,21 @@ struct AppStateTests {
         // Open popover in menu bar mode
         let openEff = AppPresentationMachine.reduce(&state, event: .popoverShown)
         #expect(state.isPanelVisible)
-        #expect(openEff == [.setPopoverAnimates(false), .syncPanelVisibility(true)])
+        #expect(openEff == [.syncPanelVisibility(true)])
 
-        // Switch to notch mode while popover is open -> closes popover, starts notch, hides status item
+        // Switch to notch mode while popover is open -> closes popover BEFORE hiding status item (no duplicate close)
         let toNotch = AppPresentationMachine.reduce(&state, event: .displaySurfaceChanged(.notch))
         #expect(state.surface == .notch)
         #expect(state.isNotchControllerRunning)
         #expect(!state.isStatusItemVisible)
         #expect(!state.isMenuBarLogoActive)
-        #expect(toNotch.contains(.setStatusItemVisible(false)))
-        #expect(toNotch.contains(.setMenuBarLogoActive(false)))
-        #expect(toNotch.contains(.closePopover))
-        #expect(toNotch.contains(.startNotchController))
-        #expect(toNotch.contains(.syncPanelVisibility(false)))
+        #expect(toNotch == [
+            .closePopover,
+            .setMenuBarLogoActive(false),
+            .setStatusItemVisible(false),
+            .startNotchController,
+            .syncPanelVisibility(false),
+        ])
 
         // User opens notch
         let notchOpen = AppPresentationMachine.reduce(&state, event: .notchOpenChanged(true))
@@ -75,10 +77,16 @@ struct AppStateTests {
 
         // Reopen in menubar syncs BOTH status item visibility AND menu bar logo activity
         let reopen = AppPresentationMachine.reduce(&state, event: .reopenRequested)
-        #expect(reopen == [.setStatusItemVisible(true), .setMenuBarLogoActive(true), .setPopoverAnimates(true), .openPopover])
+        #expect(reopen == [.setStatusItemVisible(true), .setMenuBarLogoActive(true), .openPopover])
+
+        // Status item left-click and global hotkey toggle cleanly without legacy popover animation hacks
+        #expect(AppPresentationMachine.reduce(&state, event: .statusItemLeftClicked) == [.openPopover])
+        #expect(AppPresentationMachine.reduce(&state, event: .globalHotkeyTriggered) == [.openPopover])
 
         // Right-click while popover is open closes popover before showing menu
         AppPresentationMachine.reduce(&state, event: .popoverShown)
+        #expect(AppPresentationMachine.reduce(&state, event: .statusItemLeftClicked) == [.closePopover])
+        #expect(AppPresentationMachine.reduce(&state, event: .globalHotkeyTriggered) == [.closePopover])
         let rightClick = AppPresentationMachine.reduce(&state, event: .statusItemRightClicked)
         #expect(rightClick == [.closePopover, .showStatusContextMenu])
 
@@ -92,6 +100,18 @@ struct AppStateTests {
         #expect(term == [.unregisterHotkey, .stopNotchController])
         #expect(!state.isHotkeyRegistered)
         #expect(!state.isNotchControllerRunning)
+    }
+
+    @Test("Switching to notch while menu-bar panel is already closed does not emit redundant closePopover")
+    func switchToNotchWhenClosedHasNoClosePopover() {
+        var state = AppPresentationState(surface: .menubar, popoverOpen: false)
+        let effects = AppPresentationMachine.reduce(&state, event: .displaySurfaceChanged(.notch))
+        #expect(effects == [
+            .setMenuBarLogoActive(false),
+            .setStatusItemVisible(false),
+            .startNotchController,
+        ])
+        #expect(!effects.contains(.closePopover))
     }
 
     @Test("hotkeyRegistrationFailed keeps isHotkeyRegistered truthful so future toggles retry cleanly")

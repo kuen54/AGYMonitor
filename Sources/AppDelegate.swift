@@ -9,10 +9,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var menuBarPanel: MenuBarPanel!
     private var menuBarHostingView: FirstMouseHostingView<MenuBarPanelRootView>!
-    private var menuBarPanelAnimates = true
-    private var lastMeasuredPanelHeight: Double = 560.0
-    private var panelAnimationToken = 0
-    private var activeMenuTrackingCount = 0
     private var store = UsageStore()
     private var refreshTimer: Timer?
     private var cancellable: AnyCancellable?
@@ -37,21 +33,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private let hotKeyManager = GlobalHotKeyManager()
     private var hotkeyCancellable: AnyCancellable?
     private var acousticCancellable: AnyCancellable?
-    private var wallpaperRefreshCancellable: AnyCancellable?
 
-    // Menu-bar floating panel anchor validation, placement, dismiss monitors, and host display
-    // height metrics (backed by `MenuBarAnchorResolver` & `PopoverAnchorSessionState`).
+    // Menu-bar floating panel lifecycle, anchor validation, placement, dismiss monitors,
+    // and host display height metrics (backed by `MenuBarPanelMachine` & `MenuBarAnchorResolver`).
     private let popoverHostMetrics = PopoverHostMetrics()
-    private var popoverAnchorSession = PopoverAnchorSessionState()
+    private var panelState = MenuBarPanelState()
+    private var idleCacheTrimWork: DispatchWorkItem?
     private var globalMouseMonitor: Any?
     private var panelDismissObservers: [NSObjectProtocol] = []
     private var menuTrackingObservers: [NSObjectProtocol] = []
     private var screenParametersObserver: NSObjectProtocol?
     private var calendarDayObserver: NSObjectProtocol?
 
-    private struct AcousticSessionKey: Equatable {
-        let waitingIds: Set<String>
-        let doneUnseenIds: Set<String>
+    private struct PanelOpenContext {
+        let hostDisplay: MenuBarDisplayDescriptor
+        let anchorRect: ScreenRect
+        let shouldHighlightButton: Bool
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -112,23 +109,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menuBarHostingView = hostingView
 
         let panel = MenuBarPanel(
-            contentRect: NSRect(x: 0, y: 0, width: AGYTheme.panelWidth, height: CGFloat(lastMeasuredPanelHeight))
+            contentRect: NSRect(x: 0, y: 0, width: AGYTheme.panelWidth, height: CGFloat(panelState.measuredHeight))
         )
         panel.contentView = hostingView
         panel.onCancelOperation = { [weak self] in
-            self?.closeMenuBarPanel(animated: true)
+            self?.dispatchPanel(.escapePressed)
         }
         menuBarPanel = panel
 
-        // Track active NSMenu dropdowns (OptionsMenu / LanguageSwitcher) so opening a
-        // footer menu inside the floating panel never triggers outside-click or resign-key close.
+        // Track active NSMenu dropdowns (OptionsMenu / LanguageSwitcher) scoped strictly to
+        // when `menuBarPanel` is visible/opening so unrelated windows (e.g. Specimen window)
+        // never interfere with panel dismiss guards.
         let center = NotificationCenter.default
         let beginMenuObs = center.addObserver(
             forName: NSMenu.didBeginTrackingNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.activeMenuTrackingCount += 1
+            guard let self = self,
+                  self.panelState.isVisibleOrOpening,
+                  NSApp.keyWindow == nil || NSApp.keyWindow === self.menuBarPanel else { return }
+            self.dispatchPanel(.menuTrackingBegan)
         }
         let endMenuObs = center.addObserver(
             forName: NSMenu.didEndTrackingNotification,
@@ -136,8 +137,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             queue: .main
         ) { [weak self] _ in
             DispatchQueue.main.async { [weak self] in
-                guard let self = self else { return }
-                self.activeMenuTrackingCount = max(0, self.activeMenuTrackingCount - 1)
+                guard let self = self, self.panelState.isMenuTrackingActive else { return }
+                self.dispatchPanel(.menuTrackingEnded)
+                if self.panelState.isVisibleOrOpening,
+                   !self.panelState.isMenuTrackingActive,
+                   NSApp.modalWindow == nil,
+                   !(self.menuBarPanel?.isKeyWindow ?? false) {
+                    if !NSApp.isActive || NSApp.keyWindow != nil {
+                        self.dispatchPanel(.appDeactivated)
+                    } else {
+                        self.menuBarPanel?.makeKey()
+                    }
+                }
             }
         }
         menuTrackingObservers = [beginMenuObs, endMenuObs]
@@ -150,13 +161,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self?.reconcileMenuBarPanelForScreenChange()
         }
 
-        // Midnight calendar day change: refresh Daily Blueprint Wallpaper without polling timers.
+        // Midnight calendar day change: invalidate prior-day year cache and refresh usage
+        // (post-refresh completion triggers `checkDailyWallpaperIfNeeded()` with fresh data).
         calendarDayObserver = center.addObserver(
             forName: .NSCalendarDayChanged,
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.store.checkDailyWallpaperIfNeeded()
+            self?.store.handleCalendarDayChanged()
         }
 
         // Observe current month data + tab changes + live working TPS to update menu bar title.
@@ -164,7 +176,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // CombineLatest4 is Combine's max arity — extra signals are chained below.
         let liveTPSSignal = store.sessionStore.$liveTPS
             .map { tps -> String? in
-                guard tps.isWorking, tps.currentTPS >= 1.0 else { return nil }
+                guard tps.shouldShowInMenuBar else { return nil }
                 return LiveTPSTracker.formatCompactTPS(tps.currentTPS)
             }
             .removeDuplicates()
@@ -189,42 +201,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
 
-        // Acoustic cockpit chimes: edge-triggered on newly waiting or newly completed sessions.
-        acousticCancellable = Publishers.CombineLatest(
-            store.sessionStore.$sessions,
-            store.sessionStore.$doneUnseen
-        )
-        .map { sessions, doneUnseen in
-            AcousticSessionKey(
-                waitingIds: Set(sessions.filter { $0.status == .waiting }.map(\.sessionId)),
-                doneUnseenIds: doneUnseen
-            )
-        }
-        .removeDuplicates()
-        .receive(on: RunLoop.main)
-        .sink { [weak self] key in
-            guard let self = self else { return }
-            let enabled = self.store.craftPreferences.acousticChimesEnabled
-            MainActor.assumeIsolated {
-                CraftEngine.shared.handleSessionTransition(
-                    waitingIds: key.waitingIds,
-                    doneUnseenIds: key.doneUnseenIds,
-                    enabled: enabled
-                )
+        // Acoustic cockpit chimes: edge-triggered on atomic post-scan session snapshots.
+        // `nil` before initial scan completes (or after monitoring stops) resets baseline cleanly.
+        acousticCancellable = store.sessionStore.$acousticSnapshot
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] snapshot in
+                guard let self = self else { return }
+                let enabled = self.store.craftPreferences.acousticChimesEnabled
+                MainActor.assumeIsolated {
+                    guard let snapshot = snapshot else {
+                        CraftEngine.shared.resetAcousticBaseline()
+                        return
+                    }
+                    CraftEngine.shared.handleSessionTransition(
+                        waitingIds: snapshot.waitingIds,
+                        doneUnseenIds: snapshot.doneUnseenIds,
+                        hasCompletedInitialScan: true,
+                        enabled: enabled
+                    )
+                }
             }
-        }
-
-        // Daily Blueprint Wallpaper: trigger once initial usage or year data lands (gated by
-        // `DailyWallpaperGate.shouldRefresh` so repeat ticks on the same day are O(1) no-ops).
-        wallpaperRefreshCancellable = Publishers.CombineLatest(
-            store.$lastUpdate,
-            store.$yearTimeDays.map { $0 != nil }.removeDuplicates()
-        )
-        .receive(on: RunLoop.main)
-        .sink { [weak self] lastUpdate, hasYearData in
-            guard let self = self, lastUpdate != nil || hasYearData else { return }
-            self.store.checkDailyWallpaperIfNeeded()
-        }
 
         // Load cached data instantly, then refresh in background
         store.loadCacheForCurrentMonth()
@@ -307,22 +304,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 if visible {
                     menuBarModel.text = menuBarAnchor.displayedText
                     statusItem.length = CGFloat(menuBarAnchor.appliedWidth)
-                } else {
-                    closeMenuBarPanel(animated: false)
                 }
                 statusItem.isVisible = visible
             case .setMenuBarLogoActive(let active):
                 if menuBarModel.isVisible != active {
                     menuBarModel.isVisible = active
                 }
-            case .setPopoverAnimates(let animates):
-                menuBarPanelAnimates = animates
             case .openPopover:
-                if !presentation.popoverOpen || !menuBarPanel.isVisible {
-                    openMenuBarPanel(animated: menuBarPanelAnimates)
+                if !panelState.isVisibleOrOpening || !menuBarPanel.isVisible {
+                    openMenuBarPanel(animated: true)
                 }
             case .closePopover:
-                closeMenuBarPanel(animated: presentation.surface == .menubar && menuBarPanelAnimates)
+                closeMenuBarPanel(animated: presentation.surface == .menubar)
             case .showStatusContextMenu:
                 showStatusContextMenu()
             case .revealNotch:
@@ -355,7 +348,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// item to it. Frozen while the panel is open; closing restores appliedWidth.
     private func updateMenuBarWidth(_ w: CGFloat) {
         menuBarAnchor.updateMeasuredWidth(Double(w))
-        guard presentation.isStatusItemVisible, !menuBarAnchor.isPopoverShown, !presentation.popoverOpen else { return }
+        guard presentation.isStatusItemVisible,
+              !menuBarAnchor.isPopoverShown,
+              !presentation.popoverOpen,
+              !panelState.isVisibleOrOpening else { return }
         statusItem.length = CGFloat(menuBarAnchor.appliedWidth)
     }
 
@@ -431,6 +427,137 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
+    private func cancelIdleCacheTrim() {
+        idleCacheTrimWork?.cancel()
+        idleCacheTrimWork = nil
+    }
+
+    private func scheduleIdleCacheTrim() {
+        cancelIdleCacheTrim()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self,
+                  self.panelState.phase == .closed,
+                  !self.presentation.isPanelVisible else { return }
+            self.idleCacheTrimWork = nil
+            MainActor.assumeIsolated {
+                TelemetryArtworkCache.shared.trim(to: 6)
+            }
+        }
+        idleCacheTrimWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15.0, execute: work)
+    }
+
+    private func dispatchPanel(
+        _ event: MenuBarPanelEvent,
+        openContext: PanelOpenContext? = nil
+    ) {
+        let prevPhase = panelState.phase
+        let effects = MenuBarPanelMachine.reduce(&panelState, event: event)
+        if panelState.isVisibleOrOpening {
+            cancelIdleCacheTrim()
+        } else if prevPhase != .closed && panelState.phase == .closed {
+            if case .terminate = event {
+                cancelIdleCacheTrim()
+            } else {
+                scheduleIdleCacheTrim()
+            }
+        }
+        for effect in effects {
+            switch effect {
+            case .presentPanel(let animated, let token):
+                if let ctx = openContext {
+                    let targetFrame = MenuBarAnchorResolver.panelFrame(
+                        anchorRect: ctx.anchorRect,
+                        hostDisplay: ctx.hostDisplay,
+                        panelWidth: Double(AGYTheme.panelWidth),
+                        panelHeight: panelState.measuredHeight
+                    )
+                    menuBarPanel.setFrame(targetFrame.nsRect, display: true)
+                    menuBarPanel.invalidateShadow()
+                    statusItem.button?.highlight(ctx.shouldHighlightButton)
+                }
+
+                let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+                if animated && !reduceMotion {
+                    menuBarPanel.alphaValue = 0.0
+                    menuBarPanel.makeKeyAndOrderFront(nil)
+                    NSAnimationContext.runAnimationGroup({ ctx in
+                        ctx.duration = 0.12
+                        ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                        self.menuBarPanel.animator().alphaValue = 1.0
+                    }, completionHandler: { [weak self] in
+                        DispatchQueue.main.async { [weak self] in
+                            self?.dispatchPanel(.openAnimationFinished(token: token))
+                        }
+                    })
+                } else {
+                    menuBarPanel.alphaValue = 1.0
+                    menuBarPanel.makeKeyAndOrderFront(nil)
+                    if case .opening = panelState.phase {
+                        dispatchPanel(.openAnimationFinished(token: token))
+                    }
+                }
+
+            case .dismissPanel(let animated, let token):
+                statusItem.button?.highlight(false)
+                let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+                if animated && menuBarPanel.isVisible && !reduceMotion {
+                    NSAnimationContext.runAnimationGroup({ ctx in
+                        ctx.duration = 0.10
+                        ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
+                        self.menuBarPanel.animator().alphaValue = 0.0
+                    }, completionHandler: { [weak self] in
+                        DispatchQueue.main.async { [weak self] in
+                            self?.dispatchPanel(.closeAnimationFinished(token: token))
+                        }
+                    })
+                } else {
+                    menuBarPanel.orderOut(nil)
+                    menuBarPanel.alphaValue = 1.0
+                    if case .closing = panelState.phase {
+                        dispatchPanel(.closeAnimationFinished(token: token))
+                    }
+                }
+
+            case .orderOutPanel:
+                menuBarPanel.orderOut(nil)
+                menuBarPanel.alphaValue = 1.0
+
+            case .attachDismissMonitors:
+                let openToken = panelState.animationTokenCounter
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self,
+                          self.panelState.animationTokenCounter == openToken,
+                          self.panelState.isVisibleOrOpening else { return }
+                    self.attachPanelDismissMonitors()
+                }
+
+            case .detachDismissMonitors:
+                detachPanelDismissMonitors()
+
+            case .updatePanelHeight(let height):
+                applyPanelHeightSync(height)
+
+            case .syncAppPresentationShown:
+                // `AppPresentationMachine` emits `.syncPanelVisibility(true)`, which handles
+                // brain watch-path reconciliation once and activates the session monitor.
+                dispatchPresentation(.popoverShown)
+                store.refresh()
+
+            case .syncAppPresentationClosed:
+                statusItem.button?.highlight(false)
+                menuBarAnchor.popoverClosed()
+                menuBarModel.text = menuBarAnchor.displayedText
+                if presentation.isStatusItemVisible {
+                    statusItem.length = CGFloat(menuBarAnchor.appliedWidth)
+                }
+                if presentation.popoverOpen {
+                    dispatchPresentation(.popoverClosed)
+                }
+            }
+        }
+    }
+
     private func openMenuBarPanel(animated: Bool) {
         let (descriptors, byId, mouseDisplayId) = currentDisplayDescriptors()
         let decision = MenuBarAnchorResolver.resolve(
@@ -439,27 +566,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             mouseDisplayId: mouseDisplayId,
             panelWidth: Double(AGYTheme.panelWidth)
         )
-
-        let hostDisplayId: UInt32
-        let anchorRect: ScreenRect
-        let shouldHighlightButton: Bool
-
-        switch decision {
-        case .statusItem(let displayId, let buttonRect):
-            hostDisplayId = displayId
-            anchorRect = buttonRect
-            shouldHighlightButton = true
-        case .fallbackMenuBar(let displayId, let rect, _):
-            hostDisplayId = displayId
-            anchorRect = rect
-            shouldHighlightButton = false
-        case .unavailable:
-            popoverAnchorSession.popoverClosed()
-            return
-        }
-
-        guard let hostDisplay = descriptors.first(where: { $0.displayId == hostDisplayId }) else {
-            popoverAnchorSession.popoverClosed()
+        let anchorMode = PopoverAnchorSessionMode(decision: decision)
+        guard anchorMode != .none,
+              let hostDisplayId = anchorMode.displayId,
+              let anchorRect = anchorMode.anchorRect,
+              let hostDisplay = descriptors.first(where: { $0.displayId == hostDisplayId }) else {
             return
         }
 
@@ -468,136 +579,86 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Freeze status-item text/width BEFORE showing so synchronous refreshes never shift the anchor.
         menuBarAnchor.popoverOpened()
-        popoverAnchorSession.beginSession(decision: decision)
 
         // Measure intrinsic SwiftUI height so the initial frame matches content on frame 0.
         menuBarHostingView.layoutSubtreeIfNeeded()
         let fittingH = ceil(Double(menuBarHostingView.fittingSize.height))
-        let initialHeight = fittingH > 1.0 ? max(180.0, fittingH) : lastMeasuredPanelHeight
-        lastMeasuredPanelHeight = initialHeight
+        let effectiveAnimated = animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
 
-        let targetFrame = MenuBarAnchorResolver.panelFrame(
-            anchorRect: anchorRect,
-            hostDisplay: hostDisplay,
-            panelWidth: Double(AGYTheme.panelWidth),
-            panelHeight: initialHeight
+        dispatchPanel(
+            .openRequested(
+                anchorMode: anchorMode,
+                height: fittingH,
+                animated: effectiveAnimated
+            ),
+            openContext: PanelOpenContext(
+                hostDisplay: hostDisplay,
+                anchorRect: anchorRect,
+                shouldHighlightButton: !anchorMode.isFallback
+            )
         )
-
-        panelAnimationToken += 1
-        detachPanelDismissMonitors()
-
-        menuBarPanel.setFrame(targetFrame.nsRect, display: true)
-        menuBarPanel.invalidateShadow()
-        statusItem.button?.highlight(shouldHighlightButton)
-
-        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        if animated && !reduceMotion {
-            menuBarPanel.alphaValue = 0.0
-            menuBarPanel.makeKeyAndOrderFront(nil)
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.12
-                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                self.menuBarPanel.animator().alphaValue = 1.0
-            }
-        } else {
-            menuBarPanel.alphaValue = 1.0
-            menuBarPanel.makeKeyAndOrderFront(nil)
-        }
-
-        dispatchPresentation(.popoverShown)
-        let openToken = panelAnimationToken
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self,
-                  self.panelAnimationToken == openToken,
-                  self.presentation.popoverOpen else { return }
-            self.attachPanelDismissMonitors()
-        }
-
-        dispatchBrainWatcher(.reconcileWatchPaths(candidatePaths: candidateBrainWatchPaths(), now: Date()))
-        store.refresh()
     }
 
     private func closeMenuBarPanel(animated: Bool) {
-        let wasOpen = presentation.popoverOpen || menuBarPanel.isVisible
-        detachPanelDismissMonitors()
-        statusItem.button?.highlight(false)
-
-        panelAnimationToken += 1
-        let closeToken = panelAnimationToken
-
-        popoverAnchorSession.popoverClosed()
-        menuBarAnchor.popoverClosed()
-        menuBarModel.text = menuBarAnchor.displayedText
-        if presentation.isStatusItemVisible {
-            statusItem.length = CGFloat(menuBarAnchor.appliedWidth)
-        }
-
-        if presentation.popoverOpen {
-            dispatchPresentation(.popoverClosed)
-        }
-
-        guard wasOpen, menuBarPanel.isVisible else {
-            menuBarPanel.orderOut(nil)
-            menuBarPanel.alphaValue = 1.0
+        let effectiveAnimated = animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        if panelState.phase == .closed {
+            statusItem.button?.highlight(false)
+            if menuBarPanel.isVisible {
+                menuBarPanel.orderOut(nil)
+                menuBarPanel.alphaValue = 1.0
+            }
+            if presentation.popoverOpen {
+                dispatchPresentation(.popoverClosed)
+            }
             return
         }
-
-        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        if animated && !reduceMotion {
-            NSAnimationContext.runAnimationGroup({ ctx in
-                ctx.duration = 0.10
-                ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
-                self.menuBarPanel.animator().alphaValue = 0.0
-            }, completionHandler: { [weak self] in
-                guard let self = self, self.panelAnimationToken == closeToken else { return }
-                self.menuBarPanel.orderOut(nil)
-                self.menuBarPanel.alphaValue = 1.0
-            })
-        } else {
-            menuBarPanel.orderOut(nil)
-            menuBarPanel.alphaValue = 1.0
-        }
+        dispatchPanel(.closeRequested(animated: effectiveAnimated, suppressStatusItemClickUntil: nil))
     }
 
-    private func updateMenuBarPanelHeight(_ rawHeight: CGFloat) {
-        let h = max(180.0, ceil(Double(rawHeight)))
-        let heightChanged = abs(h - lastMeasuredPanelHeight) > 0.5
-        let frameNeedsSync = presentation.popoverOpen
-            && menuBarPanel.isVisible
-            && abs(Double(menuBarPanel.frame.height) - h) > 0.5
-        guard heightChanged || frameNeedsSync else { return }
-        lastMeasuredPanelHeight = h
-
-        guard presentation.popoverOpen, menuBarPanel.isVisible else { return }
+    private func applyPanelHeightSync(_ height: Double) {
+        guard panelState.isVisibleOrOpening, menuBarPanel.isVisible else { return }
         let (descriptors, _, _) = currentDisplayDescriptors()
-        let hostDisplay = popoverAnchorSession.mode.displayId.flatMap { id in
+        let hostDisplay = panelState.anchorMode.displayId.flatMap { id in
             descriptors.first(where: { $0.displayId == id })
         }
         let resized = MenuBarAnchorResolver.resizedPanelFrame(
             currentFrame: ScreenRect(nsRect: menuBarPanel.frame),
-            newHeight: h,
+            newHeight: height,
             hostDisplay: hostDisplay
         )
         menuBarPanel.setFrame(resized.nsRect, display: true, animate: false)
         menuBarPanel.invalidateShadow()
     }
 
+    private func updateMenuBarPanelHeight(_ rawHeight: CGFloat) {
+        let prevHeight = panelState.measuredHeight
+        dispatchPanel(.heightMeasured(Double(rawHeight)))
+        // Ensure frame stays synced if measuredHeight didn't change (e.g. re-opened on a
+        // taller display after prior clamping) while window frame differs from measuredHeight.
+        if abs(prevHeight - panelState.measuredHeight) <= 0.5,
+           panelState.isVisibleOrOpening,
+           menuBarPanel.isVisible,
+           abs(Double(menuBarPanel.frame.height) - panelState.measuredHeight) > 0.5 {
+            applyPanelHeightSync(panelState.measuredHeight)
+        }
+    }
+
     private func reconcileMenuBarPanelForScreenChange() {
-        guard presentation.popoverOpen, menuBarPanel.isVisible else { return }
+        guard panelState.isVisibleOrOpening, menuBarPanel.isVisible else { return }
         let (descriptors, byId, _) = currentDisplayDescriptors()
-        guard let hostId = popoverAnchorSession.mode.displayId,
+        guard let hostId = panelState.anchorMode.displayId,
               let host = descriptors.first(where: { $0.displayId == hostId }) else {
             closeMenuBarPanel(animated: false)
             return
         }
         popoverHostMetrics.screenVisibleHeight = byId[hostId]?.visibleFrame.height
             ?? CGFloat(host.visibleFrame.height)
-        if let anchor = popoverAnchorSession.mode.anchorRect {
+        if let anchor = panelState.anchorMode.anchorRect {
             let clamped = MenuBarAnchorResolver.panelFrame(
                 anchorRect: anchor,
                 hostDisplay: host,
                 panelWidth: Double(AGYTheme.panelWidth),
-                panelHeight: lastMeasuredPanelHeight
+                panelHeight: panelState.measuredHeight
             )
             menuBarPanel.setFrame(clamped.nsRect, display: true, animate: false)
             menuBarPanel.invalidateShadow()
@@ -611,11 +672,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(
             matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
         ) { [weak self] _ in
-            guard let self = self else { return }
-            guard self.presentation.popoverOpen,
-                  self.activeMenuTrackingCount == 0,
+            guard let self = self,
+                  self.panelState.isVisibleOrOpening,
                   NSApp.modalWindow == nil else { return }
-            self.closeMenuBarPanel(animated: true)
+            self.dispatchPanel(.outsideClick)
         }
 
         let center = NotificationCenter.default
@@ -625,8 +685,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             queue: .main
         ) { [weak self] _ in
             guard let self = self,
-                  self.presentation.popoverOpen,
-                  self.activeMenuTrackingCount == 0,
+                  self.panelState.isVisibleOrOpening,
+                  !self.panelState.isMenuTrackingActive,
                   NSApp.modalWindow == nil else { return }
             // If resign-key was caused by clicking our own statusItem button, suppress the
             // matching `leftMouseUp` toggle so clicking the icon closes cleanly without bouncing.
@@ -634,10 +694,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                let buttonRect = self.statusItemAnchorSnapshot().buttonScreenRect {
                 let mouse = NSEvent.mouseLocation
                 if buttonRect.contains(x: Double(mouse.x), y: Double(mouse.y)) {
-                    self.popoverAnchorSession.noteTransientCloseFromStatusItemClick(at: Date())
+                    let suppressUntil = Date().addingTimeInterval(0.35)
+                    let effectiveAnimated = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+                    self.dispatchPanel(.closeRequested(
+                        animated: effectiveAnimated,
+                        suppressStatusItemClickUntil: suppressUntil
+                    ))
+                    return
                 }
             }
-            self.closeMenuBarPanel(animated: true)
+            self.dispatchPanel(.appDeactivated)
         }
 
         let spaceObs = NSWorkspace.shared.notificationCenter.addObserver(
@@ -645,7 +711,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            guard let self = self, self.presentation.popoverOpen else { return }
+            guard let self = self, self.panelState.isVisibleOrOpening else { return }
             self.closeMenuBarPanel(animated: false)
         }
 
@@ -805,12 +871,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        cancelIdleCacheTrim()
         cancellable?.cancel(); cancellable = nil
         displayModeCancellable?.cancel(); displayModeCancellable = nil
         hotkeyCancellable?.cancel(); hotkeyCancellable = nil
         acousticCancellable?.cancel(); acousticCancellable = nil
-        wallpaperRefreshCancellable?.cancel(); wallpaperRefreshCancellable = nil
-        closeMenuBarPanel(animated: false)
+        dispatchPanel(.terminate)
         for obs in menuTrackingObservers {
             NotificationCenter.default.removeObserver(obs)
         }
@@ -829,19 +895,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         dispatchBrainWatcher(.terminate)
         store.stopUpdateChecking()
         store.stopSessionMonitoring()
+        MainActor.assumeIsolated {
+            CraftEngine.shared.shutdown()
+        }
     }
 
     @objc private func onWake(_ note: Notification) {
         dispatchBrainWatcher(.wakeReceived)
         store.handleSystemWakeForUpdates()
-        store.checkDailyWallpaperIfNeeded()
     }
 
     @objc private func handleStatusItemClick() {
         let event = NSApp.currentEvent
         let isRightClick = event?.type == .rightMouseUp
             || (event?.type == .leftMouseUp && event?.modifierFlags.contains(.control) == true)
-        if !isRightClick, popoverAnchorSession.consumeSuppressedStatusItemClick(at: Date()) {
+        if !isRightClick, panelState.consumeSuppressedStatusItemClick(at: Date()) {
             return
         }
         dispatchPresentation(isRightClick ? .statusItemRightClicked : .statusItemLeftClicked)
@@ -954,7 +1022,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(updateItem)
         }
 
-        let isCheckingUpdates = store.updateService.state.isChecking
+        let isCheckingUpdates = store.updateService.state.isManualChecking
         let checkTitle = isCheckingUpdates
             ? loc("updateMenuChecking")
             : loc("updateMenuCheck")
@@ -1184,6 +1252,7 @@ struct MenuBarContentView: View {
     var onWidth: (CGFloat) -> Void
 
     @Environment(\.colorScheme) private var colorScheme
+    @State private var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
 
     private var brandColor: Color {
         colorScheme == .dark
@@ -1201,6 +1270,14 @@ struct MenuBarContentView: View {
                 .monospacedDigit()
                 .foregroundColor(sessionStore.anyWaiting ? .agyStatusWaiting : .primary)
                 .fixedSize()
+        }
+        .environment(\.telemetryReduceMotion, reduceMotion)
+        .onReceive(
+            NSWorkspace.shared.notificationCenter.publisher(
+                for: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification
+            )
+        ) { _ in
+            reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         }
         .padding(.horizontal, 6)
         .fixedSize()

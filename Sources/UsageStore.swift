@@ -63,7 +63,27 @@ class UsageStore: ObservableObject {
     @Published var viewingTimeYear: Int
     @Published var selectedWeekMonday: Date?
     @Published var yearTimeDays: [String: Int]?
+    private static let maxYearTimeCacheEntries = 6
     private var yearTimeCache: [Int: [String: Int]] = [:]
+
+    private func storeYearTimeCache(_ days: [String: Int], for year: Int) {
+        yearTimeCache[year] = days
+        guard yearTimeCache.count > Self.maxYearTimeCacheEntries else { return }
+        let currentYear = AppDate.gregorian.component(.year, from: Date())
+        let protected: Set<Int> = [currentYear, viewingTimeYear, year]
+        let evictable = yearTimeCache.keys.filter { !protected.contains($0) }.sorted()
+        var overflow = yearTimeCache.count - Self.maxYearTimeCacheEntries
+        for key in evictable where overflow > 0 {
+            yearTimeCache.removeValue(forKey: key)
+            overflow -= 1
+        }
+        if overflow > 0 {
+            for key in yearTimeCache.keys.sorted() where key != year && overflow > 0 {
+                yearTimeCache.removeValue(forKey: key)
+                overflow -= 1
+            }
+        }
+    }
 
     // Localization
     @Published var language: AppLanguage
@@ -133,8 +153,7 @@ class UsageStore: ObservableObject {
     }
 
     var effectiveCurrentMonthPhase: LoadPhase<CurrentMonthBundle> {
-        if (currentMonthLoadPhase == .idle || currentMonthLoadPhase == .loading(cached: nil)),
-           !isLoading,
+        if case .idle = currentMonthLoadPhase,
            let t = today, let w = week, let m = month {
             return .loaded(CurrentMonthBundle(
                 today: t, week: w, month: m, dailyBreakdown: dailyBreakdown, time: currentTimeData
@@ -144,8 +163,7 @@ class UsageStore: ObservableObject {
     }
 
     var effectiveHistoricalMonthPhase: LoadPhase<HistoricalMonthBundle> {
-        if (historicalMonthLoadPhase == .idle || historicalMonthLoadPhase == .loading(cached: nil)),
-           !isLoading,
+        if case .idle = historicalMonthLoadPhase,
            let m = month {
             return .loaded(HistoricalMonthBundle(
                 month: m, dailyBreakdown: dailyBreakdown, time: viewingTimeData
@@ -172,7 +190,8 @@ class UsageStore: ObservableObject {
                 snapshot: sub,
                 source: sub.isOfflineCached ? .offlineCache : .live,
                 updatedAt: quotaUpdatedAt,
-                notice: notice
+                notice: notice,
+                isRefreshing: quotaState.isLoading
             )
         }
         return quotaState
@@ -279,7 +298,14 @@ class UsageStore: ObservableObject {
     private var monthNav: MonthNavigationState
     private var yearLoadGate = YearLoadGate()
     private var archiveSweepGate = ArchiveSweepGate()
+    private var quotaFetchGen = QuotaFetchGenerationState()
+    private var wallpaperState = BlueprintWallpaperState()
     private var isSyncingMonthNav = false
+
+    /// True when `BlueprintWallpaperMachine` holds a captured pre-blueprint wallpaper path to restore.
+    var canRestorePreviousWallpaper: Bool {
+        wallpaperState.canRestorePrevious
+    }
 
     private var lastScanFingerprint: String?
     private var lastScanResults: ScanResults?
@@ -347,6 +373,11 @@ class UsageStore: ObservableObject {
            let decodedCraft = try? JSONDecoder().decode(CraftPreferences.self, from: savedCraft) {
             craftPreferences = decodedCraft
         }
+        wallpaperState = BlueprintWallpaperState(
+            lastAppliedDateKey: craftPreferences.lastWallpaperDateKey,
+            lastAppliedStyle: craftPreferences.lastWallpaperDateKey != nil ? craftPreferences.wallpaperStyle : nil,
+            previousWallpaperPath: craftPreferences.previousWallpaperPath
+        )
 
         let initialToken = SubscriptionQuotaService.shared.hasOAuthToken
         applyQuotaEvent(.tokenPresenceChanged(initialToken))
@@ -374,6 +405,9 @@ class UsageStore: ObservableObject {
 
     private func applyQuotaEvent(_ event: QuotaStateEvent<OAuthUsage>) {
         let next = QuotaStateReducer.reduce(quotaState, event: event)
+        if next == .noAccount {
+            quotaFetchGen.invalidate()
+        }
         if quotaState != next { quotaState = next }
         let nextHasAccount = next.hasAccountSurface
         if hasOAuthToken != nextHasAccount { hasOAuthToken = nextHasAccount }
@@ -392,11 +426,18 @@ class UsageStore: ObservableObject {
 
     private func syncActiveLoadingFlag() {
         let active: Bool
-        if selectedTab == .subscription {
-            active = (quotaState == .loading)
-        } else if selectedTab == .time && timeRange == .year {
-            active = yearLoadPhase.isLoading
-        } else {
+        switch selectedTab {
+        case .subscription:
+            active = quotaState.isLoading
+        case .session:
+            active = false
+        case .time:
+            if timeRange == .year {
+                active = yearLoadPhase.isLoading
+            } else {
+                active = isCurrentMonth ? currentMonthLoadPhase.isLoading : historicalMonthLoadPhase.isLoading
+            }
+        case .cost, .tokens:
             active = isCurrentMonth ? currentMonthLoadPhase.isLoading : historicalMonthLoadPhase.isLoading
         }
         if isLoading != active { isLoading = active }
@@ -408,14 +449,17 @@ class UsageStore: ObservableObject {
             ? SubscriptionQuotaService.shared.probeTokenPresenceNow()
             : SubscriptionQuotaService.shared.hasOAuthToken
         if !probedHasToken {
+            quotaFetchGen.invalidate()
             applyQuotaEvent(.tokenPresenceChanged(false))
             return
         }
         applyQuotaEvent(.tokenPresenceChanged(true))
+        let gen = quotaFetchGen.beginFetch()
         applyQuotaEvent(.beginFetch)
         SubscriptionQuotaService.shared.fetch(forceRefresh: force) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self = self else { return }
+                guard self.quotaFetchGen.complete(gen) else { return }
                 let now = Date()
                 switch result {
                 case .success(let quota):
@@ -429,6 +473,7 @@ class UsageStore: ObservableObject {
                         : .staleError(err)
                     self.applyQuotaEvent(.fetched(quota, source: .offlineCache, at: at, notice: notice))
                 case .noToken:
+                    self.quotaFetchGen.invalidate()
                     self.applyQuotaEvent(.tokenPresenceChanged(false))
                 case .unauthorized:
                     self.applyQuotaEvent(.fetchFailed(.unauthorized, retryAt: nil, at: now))
@@ -465,11 +510,6 @@ class UsageStore: ObservableObject {
         guard globalHotkeyEnabled != enabled else { return }
         globalHotkeyEnabled = enabled
         UserDefaults.standard.set(enabled, forKey: "globalHotkeyEnabled")
-    }
-
-    func setPeriodScope(_ scope: UsagePeriodScope) {
-        guard selectedPeriodScope != scope else { return }
-        selectedPeriodScope = scope
     }
 
     func setThemePreset(_ preset: TelemetryThemePreset) {
@@ -510,14 +550,35 @@ class UsageStore: ObservableObject {
         guard craftPreferences.acousticChimesEnabled != enabled else { return }
         craftPreferences.acousticChimesEnabled = enabled
         persistCraftPreferences()
+        if !enabled {
+            Task { @MainActor in
+                CraftEngine.shared.teardownAudioEngine()
+            }
+        }
     }
 
     func setDailyWallpaperEnabled(_ enabled: Bool) {
         guard craftPreferences.dailyWallpaperEnabled != enabled else { return }
         craftPreferences.dailyWallpaperEnabled = enabled
         persistCraftPreferences()
+        let now = Date()
+        let currentYear = AppDate.gregorian.component(.year, from: now)
         if enabled {
-            checkDailyWallpaperIfNeeded()
+            dispatchWallpaperEvent(.dailyCheck(
+                enabled: true,
+                todayKey: AppDate.dayKey(now),
+                style: craftPreferences.wallpaperStyle,
+                hasYearCache: yearTimeCache[currentYear] != nil,
+                now: now.timeIntervalSince1970
+            ))
+        } else {
+            dispatchWallpaperEvent(.styleChanged(
+                enabled: false,
+                todayKey: AppDate.dayKey(now),
+                style: craftPreferences.wallpaperStyle,
+                hasYearCache: yearTimeCache[currentYear] != nil,
+                now: now.timeIntervalSince1970
+            ))
         }
     }
 
@@ -525,76 +586,173 @@ class UsageStore: ObservableObject {
         guard craftPreferences.wallpaperStyle != style else { return }
         craftPreferences.wallpaperStyle = style
         persistCraftPreferences()
-        if craftPreferences.dailyWallpaperEnabled {
-            applyBlueprintWallpaperNow()
-        }
+        let now = Date()
+        let currentYear = AppDate.gregorian.component(.year, from: now)
+        dispatchWallpaperEvent(.styleChanged(
+            enabled: craftPreferences.dailyWallpaperEnabled,
+            todayKey: AppDate.dayKey(now),
+            style: style,
+            hasYearCache: yearTimeCache[currentYear] != nil,
+            now: now.timeIntervalSince1970
+        ))
     }
 
     func applyBlueprintWallpaperNow() {
         let now = Date()
         let currentYear = AppDate.gregorian.component(.year, from: now)
-        let todayKey = AppDate.dayKey(now)
-
-        var mergedYearDays: [String: Int] = yearTimeCache[currentYear]
-            ?? (viewingTimeYear == currentYear ? yearTimeDays : nil)
-            ?? (archiveHistoryLocally ? archive.yearSeconds(year: currentYear) : [:])
-
-        if let td = currentTimeData?.days {
-            let yearPrefix = String(format: "%04d-", currentYear)
-            for (k, day) in td where k.hasPrefix(yearPrefix) && day.totalSeconds > 0 {
-                mergedYearDays[k] = max(mergedYearDays[k] ?? 0, day.totalSeconds)
-            }
-        }
-
-        if let prevPath = WallpaperGenerator.capturePreviousWallpaperPathIfNeeded(
-            existing: craftPreferences.previousWallpaperPath
-        ), craftPreferences.previousWallpaperPath == nil {
-            craftPreferences.previousWallpaperPath = prevPath
-            persistCraftPreferences()
-        }
-
-        let hasLoadedYearData = (yearTimeCache[currentYear] != nil)
-        let applied = WallpaperGenerator.generateAndApply(
-            yearDays: mergedYearDays,
-            year: currentYear,
+        dispatchWallpaperEvent(.manualApply(
+            todayKey: AppDate.dayKey(now),
             style: craftPreferences.wallpaperStyle,
-            date: now
-        ) != nil
-
-        if applied && hasLoadedYearData {
-            craftPreferences.lastWallpaperDateKey = todayKey
-            persistCraftPreferences()
-        }
-
-        if !hasLoadedYearData {
-            loadYearTime(currentYear)
-        }
+            hasYearCache: yearTimeCache[currentYear] != nil,
+            now: now.timeIntervalSince1970
+        ))
     }
 
     func restorePreviousWallpaper() {
-        guard let prevPath = craftPreferences.previousWallpaperPath,
-              !prevPath.isEmpty,
-              FileManager.default.fileExists(atPath: prevPath) else {
-            return
-        }
-        let url = URL(fileURLWithPath: prevPath)
-        _ = WallpaperGenerator.applyDesktopImage(url: url)
-        craftPreferences.dailyWallpaperEnabled = false
-        craftPreferences.lastWallpaperDateKey = nil
-        persistCraftPreferences()
+        dispatchWallpaperEvent(.restoreRequested)
     }
 
     func checkDailyWallpaperIfNeeded() {
         let now = Date()
-        let todayKey = AppDate.dayKey(now)
-        guard DailyWallpaperGate.shouldRefresh(todayKey: todayKey, preferences: craftPreferences) else {
-            return
-        }
         let currentYear = AppDate.gregorian.component(.year, from: now)
-        if yearTimeCache[currentYear] != nil {
-            applyBlueprintWallpaperNow()
-        } else {
-            loadYearTime(currentYear)
+        dispatchWallpaperEvent(.dailyCheck(
+            enabled: craftPreferences.dailyWallpaperEnabled,
+            todayKey: AppDate.dayKey(now),
+            style: craftPreferences.wallpaperStyle,
+            hasYearCache: yearTimeCache[currentYear] != nil,
+            now: now.timeIntervalSince1970
+        ))
+    }
+
+    /// Handles macOS `.NSCalendarDayChanged` rollover: invalidates stale prior-day
+    /// `yearTimeCache[currentYear]` before refreshing so Year view and post-refresh
+    /// `checkDailyWallpaperIfNeeded()` always use fresh day-rolled data.
+    func handleCalendarDayChanged(now: Date = Date()) {
+        let currentYear = AppDate.gregorian.component(.year, from: now)
+        yearTimeCache.removeValue(forKey: currentYear)
+        yearLoadGate.invalidateAll()
+        if selectedTab == .time && timeRange == .year && viewingTimeYear == currentYear {
+            loadYearTime(currentYear, force: true)
+        }
+        refresh()
+    }
+
+    private func mergedBlueprintYearDays(year: Int) -> [String: Int] {
+        var mergedYearDays: [String: Int] = yearTimeCache[year]
+            ?? (viewingTimeYear == year ? yearTimeDays : nil)
+            ?? (archiveHistoryLocally ? archive.yearSeconds(year: year) : [:])
+
+        if let td = currentTimeData?.days {
+            let yearPrefix = String(format: "%04d-", year)
+            for (k, day) in td where k.hasPrefix(yearPrefix) && day.totalSeconds > 0 {
+                mergedYearDays[k] = max(mergedYearDays[k] ?? 0, day.totalSeconds)
+            }
+        }
+        return mergedYearDays
+    }
+
+    /// Silent background `--time-year` fetch dedicated to Blueprint Wallpaper.
+    /// Populates `yearTimeCache[currentYear]` WITHOUT mutating `viewingTimeYear` or clearing `yearTimeDays`.
+    private func fetchYearDataSilentlyForWallpaper() {
+        let currentYear = AppDate.gregorian.component(.year, from: Date())
+        scriptQueue.async { [weak self] in
+            guard let self = self else { return }
+            let json = self.scriptClient.runScript(["--time-year", "\(currentYear)"])
+            let parsed = json.flatMap { UsageParser.parseYearTime($0) }
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                let now = Date()
+                if let parsed = parsed, parsed.year == currentYear {
+                    let final: [String: Int]
+                    if self.archiveHistoryLocally {
+                        self.archive.mergeYearSeconds(parsed.days)
+                        let overlaid = self.archive.yearSeconds(year: currentYear)
+                        final = overlaid.isEmpty ? parsed.days : overlaid
+                    } else {
+                        final = parsed.days
+                    }
+                    self.storeYearTimeCache(final, for: currentYear)
+                    if self.viewingTimeYear == currentYear && self.yearTimeDays == nil && !self.yearLoadPhase.isLoading {
+                        self.yearTimeDays = final
+                        self.yearLoadPhase = .loaded(final)
+                        self.syncActiveLoadingFlag()
+                    }
+                    self.dispatchWallpaperEvent(.yearDataReady(todayKey: AppDate.dayKey(now)))
+                } else if self.archiveHistoryLocally {
+                    let archived = self.archive.yearSeconds(year: currentYear)
+                    if !archived.isEmpty {
+                        self.storeYearTimeCache(archived, for: currentYear)
+                        self.dispatchWallpaperEvent(.yearDataReady(todayKey: AppDate.dayKey(now)))
+                    } else {
+                        self.dispatchWallpaperEvent(.yearDataFailed(now: now.timeIntervalSince1970))
+                    }
+                } else {
+                    self.dispatchWallpaperEvent(.yearDataFailed(now: now.timeIntervalSince1970))
+                }
+            }
+        }
+    }
+
+    private func dispatchWallpaperEvent(_ event: BlueprintWallpaperEvent) {
+        let effects = BlueprintWallpaperMachine.reduce(&wallpaperState, event: event)
+        for effect in effects {
+            switch effect {
+            case .fetchYearDataSilently:
+                fetchYearDataSilentlyForWallpaper()
+
+            case .renderAndApply(let generation, let style, let dateKey):
+                let now = Date()
+                let currentYear = AppDate.gregorian.component(.year, from: now)
+                let mergedYearDays = mergedBlueprintYearDays(year: currentYear)
+                let capturedPrevious = WallpaperGenerator.capturePreviousWallpaperPathIfNeeded(
+                    existingSavedPath: wallpaperState.previousWallpaperPath
+                )
+                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                    let renderedURL = WallpaperGenerator.renderBlueprintPNG(
+                        days: mergedYearDays,
+                        year: currentYear,
+                        style: style,
+                        dateKey: dateKey
+                    )
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self = self else { return }
+                        guard case .applying(_, _, _, let activeGen) = self.wallpaperState.phase,
+                              activeGen == generation else {
+                            return
+                        }
+                        let applied: Bool
+                        if let url = renderedURL {
+                            applied = WallpaperGenerator.applyDesktopImage(at: url)
+                        } else {
+                            applied = false
+                        }
+                        self.dispatchWallpaperEvent(.applyCompleted(
+                            generation: generation,
+                            succeeded: applied,
+                            dateKey: dateKey,
+                            style: style,
+                            capturedPreviousPath: capturedPrevious,
+                            now: Date().timeIntervalSince1970
+                        ))
+                    }
+                }
+
+            case .restoreDesktop(let path):
+                if WallpaperGenerator.fileExists(atPath: path) {
+                    let ok = WallpaperGenerator.applyDesktopImage(at: URL(fileURLWithPath: path))
+                    if ok {
+                        craftPreferences.dailyWallpaperEnabled = false
+                    }
+                    dispatchWallpaperEvent(.restoreCompleted(succeeded: ok, fileMissing: false))
+                } else {
+                    dispatchWallpaperEvent(.restoreCompleted(succeeded: false, fileMissing: true))
+                }
+
+            case .persistPreferences:
+                craftPreferences.lastWallpaperDateKey = wallpaperState.lastAppliedDateKey
+                craftPreferences.previousWallpaperPath = wallpaperState.previousWallpaperPath
+                persistCraftPreferences()
+            }
         }
     }
 
@@ -621,6 +779,9 @@ class UsageStore: ObservableObject {
             archiveSweepIfNeeded(force: true)
         } else {
             archiveSweepGate.reset()
+            yearTimeDays = nil
+            yearLoadPhase = .idle
+            syncActiveLoadingFlag()
         }
         republishAfterArchiveChange()
     }
@@ -630,7 +791,10 @@ class UsageStore: ObservableObject {
         UserDefaults.standard.removeObject(forKey: "archiveSweptThrough")
         yearTimeCache.removeAll()
         yearLoadGate.invalidateAll()
+        yearTimeDays = nil
+        yearLoadPhase = .idle
         archive.clear()
+        syncActiveLoadingFlag()
         republishAfterArchiveChange()
     }
 
@@ -742,6 +906,9 @@ class UsageStore: ObservableObject {
         guard let generation = historicalLoadGate.beginLoad(yearMonth: ym, force: force) else {
             return
         }
+        if !force {
+            self.viewingTimeData = nil
+        }
         historicalMonthLoadPhase = force
             ? historicalMonthLoadPhase.transitioningToLoading()
             : .loading(cached: nil)
@@ -848,11 +1015,18 @@ class UsageStore: ObservableObject {
                     dailyBreakdown: cached.daily, time: cached.time,
                     scriptSucceeded: true, cached: nil)
                 DispatchQueue.main.async {
+                    let applyNow = Date()
+                    guard SnapshotFreshnessPolicy.isFreshCurrentMonthFetch(
+                        fetchedYear: nowYear, fetchedMonth: nowMonth, now: applyNow
+                    ) else {
+                        self.handleStaleCurrentMonthRollover(now: applyNow)
+                        return
+                    }
                     self.currentMonthData = cached.month
                     self.currentTimeData = cached.time
-                    self.currentMonthLoadPhase = phase
-                    self.recomputeTimeToday()
-                    self.lastUpdate = Date()
+                    self.currentMonthLoadPhase = self.refreshQueue.phaseForIntermediateResult(phase)
+                    self.recomputeTimeToday(now: applyNow)
+                    self.lastUpdate = applyNow
                     if self.isCurrentMonth {
                         self.today = cached.today
                         self.week = cached.week
@@ -871,7 +1045,7 @@ class UsageStore: ObservableObject {
                 self.lastScanResults = nil
                 DispatchQueue.main.async {
                     let cachedBundle = self.currentMonthLoadPhase.value
-                    self.currentMonthLoadPhase = UsageStateLogic.classifyCurrentMonth(
+                    let failedPhase = UsageStateLogic.classifyCurrentMonth(
                         today: cachedBundle?.today,
                         week: cachedBundle?.week,
                         month: nil,
@@ -880,6 +1054,7 @@ class UsageStore: ObservableObject {
                         scriptSucceeded: false,
                         cached: cachedBundle
                     )
+                    self.currentMonthLoadPhase = self.refreshQueue.phaseForIntermediateResult(failedPhase)
                     self.completeRefreshQueueAndCheckFollowUp()
                 }
                 return
@@ -911,14 +1086,21 @@ class UsageStore: ObservableObject {
                 dailyBreakdown: daily, time: mergedTime,
                 scriptSucceeded: true, cached: nil)
             DispatchQueue.main.async {
+                let applyNow = Date()
+                guard SnapshotFreshnessPolicy.isFreshCurrentMonthFetch(
+                    fetchedYear: nowYear, fetchedMonth: nowMonth, now: applyNow
+                ) else {
+                    self.handleStaleCurrentMonthRollover(now: applyNow)
+                    return
+                }
                 self.currentMonthData = validMonth
                 self.currentTimeData = mergedTime
-                self.currentMonthLoadPhase = phase
+                self.currentMonthLoadPhase = self.refreshQueue.phaseForIntermediateResult(phase)
                 if self.archiveHistoryLocally {
                     self.archive.merge(daily: daily, time: mergedTime)
                 }
-                self.recomputeTimeToday()
-                self.lastUpdate = Date()
+                self.recomputeTimeToday(now: applyNow)
+                self.lastUpdate = applyNow
                 self.saveCache(
                     year: nowYear, month: nowMonth,
                     data: validMonth, daily: daily,
@@ -936,14 +1118,28 @@ class UsageStore: ObservableObject {
         }
     }
 
+    private func handleStaleCurrentMonthRollover(now: Date) {
+        if monthNav.syncClock(now: now) {
+            isSyncingMonthNav = true
+            viewingYear = monthNav.viewingYear
+            viewingMonth = monthNav.viewingMonth
+            isSyncingMonthNav = false
+            selectedWeekMonday = nil
+            historicalLoadGate.invalidate()
+        }
+        _ = refreshQueue.request(force: true)
+        completeRefreshQueueAndCheckFollowUp()
+    }
+
     private func completeRefreshQueueAndCheckFollowUp() {
-        let next = refreshQueue.complete()
-        if next.shouldRunFollowUp {
+        switch refreshQueue.completeAction() {
+        case .runFollowUp(let followUpForce):
             currentMonthLoadPhase = currentMonthLoadPhase.transitioningToLoading()
             syncActiveLoadingFlag()
-            startCurrentMonthScriptRefresh(force: next.followUpForce)
-        } else {
+            startCurrentMonthScriptRefresh(force: followUpForce)
+        case .idle:
             syncActiveLoadingFlag()
+            checkDailyWallpaperIfNeeded()
         }
     }
 
@@ -967,10 +1163,6 @@ class UsageStore: ObservableObject {
                   let jsonData = UsageParser.encodeSnapshot(snapshot) else { return }
             try? jsonData.write(to: URL(fileURLWithPath: self.cachePath(year: year, month: month)), options: .atomic)
         }
-    }
-
-    private func loadCache(year: Int, month: Int) -> PeriodUsage? {
-        return loadCacheSnapshot(year: year, month: month)?.data
     }
 
     private func loadCacheSnapshot(year: Int, month: Int) -> MonthlySnapshot? {
@@ -1079,13 +1271,13 @@ class UsageStore: ObservableObject {
                     } else {
                         final = parsed.days
                     }
-                    self.yearTimeCache[clampedYear] = final
+                    self.storeYearTimeCache(final, for: clampedYear)
                     self.yearTimeDays = final
                     self.yearLoadPhase = .loaded(final)
                 } else if self.archiveHistoryLocally {
                     let archived = self.archive.yearSeconds(year: clampedYear)
                     if !archived.isEmpty {
-                        self.yearTimeCache[clampedYear] = archived
+                        self.storeYearTimeCache(archived, for: clampedYear)
                         self.yearTimeDays = archived
                         self.yearLoadPhase = .loaded(archived)
                     } else {
@@ -1101,12 +1293,17 @@ class UsageStore: ObservableObject {
                     self.yearTimeDays = self.yearLoadPhase.value
                 }
                 self.syncActiveLoadingFlag()
-                let currentYear = AppDate.gregorian.component(.year, from: Date())
+                let now = Date()
+                let currentYear = AppDate.gregorian.component(.year, from: now)
                 if clampedYear == currentYear, self.yearLoadPhase.value != nil {
                     if self.yearTimeCache[currentYear] == nil {
-                        self.yearTimeCache[currentYear] = self.yearLoadPhase.value ?? [:]
+                        self.storeYearTimeCache(self.yearLoadPhase.value ?? [:], for: currentYear)
                     }
-                    self.checkDailyWallpaperIfNeeded()
+                    if case .awaitingYearData = self.wallpaperState.phase {
+                        self.dispatchWallpaperEvent(.yearDataReady(todayKey: AppDate.dayKey(now)))
+                    } else {
+                        self.checkDailyWallpaperIfNeeded()
+                    }
                 }
             }
         }
@@ -1133,11 +1330,6 @@ class UsageStore: ObservableObject {
     }
 
     // MARK: - Script execution
-
-    private func fetchPeriod(_ range: String) -> PeriodUsage? {
-        guard let json = scriptClient.runScript(["--json", "--no-sessions", "--range", range]) else { return nil }
-        return UsageParser.parsePeriod(json)
-    }
 
     private func fetchMonthData(_ range: String, yearMonth: String) -> (PeriodUsage?, [DailyUsage]?, TimeData?) {
         guard let json = scriptClient.runScript(["--json", "--no-sessions", "--range", range]) else { return (nil, nil, nil) }

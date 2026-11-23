@@ -14,7 +14,7 @@ import AppKit
 
 // MARK: - Memoization Caches (Zero Recompute on 120Hz Hover)
 
-private enum YearContourFieldCache {
+enum YearContourFieldCache {
     struct Key: Hashable {
         let year: Int
         let cutoffDayKey: String?
@@ -449,9 +449,43 @@ private struct PolarChronometerInteractiveDeck: View {
     var hapticsEnabled: Bool = false
     let theme: AGYTheme
 
-    @State private var hoveredArc: PolarArc? = nil
-    @State private var hoveredDayKey: String? = nil
-    @State private var pinnedDayKey: String? = nil
+    @State private var inspection = PolarChronometerInspectionState()
+
+    private var isInspectionInScope: Bool {
+        inspection.scopeDayKeys.isEmpty || inspection.scopeDayKeys == dayKeys
+    }
+    private var activeHoveredArc: PolarArc? {
+        guard isInspectionInScope, let arc = inspection.hoveredArc, arcs.contains(arc) else { return nil }
+        return arc
+    }
+    private var activeHoveredDayKey: String? {
+        guard isInspectionInScope else { return nil }
+        return inspection.hoveredDayKey
+    }
+    private var activePinnedDayKey: String? {
+        guard isInspectionInScope else { return nil }
+        return inspection.pinnedDayKey
+    }
+    private var activeEffectiveDayKey: String? {
+        guard isInspectionInScope else { return nil }
+        if let arc = inspection.hoveredArc {
+            return arcs.contains(arc) ? arc.dayKey : inspection.pinnedDayKey
+        }
+        return inspection.effectiveDayKey
+    }
+    private var isPinnedOnly: Bool {
+        activeHoveredArc == nil && activeHoveredDayKey == nil && activePinnedDayKey != nil
+    }
+    private var hasAnyFocus: Bool {
+        activeHoveredArc != nil || activeHoveredDayKey != nil || activePinnedDayKey != nil
+    }
+
+    private func releaseAllPolarCursors() {
+        PointingCursorCoordinator.shared.setPointing(false, token: "polar-dial-arc")
+        for idx in 0..<7 {
+            PointingCursorCoordinator.shared.setPointing(false, token: "polar-ledger-\(idx)")
+        }
+    }
 
     private let dialHeight: CGFloat = 236
     private let outerRadius: CGFloat = 82.0
@@ -528,11 +562,33 @@ private struct PolarChronometerInteractiveDeck: View {
             // 7-column Mon-Sun summary ledger with 01..07 ring index pairing + 5+2 break + click-to-pin
             weekdayLedgerStrip(peakDayKey: currentPeak?.dayKey)
         }
+        .onAppear {
+            inspection.reconcile(dayKeys: dayKeys, validArcs: arcs)
+        }
+        .onChange(of: dayKeys) { nextDayKeys in
+            if inspection.reconcile(dayKeys: nextDayKeys, validArcs: arcs) {
+                releaseAllPolarCursors()
+            }
+        }
+        .onChange(of: arcs) { nextArcs in
+            inspection.reconcile(dayKeys: dayKeys, validArcs: nextArcs)
+        }
+        .onChange(of: isPanelVisible) { visible in
+            if !visible {
+                releaseAllPolarCursors()
+                inspection.reset()
+            }
+        }
+        .onDisappear {
+            releaseAllPolarCursors()
+            inspection.reset()
+        }
     }
 
     private func hoverReadoutRow(peakArc: PolarArc?) -> some View {
-        let focusedDayKey = hoveredDayKey ?? pinnedDayKey
-        let isPinnedOnly = (hoveredArc == nil && hoveredDayKey == nil && pinnedDayKey != nil)
+        let hoveredArc = activeHoveredArc
+        let focusedDayKey = activeEffectiveDayKey
+        let pinnedOnly = isPinnedOnly
 
         return HStack(spacing: 6) {
             if let h = hoveredArc {
@@ -554,7 +610,7 @@ private struct PolarChronometerInteractiveDeck: View {
                 Rectangle()
                     .fill(theme.accent)
                     .frame(width: 4, height: 4)
-                if isPinnedOnly {
+                if pinnedOnly {
                     Text("PIN")
                         .font(.system(size: 6.6, weight: .bold, design: .monospaced))
                         .tracking(0.4)
@@ -614,15 +670,18 @@ private struct PolarChronometerInteractiveDeck: View {
         let hubR = innerHubR
 
         // Focused center hub overlay (only populated when hovering or pinning; nil in idle state)
+        let currentHoveredArc = activeHoveredArc
+        let currentHoveredDayKey = activeHoveredDayKey
+        let currentPinnedDayKey = activePinnedDayKey
         let hubFocus: PolarHubFocus? = {
-            if let h = hoveredArc {
+            if let h = currentHoveredArc {
                 let sym = (weekdaySymbols.indices.contains(h.dayIndex) ? weekdaySymbols[h.dayIndex] : "").uppercased()
                 return PolarHubFocus(
                     topLabel: sym,
                     bottomValue: TimeLogic.formatDurationShort(h.interval.durationSeconds).uppercased()
                 )
             }
-            if let key = hoveredDayKey ?? pinnedDayKey, let idx = dayKeys.firstIndex(of: key) {
+            if let key = activeEffectiveDayKey, let idx = dayKeys.firstIndex(of: key) {
                 let sym = (weekdaySymbols.indices.contains(idx) ? weekdaySymbols[idx] : "").uppercased()
                 let total = days[key]?.totalSeconds ?? 0
                 return PolarHubFocus(
@@ -692,9 +751,9 @@ private struct PolarChronometerInteractiveDeck: View {
                     todayKey: todayKey,
                     todayIdx: todayIdx,
                     peakArc: peakArc,
-                    hoveredArc: hoveredArc,
-                    hoveredDayKey: hoveredDayKey,
-                    pinnedDayKey: pinnedDayKey,
+                    hoveredArc: currentHoveredArc,
+                    hoveredDayKey: currentHoveredDayKey,
+                    pinnedDayKey: currentPinnedDayKey,
                     hubFocus: hubFocus,
                     outerRadius: outerRadius,
                     ringStep: ringStep,
@@ -709,6 +768,7 @@ private struct PolarChronometerInteractiveDeck: View {
             .onContinuousHover(coordinateSpace: .local) { phase in
                 switch phase {
                 case .active(let pt):
+                    inspection.reconcile(dayKeys: dayKeys, validArcs: arcs)
                     let dx = Double(pt.x - geo.size.width * 0.5)
                     let dy = Double(pt.y - geo.size.height * 0.5)
                     let hit = InstrumentMath.hitTestPolarArc(
@@ -721,64 +781,46 @@ private struct PolarChronometerInteractiveDeck: View {
                         arcs: arcs
                     )
                     PointingCursorCoordinator.shared.setPointing(hit != nil, token: "polar-dial-arc")
-                    if hoveredArc != hit {
-                        if let nextDayIdx = hit?.dayIndex, nextDayIdx != hoveredArc?.dayIndex {
+                    let prevArc = inspection.hoveredArc
+                    if prevArc != hit {
+                        if let nextDayIdx = hit?.dayIndex, nextDayIdx != prevArc?.dayIndex {
                             CraftEngine.shared.perform(.chronometerCrown, enabled: hapticsEnabled && !isStaticRender)
                         }
-                        hoveredArc = hit
-                    }
-                    if hit != nil && hoveredDayKey != nil {
-                        hoveredDayKey = nil
+                        inspection.setHoveredArc(hit)
                     }
                 case .ended:
                     PointingCursorCoordinator.shared.setPointing(false, token: "polar-dial-arc")
-                    if hoveredArc != nil {
-                        hoveredArc = nil
-                    }
+                    inspection.setHoveredArc(nil)
                 }
             }
             .onTapGesture {
-                if let h = hoveredArc {
-                    let willPin = (pinnedDayKey != h.dayKey)
-                    pinnedDayKey = willPin ? h.dayKey : nil
+                inspection.reconcile(dayKeys: dayKeys, validArcs: arcs)
+                if let pinned = inspection.tapDial() {
                     CraftEngine.shared.perform(
-                        willPin ? .chronometerPin : .chronometerUnpin,
+                        pinned ? .chronometerPin : .chronometerUnpin,
                         enabled: hapticsEnabled && !isStaticRender
                     )
-                } else if pinnedDayKey != nil {
-                    pinnedDayKey = nil
-                    CraftEngine.shared.perform(.chronometerUnpin, enabled: hapticsEnabled && !isStaticRender)
                 }
             }
             .onDisappear {
                 PointingCursorCoordinator.shared.setPointing(false, token: "polar-dial-arc")
             }
         }
-        .onChange(of: dayKeys) { _ in
-            hoveredArc = nil
-            hoveredDayKey = nil
-            pinnedDayKey = nil
-        }
-        .onChange(of: isPanelVisible) { visible in
-            if !visible {
-                PointingCursorCoordinator.shared.setPointing(false, token: "polar-dial-arc")
-                hoveredArc = nil
-                hoveredDayKey = nil
-                pinnedDayKey = nil
-            }
-        }
     }
 
     private func weekdayLedgerStrip(peakDayKey: String?) -> some View {
-        let anyUserFocus = (hoveredArc != nil || hoveredDayKey != nil || pinnedDayKey != nil)
+        let anyUserFocus = hasAnyFocus
+        let currentHoveredArc = activeHoveredArc
+        let currentHoveredDayKey = activeHoveredDayKey
+        let currentPinnedDayKey = activePinnedDayKey
 
         return HStack(spacing: 0) {
             ForEach(Array(dayKeys.enumerated()), id: \.element) { idx, key in
                 let day = days[key]
                 let total = day?.totalSeconds ?? 0
                 let isToday = (key == todayKey)
-                let isPinned = (pinnedDayKey == key)
-                let isHovered = (hoveredDayKey == key || hoveredArc?.dayKey == key)
+                let isPinned = (currentPinnedDayKey == key)
+                let isHovered = (currentHoveredDayKey == key || currentHoveredArc?.dayKey == key)
                 let isPeakDay = (key == peakDayKey)
                 let isFocusedCell = isPinned || isHovered || (!anyUserFocus && isToday)
                 let sym = (weekdaySymbols.indices.contains(idx) ? weekdaySymbols[idx] : "").uppercased()
@@ -836,19 +878,18 @@ private struct PolarChronometerInteractiveDeck: View {
                 .contentShape(Rectangle())
                 .onHover { inside in
                     PointingCursorCoordinator.shared.setPointing(inside, token: "polar-ledger-\(idx)")
-                    let next = inside ? key : (hoveredDayKey == key ? nil : hoveredDayKey)
-                    if hoveredDayKey != next {
-                        if inside {
-                            CraftEngine.shared.perform(.chronometerCrown, enabled: hapticsEnabled && !isStaticRender)
-                        }
-                        hoveredDayKey = next
+                    inspection.reconcile(dayKeys: dayKeys, validArcs: arcs)
+                    let prevDay = inspection.hoveredDayKey
+                    inspection.setHoveredDay(key, inside: inside)
+                    if inside && inspection.hoveredDayKey == key && prevDay != key {
+                        CraftEngine.shared.perform(.chronometerCrown, enabled: hapticsEnabled && !isStaticRender)
                     }
                 }
                 .onTapGesture {
-                    let willPin = (pinnedDayKey != key)
-                    pinnedDayKey = willPin ? key : nil
+                    inspection.reconcile(dayKeys: dayKeys, validArcs: arcs)
+                    let isPinned = inspection.togglePin(dayKey: key)
                     CraftEngine.shared.perform(
-                        willPin ? .chronometerPin : .chronometerUnpin,
+                        isPinned ? .chronometerPin : .chronometerUnpin,
                         enabled: hapticsEnabled && !isStaticRender
                     )
                 }
@@ -1909,8 +1950,13 @@ private struct YearContourInteractiveStage: View {
 
     @Environment(\.telemetryPanelVisible) private var isPanelVisible
     @Environment(\.craftHapticsEnabled) private var hapticsEnabled
-    @State private var hoveredDayKey: String? = nil
-    @State private var hoverNormPos: Point2D? = nil
+    @State private var inspection = ChartInspectionState<Int, YearContourHoverTarget>(scope: 0)
+
+    private var activeHover: YearContourHoverTarget? {
+        inspection.scope == year ? inspection.target : nil
+    }
+    private var hoveredDayKey: String? { activeHover?.dayKey }
+    private var hoverNormPos: Point2D? { activeHover?.normPos }
 
     private static let leftAxisWidth: CGFloat = 16
     private let plotHeight: CGFloat = 164
@@ -2012,49 +2058,52 @@ private struct YearContourInteractiveStage: View {
                             case .active(let pt):
                                 let w = Double(geo.size.width)
                                 let h = Double(geo.size.height)
-                                if let cell = InstrumentMath.yearContourCell(
+                                guard let cell = InstrumentMath.yearContourCell(
                                     x: Double(pt.x),
                                     y: Double(pt.y),
                                     width: w,
                                     height: h,
                                     padY: Double(Self.contourPadY)
-                                ) {
-                                    // Reject future days past NOW in the current year
-                                    if let cutoffNorm = field.cutoffNormX, cell.normX > cutoffNorm {
-                                        if hoverNormPos != nil { hoverNormPos = nil }
-                                        if hoveredDayKey != nil { hoveredDayKey = nil }
-                                        return
+                                ) else {
+                                    if activeHover != nil { inspection.reset() }
+                                    return
+                                }
+                                // Reject future days past NOW in the current year
+                                if let cutoffNorm = field.cutoffNormX, cell.normX > cutoffNorm {
+                                    if activeHover != nil { inspection.reset() }
+                                    return
+                                }
+                                guard let resolvedKey = startMonday.flatMap({
+                                    TimeLogic.dayKey(col: cell.col, row: cell.row, startMonday: $0)
+                                }),
+                                resolvedKey.hasPrefix(yearPrefix) else {
+                                    // Reject adjacent-year padding cells so crosshair reticle never orphans
+                                    if activeHover != nil { inspection.reset() }
+                                    return
+                                }
+                                if let cutoff = cutoffDayKey, resolvedKey > cutoff {
+                                    if activeHover != nil { inspection.reset() }
+                                    return
+                                }
+                                inspection.syncScope(year)
+                                let prevKey = inspection.target?.dayKey
+                                let nextTarget = YearContourHoverTarget(
+                                    dayKey: resolvedKey,
+                                    normX: cell.normX,
+                                    normY: cell.normY
+                                )
+                                if inspection.target != nextTarget {
+                                    inspection.setTarget(nextTarget)
+                                    if prevKey != resolvedKey, (days[resolvedKey] ?? 0) > 0 {
+                                        let isPeak = field.peaks.contains(where: { $0.dayKey == resolvedKey })
+                                        CraftEngine.shared.perform(
+                                            isPeak ? .contourPeakLock : .contourRidgeStep,
+                                            enabled: hapticsEnabled
+                                        )
                                     }
-                                    let resolvedKey = startMonday.flatMap {
-                                        TimeLogic.dayKey(col: cell.col, row: cell.row, startMonday: $0)
-                                    }
-                                    if let cutoff = cutoffDayKey, let key = resolvedKey, key > cutoff {
-                                        if hoverNormPos != nil { hoverNormPos = nil }
-                                        if hoveredDayKey != nil { hoveredDayKey = nil }
-                                        return
-                                    }
-                                    let nextPos = Point2D(x: cell.normX, y: cell.normY)
-                                    if hoverNormPos != nextPos {
-                                        hoverNormPos = nextPos
-                                    }
-                                    let nextKey: String? = (resolvedKey?.hasPrefix(yearPrefix) == true) ? resolvedKey : nil
-                                    if hoveredDayKey != nextKey {
-                                        hoveredDayKey = nextKey
-                                        if let key = nextKey, (days[key] ?? 0) > 0 {
-                                            let isPeak = field.peaks.contains(where: { $0.dayKey == key })
-                                            CraftEngine.shared.perform(
-                                                isPeak ? .contourPeakLock : .contourRidgeStep,
-                                                enabled: hapticsEnabled
-                                            )
-                                        }
-                                    }
-                                } else {
-                                    if hoverNormPos != nil { hoverNormPos = nil }
-                                    if hoveredDayKey != nil { hoveredDayKey = nil }
                                 }
                             case .ended:
-                                if hoverNormPos != nil { hoverNormPos = nil }
-                                if hoveredDayKey != nil { hoveredDayKey = nil }
+                                if activeHover != nil { inspection.reset() }
                             }
                         }
                     }
@@ -2084,15 +2133,19 @@ private struct YearContourInteractiveStage: View {
         .padding(.horizontal, 14)
         .padding(.top, 10)
         .padding(.bottom, 8)
-        .onChange(of: year) { _ in
-            hoveredDayKey = nil
-            hoverNormPos = nil
+        .onAppear {
+            inspection.syncScope(year)
+        }
+        .onChange(of: year) { nextYear in
+            inspection.syncScope(nextYear)
         }
         .onChange(of: isPanelVisible) { visible in
             if !visible {
-                hoveredDayKey = nil
-                hoverNormPos = nil
+                inspection.reset()
             }
+        }
+        .onDisappear {
+            inspection.reset()
         }
     }
 
@@ -3064,8 +3117,13 @@ private struct MonthElevationInteractiveDeck: View {
     var hapticsEnabled: Bool = false
     let theme: AGYTheme
 
-    @State private var hoveredDayIndex: Int? = nil
-    @State private var hoveredBinIndex: Int? = nil
+    @State private var inspection = ChartInspectionState<String, MonthElevationFocus>(scope: "")
+
+    private var activeFocus: MonthElevationFocus? {
+        inspection.scope == monthPrefix ? inspection.target : nil
+    }
+    private var hoveredDayIndex: Int? { activeFocus?.dayIndex }
+    private var hoveredBinIndex: Int? { activeFocus?.diurnalBinIndex }
 
     private let upperHeight: CGFloat = 148
     private let lowerHeight: CGFloat = 54
@@ -3176,7 +3234,7 @@ private struct MonthElevationInteractiveDeck: View {
                     .contentShape(Rectangle())
                     .onContinuousHover(coordinateSpace: .local) { phase in
                         guard monthTotal > 0, !slots.isEmpty else {
-                            if hoveredDayIndex != nil { hoveredDayIndex = nil }
+                            if hoveredDayIndex != nil { inspection.reset() }
                             return
                         }
                         switch phase {
@@ -3187,8 +3245,9 @@ private struct MonthElevationInteractiveDeck: View {
                             {
                                 let slotW = MonthElevationLayout.slotWidth(plotRect: plotRect, count: slots.count)
                                 let idx = min(slots.count - 1, max(0, Int(floor((pt.x - plotRect.minX) / slotW))))
-                                if hoveredDayIndex != idx {
-                                    hoveredDayIndex = idx
+                                inspection.syncScope(monthPrefix)
+                                if inspection.target != .day(idx) {
+                                    inspection.setTarget(.day(idx))
                                     let slot = slots[idx]
                                     if slot.seconds > 0 {
                                         let isPeak = (idx == peakIndex)
@@ -3198,15 +3257,12 @@ private struct MonthElevationInteractiveDeck: View {
                                         )
                                     }
                                 }
-                                if hoveredBinIndex != nil {
-                                    hoveredBinIndex = nil
-                                }
                             } else if hoveredDayIndex != nil {
-                                hoveredDayIndex = nil
+                                inspection.reset()
                             }
                         case .ended:
                             if hoveredDayIndex != nil {
-                                hoveredDayIndex = nil
+                                inspection.reset()
                             }
                         }
                     }
@@ -3257,7 +3313,7 @@ private struct MonthElevationInteractiveDeck: View {
                     .contentShape(Rectangle())
                     .onContinuousHover(coordinateSpace: .local) { phase in
                         guard monthTotal > 0, !profile.bins.isEmpty else {
-                            if hoveredBinIndex != nil { hoveredBinIndex = nil }
+                            if hoveredBinIndex != nil { inspection.reset() }
                             return
                         }
                         switch phase {
@@ -3268,21 +3324,19 @@ private struct MonthElevationInteractiveDeck: View {
                             {
                                 let binW = plotRect.width / CGFloat(profile.bins.count)
                                 let idx = min(profile.bins.count - 1, max(0, Int(floor((pt.x - plotRect.minX) / binW))))
-                                if hoveredBinIndex != idx {
-                                    hoveredBinIndex = idx
+                                inspection.syncScope(monthPrefix)
+                                if inspection.target != .diurnalBin(idx) {
+                                    inspection.setTarget(.diurnalBin(idx))
                                     if profile.bins[idx] > 0 {
                                         CraftEngine.shared.perform(.chronometerUnpin, enabled: hapticsEnabled)
                                     }
                                 }
-                                if hoveredDayIndex != nil {
-                                    hoveredDayIndex = nil
-                                }
                             } else if hoveredBinIndex != nil {
-                                hoveredBinIndex = nil
+                                inspection.reset()
                             }
                         case .ended:
                             if hoveredBinIndex != nil {
-                                hoveredBinIndex = nil
+                                inspection.reset()
                             }
                         }
                     }
@@ -3293,15 +3347,19 @@ private struct MonthElevationInteractiveDeck: View {
             .padding(.top, 8)
             .padding(.bottom, 9)
         }
-        .onChange(of: monthPrefix) { _ in
-            hoveredDayIndex = nil
-            hoveredBinIndex = nil
+        .onAppear {
+            inspection.syncScope(monthPrefix)
+        }
+        .onChange(of: monthPrefix) { nextPrefix in
+            inspection.syncScope(nextPrefix)
         }
         .onChange(of: isPanelVisible) { visible in
             if !visible {
-                hoveredDayIndex = nil
-                hoveredBinIndex = nil
+                inspection.reset()
             }
+        }
+        .onDisappear {
+            inspection.reset()
         }
     }
 

@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 
 /// App version, single-sourced from Info.plist (CFBundleShortVersionString).
-let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.9.0"
+let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "2.0.0"
 
 /// UI-facing subset of QuotaFetchResult (shared with AGYCore `CoreQuotaError`).
 typealias QuotaError = CoreQuotaError
@@ -103,16 +103,22 @@ private enum AGYStateStore {
             while sqlite3_step(s) == SQLITE_ROW {
                 guard let keyC = sqlite3_column_text(s, 0) else { continue }
                 let key = String(cString: keyC)
-                let valLen = Int(sqlite3_column_bytes(s, 1))
-                guard valLen > 0 else { continue }
 
                 let rawValue: String
-                if let textPtr = sqlite3_column_text(s, 1) {
-                    rawValue = String(cString: textPtr)
-                } else if let blobPtr = sqlite3_column_blob(s, 1) {
+                switch sqlite3_column_type(s, 1) {
+                case SQLITE_BLOB:
+                    guard let blobPtr = sqlite3_column_blob(s, 1) else { continue }
+                    let valLen = Int(sqlite3_column_bytes(s, 1))
+                    guard valLen > 0 else { continue }
                     let data = Data(bytes: blobPtr, count: valLen)
                     rawValue = String(decoding: data, as: UTF8.self)
-                } else {
+                case SQLITE_TEXT:
+                    guard let textPtr = sqlite3_column_text(s, 1) else { continue }
+                    let valLen = Int(sqlite3_column_bytes(s, 1))
+                    guard valLen > 0 else { continue }
+                    let data = Data(bytes: textPtr, count: valLen)
+                    rawValue = String(decoding: data, as: UTF8.self)
+                default:
                     continue
                 }
 
@@ -191,10 +197,7 @@ private enum AGYStateStore {
         }
         if let t = cachedToken, !t.isEmpty { return t }
 
-        let candidateFiles = [
-            (home as NSString).appendingPathComponent(".gemini/oauth_creds.json"),
-            (home as NSString).appendingPathComponent(".gemini/antigravity-cli/oauth_creds.json"),
-        ]
+        let candidateFiles = AGYLocator.oauthCredsPaths(home: home)
         for path in candidateFiles {
             guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -307,14 +310,15 @@ private enum AGYStateStore {
         guard let end = try? handle.seekToEnd(), end > 0 else { return nil }
         if end <= UInt64(maxBytes) {
             try? handle.seek(toOffset: 0)
-            return String(decoding: handle.readDataToEndOfFile(), as: UTF8.self)
+            let data = (try? handle.readToEnd()) ?? Data()
+            return String(decoding: data, as: UTF8.self)
         }
         // Read head (startup auth/tier log lines) + tail (latest quota/account lines)
         let half = maxBytes / 2
         try? handle.seek(toOffset: 0)
-        let head = handle.readData(ofLength: half)
+        let head = (try? handle.read(upToCount: half)) ?? Data()
         try? handle.seek(toOffset: end - UInt64(half))
-        let tail = handle.readData(ofLength: half)
+        let tail = (try? handle.read(upToCount: half)) ?? Data()
         return String(decoding: head, as: UTF8.self) + "\n" + String(decoding: tail, as: UTF8.self)
     }
 }
@@ -756,16 +760,24 @@ final class SubscriptionQuotaService {
                 group.leave()
             }
 
-            group.notify(queue: self.workQueue) {
+            group.notify(queue: self.probeQueue) {
+                stateLock.lock()
+                let snapModelsData = modelsData
+                let snapSummaryData = summaryData
+                let snapAicodeData = aicodeData
+                let snapStatuses = [aicodeStatus, modelsStatus, summaryStatus]
+                let snapDeadline = rateLimitDeadline
+                stateLock.unlock()
+
                 let merged = AGYQuotaParser.mergeLiveQuotaBuckets(
-                    availableModelsData: modelsData,
-                    quotaSummaryData: summaryData,
-                    aicodeQuotaData: aicodeData
+                    availableModelsData: snapModelsData,
+                    quotaSummaryData: snapSummaryData,
+                    aicodeQuotaData: snapAicodeData
                 )
                 let outcome = LiveQuotaHTTPOutcome.classifyLiveHTTP(
                     hasMergedBuckets: !merged.isEmpty,
-                    statuses: [aicodeStatus, modelsStatus, summaryStatus],
-                    rateLimitDeadline: rateLimitDeadline
+                    statuses: snapStatuses,
+                    rateLimitDeadline: snapDeadline
                 )
                 switch outcome {
                 case .live:
@@ -783,6 +795,15 @@ final class SubscriptionQuotaService {
         }
     }
 
+    private static let ephemeralSession = URLSession(configuration: .ephemeral)
+    private static let userAgent: String = {
+        #if arch(arm64)
+        return "antigravity/1.5.9 darwin/arm64"
+        #else
+        return "antigravity/1.5.9 darwin/x86_64"
+        #endif
+    }()
+
     private func getJSON(
         url: URL,
         bearerToken: String,
@@ -796,9 +817,9 @@ final class SubscriptionQuotaService {
         req.httpMethod = "GET"
         req.timeoutInterval = 8
         req.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
-        req.setValue("antigravity/1.5.9 darwin/arm64", forHTTPHeaderField: "User-Agent")
+        req.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
 
-        URLSession.shared.dataTask(with: req) { data, resp, _ in
+        Self.ephemeralSession.dataTask(with: req) { data, resp, _ in
             completion(data, resp as? HTTPURLResponse)
         }.resume()
     }
@@ -818,10 +839,10 @@ final class SubscriptionQuotaService {
         req.timeoutInterval = 8
         req.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.setValue("antigravity/1.5.9 darwin/arm64", forHTTPHeaderField: "User-Agent")
+        req.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
         req.httpBody = (try? JSONSerialization.data(withJSONObject: bodyObject)) ?? Data("{}".utf8)
 
-        URLSession.shared.dataTask(with: req) { data, resp, _ in
+        Self.ephemeralSession.dataTask(with: req) { data, resp, _ in
             completion(data, resp as? HTTPURLResponse)
         }.resume()
     }

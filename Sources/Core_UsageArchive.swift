@@ -93,7 +93,7 @@ public enum UsageArchiveLogic {
     /// Merge one day's per-model token/cost breakdown. Returns true if the archive changed.
     @discardableResult
     public static func mergeDay(_ day: DailyUsage, into data: inout UsageArchiveData) -> Bool {
-        guard !AppDate.isSentinelDayKey(day.dateString) else { return false }
+        guard AppDate.isValidDayKey(day.dateString) else { return false }
         var stored = data.days[day.dateString] ?? ArchivedDay()
         var changed = false
         for m in day.models {
@@ -135,7 +135,7 @@ public enum UsageArchiveLogic {
         guard let time = time else { return [] }
         var changed: Set<String> = []
         for (key, dtu) in time.days {
-            guard !AppDate.isSentinelDayKey(key) else { continue }
+            guard AppDate.isValidDayKey(key) else { continue }
             if dtu.totalSeconds == 0 && dtu.intervals.isEmpty { continue }
             var stored = data.days[key] ?? ArchivedDay()
             if dtu.totalSeconds >= stored.timeSeconds {
@@ -155,7 +155,7 @@ public enum UsageArchiveLogic {
     @discardableResult
     public static func mergeYearSeconds(_ days: [String: Int], into data: inout UsageArchiveData) -> Set<String> {
         var changed: Set<String> = []
-        for (key, seconds) in days where seconds > 0 && !AppDate.isSentinelDayKey(key) {
+        for (key, seconds) in days where seconds > 0 && AppDate.isValidDayKey(key) {
             var stored = data.days[key] ?? ArchivedDay()
             if seconds > stored.timeSeconds {
                 stored.timeSeconds = seconds
@@ -170,8 +170,10 @@ public enum UsageArchiveLogic {
 
     /// Reconstruct a month's `[DailyUsage]` from the archive (sorted by day).
     public static func dailyBreakdown(_ data: UsageArchiveData, yearMonth: String) -> [DailyUsage] {
+        guard AppDate.isValidMonthKey(yearMonth) else { return [] }
+        let prefix = yearMonth + "-"
         var result: [DailyUsage] = []
-        for dateStr in data.days.keys.sorted() where dateStr.hasPrefix(yearMonth) && !AppDate.isSentinelDayKey(dateStr) {
+        for dateStr in data.days.keys.sorted() where dateStr.hasPrefix(prefix) && AppDate.isValidDayKey(dateStr) {
             guard let day = data.days[dateStr], !day.models.isEmpty else { continue }
             var models: [ModelUsage] = []
             var totalTokens = 0
@@ -192,8 +194,7 @@ public enum UsageArchiveLogic {
                 totalTokens += a.totalTokens
                 totalCost += a.cost
             }
-            guard !models.isEmpty else { continue }
-            let dayNum = Int(dateStr.suffix(2)) ?? 1
+            guard !models.isEmpty, let dayNum = Int(dateStr.suffix(2)) else { continue }
             result.append(DailyUsage(
                 dateString: dateStr,
                 day: dayNum,
@@ -207,8 +208,10 @@ public enum UsageArchiveLogic {
 
     /// Reconstruct a month's active-time days from the archive.
     public static func timeDays(_ data: UsageArchiveData, yearMonth: String) -> [String: DayTimeUsage] {
+        guard AppDate.isValidMonthKey(yearMonth) else { return [:] }
+        let prefix = yearMonth + "-"
         var days: [String: DayTimeUsage] = [:]
-        for (key, day) in data.days where key.hasPrefix(yearMonth) && !AppDate.isSentinelDayKey(key) {
+        for (key, day) in data.days where key.hasPrefix(prefix) && AppDate.isValidDayKey(key) {
             let intervals = day.timeIntervals ?? []
             guard day.timeSeconds > 0 || !intervals.isEmpty else { continue }
             days[key] = DayTimeUsage(intervals: intervals, totalSeconds: day.timeSeconds)
@@ -218,9 +221,10 @@ public enum UsageArchiveLogic {
 
     /// Per-day active seconds for a whole year (year-heatmap overlay source).
     public static func yearSeconds(_ data: UsageArchiveData, year: Int) -> [String: Int] {
+        guard (1970...9998).contains(year) else { return [:] }
         let prefix = String(format: "%04d-", year)
         var days: [String: Int] = [:]
-        for (key, day) in data.days where key.hasPrefix(prefix) && !AppDate.isSentinelDayKey(key) && day.timeSeconds > 0 {
+        for (key, day) in data.days where key.hasPrefix(prefix) && AppDate.isValidDayKey(key) && day.timeSeconds > 0 {
             days[key] = day.timeSeconds
         }
         return days

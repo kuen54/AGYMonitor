@@ -69,4 +69,77 @@ struct TranscriptTests {
         let octal = #"title: "\344\270\255\346\226\207 Title \"Quoted\"""#
         #expect(TranscriptParse.parseAnnotationTitle(octal) == #"中文 Title "Quoted""#)
     }
+
+    @Test("Handles SYSTEM_MESSAGE followup with/without tools, >600s rejection, <1.0s nil duration, clock skew, and sentinel fileMtime")
+    func outputSampleDurationInferenceEdgeCases() throws {
+        // 1. SYSTEM_MESSAGE after tool-calling PLANNER_RESPONSE closes sample & computes duration
+        let sysWithTools = """
+        {"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-23T04:00:00Z","model":"gemini-4-carbon-high","output_tokens":900,"tool_calls":[{"name":"run_command"}]}
+        {"step_index":2,"source":"SYSTEM","type":"SYSTEM_MESSAGE","status":"DONE","created_at":"2026-11-23T04:00:15Z","content":"tool output"}
+        """
+        let sumWithTools = TranscriptParse.scan(text: sysWithTools)
+        let sWithTools = try #require(sumWithTools.recentOutputSamples.last)
+        let t15 = try #require(AppDate.parseISO8601("2026-11-23T04:00:15Z")).timeIntervalSince1970
+        #expect(abs(sWithTools.timestamp - t15) < 1e-6)
+        #expect(abs((sWithTools.durationSeconds ?? 0) - 15.0) < 1e-6)
+
+        // 2. SYSTEM_MESSAGE after tool-LESS PLANNER_RESPONSE must NOT close sample or invent duration
+        let sysWithoutTools = """
+        {"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-23T04:00:00Z","model":"gemini-4-carbon-high","output_tokens":900}
+        {"step_index":2,"source":"SYSTEM","type":"SYSTEM_MESSAGE","status":"DONE","created_at":"2026-11-23T04:00:15Z","content":"background notice"}
+        """
+        let sumWithoutTools = TranscriptParse.scan(text: sysWithoutTools)
+        let sWithoutTools = try #require(sumWithoutTools.recentOutputSamples.last)
+        let t0 = try #require(AppDate.parseISO8601("2026-11-23T04:00:00Z")).timeIntervalSince1970
+        #expect(abs(sWithoutTools.timestamp - t0) < 1e-6)
+        #expect(sWithoutTools.durationSeconds == nil)
+
+        // 3. Followup > 600s after PLANNER_RESPONSE is rejected (keeps start timestamp & nil duration)
+        let over600s = """
+        {"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-23T04:00:00Z","model":"gemini-4-carbon-high","output_tokens":1200,"tool_calls":[{"name":"run_command"}]}
+        {"step_index":2,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"2026-11-23T04:10:01Z","content":"slow"}
+        """
+        let sumOver600 = TranscriptParse.scan(text: over600s)
+        let sOver600 = try #require(sumOver600.recentOutputSamples.last)
+        #expect(abs(sOver600.timestamp - t0) < 1e-6)
+        #expect(sOver600.durationSeconds == nil)
+
+        // 4. Sub-second (< 1.0s) followup updates timestamp but keeps durationSeconds == nil
+        let subSecond = """
+        {"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-23T04:00:00.000Z","model":"gemini-4-carbon-high","output_tokens":50,"tool_calls":[{"name":"read_file"}]}
+        {"step_index":2,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"2026-11-23T04:00:00.600Z","content":"ok"}
+        """
+        let sumSubSec = TranscriptParse.scan(text: subSecond)
+        let sSubSec = try #require(sumSubSec.recentOutputSamples.last)
+        let t06 = try #require(AppDate.parseISO8601("2026-11-23T04:00:00.600Z")).timeIntervalSince1970
+        #expect(abs(sSubSec.timestamp - t06) < 1e-6)
+        #expect(sSubSec.durationSeconds == nil)
+
+        // 5. Negative clock skew on followup step is rejected cleanly
+        let negSkewStep = """
+        {"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-23T04:00:10Z","model":"gemini-4-carbon-high","output_tokens":200,"tool_calls":[{"name":"read_file"}]}
+        {"step_index":2,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"2026-11-23T04:00:05Z","content":"clock jumped back"}
+        """
+        let sumNegSkew = TranscriptParse.scan(text: negSkewStep)
+        let sNegSkew = try #require(sumNegSkew.recentOutputSamples.last)
+        let t10 = try #require(AppDate.parseISO8601("2026-11-23T04:00:10Z")).timeIntervalSince1970
+        #expect(abs(sNegSkew.timestamp - t10) < 1e-6)
+        #expect(sNegSkew.durationSeconds == nil)
+
+        // 6. Negative clock skew, sentinel (<= 2000-01-01), >600s, <1.0s, and non-finite fileMtime
+        let trailing = """
+        {"step_index":5,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-23T04:00:10Z","model":"gemini-4-carbon-high","output_tokens":400}
+        """
+        for badMtime in [t10 - 5.0, 0.0, 946_684_799.0, t10 + 601.0, Double.nan, Double.infinity] {
+            let sum = TranscriptParse.scan(text: trailing, fileMtime: badMtime)
+            let sample = try #require(sum.recentOutputSamples.last)
+            #expect(abs(sample.timestamp - t10) < 1e-6)
+            #expect(sample.durationSeconds == nil)
+        }
+        // Sub-second fileMtime (< 1.0s) updates timestamp but keeps durationSeconds == nil
+        let subMtimeSum = TranscriptParse.scan(text: trailing, fileMtime: t10 + 0.4)
+        let subMtimeSample = try #require(subMtimeSum.recentOutputSamples.last)
+        #expect(abs(subMtimeSample.timestamp - (t10 + 0.4)) < 1e-6)
+        #expect(subMtimeSample.durationSeconds == nil)
+    }
 }

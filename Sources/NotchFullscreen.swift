@@ -19,16 +19,17 @@ import AppKit
 final class FullscreenSpace {
     static let shared = FullscreenSpace()
 
+    private typealias CGSSpaceID = UInt64
     private typealias F_MainConn = @convention(c) () -> Int32
-    private typealias F_SpaceCreate = @convention(c) (Int32, Int32, Int32) -> Int32
-    private typealias F_SetLevel = @convention(c) (Int32, Int32, Int32) -> Int32
+    private typealias F_SpaceCreate = @convention(c) (Int32, Int32, CFDictionary?) -> CGSSpaceID
+    private typealias F_SetLevel = @convention(c) (Int32, CGSSpaceID, Int32) -> Int32
     private typealias F_ShowSpaces = @convention(c) (Int32, CFArray) -> Int32
-    private typealias F_AddRemove = @convention(c) (Int32, Int32, CFArray, Int32) -> Int32
+    private typealias F_AddRemove = @convention(c) (Int32, CGSSpaceID, CFArray, Int32) -> Int32
     private typealias F_RemoveFrom = @convention(c) (Int32, CFArray, CFArray) -> Int32
 
     let isAvailable: Bool
     private let connection: Int32
-    private let space: Int32
+    private let space: CGSSpaceID
     private let addRemove: F_AddRemove?
     private let removeFrom: F_RemoveFrom?
     private static let absoluteLevel: Int32 = Int32.max
@@ -53,12 +54,15 @@ final class FullscreenSpace {
             connection = 0; space = 0; addRemove = nil; removeFrom = nil; isAvailable = false; return
         }
         let conn = mainConn()
-        let sid = create(conn, 1, 0)
+        guard conn != 0 else {
+            connection = 0; space = 0; addRemove = nil; removeFrom = nil; isAvailable = false; return
+        }
+        let sid = create(conn, 1, nil)
         guard sid != 0 else {
             connection = 0; space = 0; addRemove = nil; removeFrom = nil; isAvailable = false; return
         }
         _ = setLevel(conn, sid, FullscreenSpace.absoluteLevel)
-        _ = show(conn, [sid] as CFArray)
+        _ = show(conn, [NSNumber(value: sid)] as CFArray)
         connection = conn; space = sid; addRemove = addRem; removeFrom = remFrom; isAvailable = true
     }
 
@@ -69,7 +73,7 @@ final class FullscreenSpace {
 
     func remove(_ window: NSWindow) {
         guard isAvailable, window.windowNumber > 0, let removeFrom = removeFrom else { return }
-        _ = removeFrom(connection, [window.windowNumber] as CFArray, [space] as CFArray)
+        _ = removeFrom(connection, [window.windowNumber] as CFArray, [NSNumber(value: space)] as CFArray)
     }
 }
 
@@ -106,7 +110,11 @@ final class FullscreenDetector {
         else {
             connection = 0; copySpaces = nil; isAvailable = false; return
         }
-        connection = mainConn()
+        let conn = mainConn()
+        guard conn != 0 else {
+            connection = 0; copySpaces = nil; isAvailable = false; return
+        }
+        connection = conn
         copySpaces = copy
         isAvailable = true
     }
@@ -120,10 +128,10 @@ final class FullscreenDetector {
         for display in displays {
             guard display["Display Identifier"] as? String == displayUUID else { continue }
             guard let current = display["Current Space"] as? [String: Any],
-                  let activeID = current["ManagedSpaceID"] as? Int,
+                  let activeID = (current["ManagedSpaceID"] as? NSNumber)?.uint64Value,
                   let spaces = display["Spaces"] as? [[String: Any]]
             else { return false }
-            for space in spaces where (space["ManagedSpaceID"] as? Int) == activeID {
+            for space in spaces where (space["ManagedSpaceID"] as? NSNumber)?.uint64Value == activeID {
                 return space["TileLayoutManager"] != nil
             }
             return false

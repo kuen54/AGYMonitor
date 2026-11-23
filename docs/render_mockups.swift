@@ -174,6 +174,33 @@ func populateSessions(_ s: UsageStore) {
         "c3cc0001-0000-0000-0000-000000000001",
     ]
     s.sessionStore.anyDoneUnseen = true
+    s.sessionStore.contextSnapshots = [
+        "a1aa0001-0000-0000-0000-000000000001": SessionContextSnapshot.make(
+            model: "gemini-4-carbon", usedTokens: 340_000, cacheHitRatio: 0.84),
+        "a1aa0002-0000-0000-0000-000000000002": SessionContextSnapshot.make(
+            model: "gemini-4-neon", usedTokens: 185_000, cacheHitRatio: 0.78),
+        "b2bb0001-0000-0000-0000-000000000001": SessionContextSnapshot.make(
+            model: "claude-opus-4-6", usedTokens: 184_000, cacheHitRatio: 0.72),
+        "b2bb0002-0000-0000-0000-000000000002": SessionContextSnapshot.make(
+            model: "gemini-4-hydrogen", usedTokens: 420_000, cacheHitRatio: 0.81),
+        "c3cc0001-0000-0000-0000-000000000001": SessionContextSnapshot.make(
+            model: "gemini-4-carbon", usedTokens: 810_000, cacheHitRatio: 0.88),
+        "c3cc0002-0000-0000-0000-000000000002": SessionContextSnapshot.make(
+            model: "gemini-3-8-flash", usedTokens: 120_000, cacheHitRatio: 0.75),
+    ]
+    s.sessionStore.liveTPS = LiveTPSSnapshot(
+        currentTPS: 142.6,
+        peakTPS: 168.4,
+        perSessionTPS: [
+            "a1aa0001-0000-0000-0000-000000000001": 94.2,
+            "a1aa0002-0000-0000-0000-000000000002": 48.4,
+        ],
+        sparkline: [52, 68, 84, 79, 96, 118, 134, 152, 168.4, 156, 138, 146, 142.6],
+        isWorking: true,
+        shouldShowInNotch: true,
+        shouldShowInMenuBar: true,
+        activeSubagentCount: 1
+    )
 }
 
 func resetIn(_ hours: Double) -> String {
@@ -343,7 +370,7 @@ struct DemoPopover: View {
                     Text(String(format: loc("updated"), loc("justNow")).uppercased())
                         .font(.system(size: 9, weight: .medium, design: .monospaced))
                         .foregroundColor(theme.inkSecondary)
-                    Text("· ⌘R · ⌘T · ⌘I")
+                    Text("· ⌘R · ⌘T · ⌘I · ⌘E")
                         .font(.system(size: 8.5, weight: .medium, design: .monospaced))
                         .foregroundColor(theme.inkMuted)
                 }
@@ -610,7 +637,7 @@ struct RenderApp {
             try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
             for preset in TelemetryThemePreset.allCases {
                 let p = preset.rawValue
-                // Dark mode for ALL 6 presets across Cost, Tokens, Plan (89% / 100%), and Time Year
+                // Dark mode for ALL 7 presets across Cost, Tokens, Plan (89% / 100%), and Time Year
                 render("\(p)-dark-cost", DemoPopover(store: makeStore(tab: .cost, preset: preset), loc: loc, dark: true), to: dir)
                 render("\(p)-dark-tokens", DemoPopover(store: makeStore(tab: .tokens, preset: preset), loc: loc, dark: true), to: dir)
                 render("\(p)-dark-plan", DemoPopover(store: makeStore(tab: .subscription, preset: preset, geminiUsed: 11, claudeUsed: 0), loc: loc, dark: true), to: dir)

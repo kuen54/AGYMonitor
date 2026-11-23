@@ -12,6 +12,7 @@ struct TelemetryStepper: View {
     let onDecrement: () -> Void
     let onIncrement: () -> Void
 
+    @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
     @Environment(\.craftHapticsEnabled) private var hapticsEnabled
     @State private var hoverLeft = false
@@ -26,6 +27,9 @@ struct TelemetryStepper: View {
                 .background(hoverLeft && canDecrement ? theme.surfaceRaised : Color.clear)
                 .contentShape(Rectangle())
                 .opacity(canDecrement ? 1 : 0.3)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(loc("stepperPrevious"))
+                .accessibilityAddTraits(.isButton)
                 .onHover { hoverLeft = $0 }
                 .onTapGesture {
                     if canDecrement {
@@ -47,6 +51,9 @@ struct TelemetryStepper: View {
                 .background(hoverRight && canIncrement ? theme.surfaceRaised : Color.clear)
                 .contentShape(Rectangle())
                 .opacity(canIncrement ? 1 : 0.3)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(loc("stepperNext"))
+                .accessibilityAddTraits(.isButton)
                 .onHover { hoverRight = $0 }
                 .onTapGesture {
                     if canIncrement {
@@ -63,19 +70,130 @@ struct PanelHeightKey: Hashable, Sendable {
     let visualMode: TelemetryVisualMode
     let timeRange: TimeRange?
     let isCurrentMonth: Bool
+    let periodScope: UsagePeriodScope?
+    let contentPhase: Int
+    let sessionDeckMode: SessionDeckMode
+    let sessionFilter: SessionStatusFilter
     let sessionBucket: Int
+    let replayBucket: Int
     let monthWeekRows: Int
+
+    /// True while Black Box is in a transient loading state (timeline parse or empty initial index scan).
+    static func isReplayTransientLoading(_ replayState: ReplayStoreState) -> Bool {
+        replayState.timelinePhase.isLoading
+            || (replayState.indexPhase.isLoading && replayState.missions.isEmpty && replayState.timelinePhase.timeline == nil)
+    }
+
+    /// Layout bucket for Black Box replay timelines:
+    /// - `1...6` when `.loaded(let tl)` (matching `ReplayWaterfallDeckView`'s cap at >5 tracks)
+    /// - retains `previous >= 1 ? previous : 1` during transient `.loading` so `‹`/`›` never collapses height
+    /// - `0` when settled `.idle` / `.unavailable` with no loaded timeline.
+    static func replayBucket(for replayState: ReplayStoreState, retaining previous: Int = 0) -> Int {
+        if isReplayTransientLoading(replayState) {
+            return previous >= 1 ? previous : 1
+        }
+        switch replayState.timelinePhase {
+        case .loaded(let tl):
+            return min(max(tl.tracks.count, 1), 6)
+        case .loading:
+            return previous >= 1 ? previous : 1
+        case .idle, .unavailable:
+            return 0
+        }
+    }
+
+    /// `0` when a replay timeline is ready (or retained across transient loading); `1` when settled empty/unavailable.
+    static func replayContentPhase(for replayState: ReplayStoreState) -> Int {
+        if isReplayTransientLoading(replayState) {
+            return 0
+        }
+        return replayState.activeReplay != nil ? 0 : 1
+    }
+
+    /// True when this key represents a transient loading/empty/error content phase rather than ready data.
+    var isTransientContentPhase: Bool {
+        contentPhase != 0
+    }
+
+    /// Only persist settled, canonical (unfiltered) layout heights into global `PopoverHeightMemory`.
+    var shouldPersistToMemory: Bool {
+        guard !isTransientContentPhase else { return false }
+        if tab == .session && sessionDeckMode == .live && sessionFilter != .all {
+            return false
+        }
+        return true
+    }
 
     static func make(
         store: UsageStore,
         tabOverride: DisplayTab? = nil,
-        timeRangeOverride: TimeRange? = nil
+        timeRangeOverride: TimeRange? = nil,
+        sessionDeckModeOverride: SessionDeckMode? = nil,
+        sessionFilterOverride: SessionStatusFilter? = nil,
+        liveSessionBucketOverride: Int? = nil,
+        replayBucketOverride: Int? = nil,
+        replayContentPhaseOverride: Int? = nil
     ) -> PanelHeightKey {
         let tab = tabOverride ?? store.selectedTab
         let range = timeRangeOverride ?? store.timeRange
-        let sessionBucket: Int = (tab == .session)
-            ? min(store.sessionStore.sessions.count, 6)
+        let isCurrentMonthForKey: Bool = {
+            switch tab {
+            case .cost, .tokens:
+                return store.isCurrentMonth
+            case .time:
+                return range == .year ? true : store.isCurrentMonth
+            case .session, .subscription:
+                return true
+            }
+        }()
+        let periodScope: UsagePeriodScope? = (isCurrentMonthForKey && (tab == .cost || tab == .tokens))
+            ? store.selectedPeriodScope
+            : nil
+        let deckMode: SessionDeckMode = (tab == .session)
+            ? (sessionDeckModeOverride ?? store.sessionStore.deckMode)
+            : .live
+        let liveFilter: SessionStatusFilter = (tab == .session && deckMode == .live)
+            ? (sessionFilterOverride ?? .all)
+            : .all
+        let sessionBucket: Int = (tab == .session && deckMode == .live)
+            ? (liveSessionBucketOverride ?? min(store.sessionStore.sessions.count, 6))
             : 0
+        let replayBucket: Int = (tab == .session && deckMode == .blackBox)
+            ? (replayBucketOverride ?? Self.replayBucket(for: store.sessionStore.replayState))
+            : 0
+        let contentPhase: Int = {
+            switch tab {
+            case .cost, .tokens:
+                if store.isCurrentMonth {
+                    return store.effectiveCurrentMonthPhase.value != nil ? 0 : 1
+                } else {
+                    return store.effectiveHistoricalMonthPhase.value != nil ? 0 : 1
+                }
+            case .time:
+                switch range {
+                case .year:
+                    switch store.effectiveYearPhase {
+                    case .loaded, .loading(cached: .some), .failed(_, cached: .some), .empty:
+                        return 0
+                    case .idle, .loading(cached: nil), .failed(_, cached: nil):
+                        return 1
+                    }
+                case .week, .month:
+                    if store.isCurrentMonth {
+                        return store.effectiveCurrentMonthPhase.value?.time != nil ? 0 : 1
+                    } else {
+                        return store.effectiveHistoricalMonthPhase.value?.time != nil ? 0 : 1
+                    }
+                }
+            case .subscription:
+                return store.effectiveQuotaPhase.snapshot != nil ? 0 : 1
+            case .session:
+                if deckMode == .blackBox {
+                    return replayContentPhaseOverride ?? Self.replayContentPhase(for: store.sessionStore.replayState)
+                }
+                return 0
+            }
+        }()
         let monthWeekRows: Int = (tab == .time && range == .month)
             ? TimeLogic.weeksOfMonth(year: store.viewingYear, month: store.viewingMonth).count
             : 0
@@ -83,8 +201,13 @@ struct PanelHeightKey: Hashable, Sendable {
             tab: tab,
             visualMode: store.visualMode,
             timeRange: tab == .time ? range : nil,
-            isCurrentMonth: (tab == .cost || tab == .tokens || tab == .time) ? store.isCurrentMonth : true,
+            isCurrentMonth: isCurrentMonthForKey,
+            periodScope: periodScope,
+            contentPhase: contentPhase,
+            sessionDeckMode: deckMode,
+            sessionFilter: liveFilter,
             sessionBucket: sessionBucket,
+            replayBucket: replayBucket,
             monthWeekRows: monthWeekRows
         )
     }
@@ -101,7 +224,44 @@ struct ContentHeightsKey: PreferenceKey {
 
 @MainActor
 private enum PopoverHeightMemory {
-    static var byKey: [PanelHeightKey: Double] = [:]
+    private static var byKey: [PanelHeightKey: Double] = [:]
+
+    static func snapshot() -> [PanelHeightKey: Double] {
+        byKey
+    }
+
+    static func height(for key: PanelHeightKey) -> Double? {
+        byKey[key]
+    }
+
+    static func record(_ height: Double, for key: PanelHeightKey) {
+        guard height.isFinite, height > 1.0 else { return }
+        if byKey[key] == nil && byKey.count >= 128 {
+            byKey.removeAll(keepingCapacity: true)
+        }
+        byKey[key] = height
+    }
+}
+
+private struct ReplayLayoutSignal: Equatable {
+    let isTransientLoading: Bool
+    let settledBucket: Int
+    let settledContentPhase: Int
+
+    init(state: ReplayStoreState) {
+        let loading = PanelHeightKey.isReplayTransientLoading(state)
+        self.isTransientLoading = loading
+        if loading {
+            self.settledBucket = 0
+            self.settledContentPhase = 0
+        } else if let tl = state.activeReplay {
+            self.settledBucket = min(max(tl.tracks.count, 1), 6)
+            self.settledContentPhase = 0
+        } else {
+            self.settledBucket = 0
+            self.settledContentPhase = 1
+        }
+    }
 }
 
 struct PopoverView: View {
@@ -113,8 +273,16 @@ struct PopoverView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.telemetryStaticRender) private var isStaticRender
     @Environment(\.popoverHostScreenHeight) private var popoverHostScreenHeight
+    @Environment(\.notchViewModel) private var notchVM
     @State private var heightState: PanelHeightState<PanelHeightKey>
     @State private var tabTransition: TabTransitionState<DisplayTab>
+    @State private var sessionDeckMode: SessionDeckMode
+    @State private var liveSessionBucket: Int
+    @State private var activeLiveFilter: SessionStatusFilter = .all
+    @State private var replayLayoutBucket: Int
+    @State private var replayContentPhase: Int
+    @State private var isReplayLoading: Bool
+    @State private var latestContentHeights: [PanelHeightKey: CGFloat] = [:]
     @State private var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
 
     private static let canonicalTabOrder: [DisplayTab] = [.cost, .tokens, .time, .session, .subscription]
@@ -125,17 +293,57 @@ struct PopoverView: View {
         self.onQuit = onQuit
         self.onClose = onClose
         let initialTab = store.selectedTab
-        let initialKey = PanelHeightKey.make(store: store, tabOverride: initialTab)
+        let initialDeckMode = store.sessionStore.deckMode
+        let initialLiveBucket = min(store.sessionStore.sessions.count, 6)
+        let initialReplayState = store.sessionStore.replayState
+        let initialReplayLoading = PanelHeightKey.isReplayTransientLoading(initialReplayState)
+        let initialReplayBucket = PanelHeightKey.replayBucket(for: initialReplayState, retaining: 0)
+        let initialReplayContentPhase = PanelHeightKey.replayContentPhase(for: initialReplayState)
+        let initialKey = PanelHeightKey.make(
+            store: store,
+            tabOverride: initialTab,
+            sessionDeckModeOverride: initialDeckMode,
+            sessionFilterOverride: .all,
+            liveSessionBucketOverride: initialLiveBucket,
+            replayBucketOverride: initialReplayBucket,
+            replayContentPhaseOverride: initialReplayContentPhase
+        )
         _heightState = State(initialValue: PanelHeightState(
             initialKey: initialKey,
             defaultHeight: 460.0,
-            memory: PopoverHeightMemory.byKey
+            memory: PopoverHeightMemory.snapshot()
         ))
         _tabTransition = State(initialValue: TabTransitionState(initial: initialTab))
+        _sessionDeckMode = State(initialValue: initialDeckMode)
+        _liveSessionBucket = State(initialValue: initialLiveBucket)
+        _replayLayoutBucket = State(initialValue: initialReplayBucket)
+        _replayContentPhase = State(initialValue: initialReplayContentPhase)
+        _isReplayLoading = State(initialValue: initialReplayLoading)
+    }
+
+    private func heightKey(
+        tab: DisplayTab? = nil,
+        timeRange: TimeRange? = nil,
+        sessionDeckMode deckModeOverride: SessionDeckMode? = nil,
+        sessionFilter filterOverride: SessionStatusFilter? = nil,
+        liveSessionBucket liveBucketOverride: Int? = nil,
+        replayBucket replayBucketOverride: Int? = nil,
+        replayContentPhase replayPhaseOverride: Int? = nil
+    ) -> PanelHeightKey {
+        PanelHeightKey.make(
+            store: store,
+            tabOverride: tab ?? tabTransition.activeId,
+            timeRangeOverride: timeRange,
+            sessionDeckModeOverride: deckModeOverride ?? sessionDeckMode,
+            sessionFilterOverride: filterOverride ?? activeLiveFilter,
+            liveSessionBucketOverride: liveBucketOverride ?? liveSessionBucket,
+            replayBucketOverride: replayBucketOverride ?? replayLayoutBucket,
+            replayContentPhaseOverride: replayPhaseOverride ?? replayContentPhase
+        )
     }
 
     private var currentHeightKey: PanelHeightKey {
-        PanelHeightKey.make(store: store, tabOverride: tabTransition.activeId)
+        heightKey()
     }
 
     private var loc: Localizer { Localizer(language: store.language) }
@@ -160,9 +368,18 @@ struct PopoverView: View {
     }
 
     private var maxContentHeight: CGFloat {
-        let screenH = popoverHostScreenHeight ?? NSScreen.main?.visibleFrame.height ?? 900
-        let updateReserve: CGFloat = updateService.state.bannerDisplay != .none ? 34 : 0
-        return max(260, screenH - 170 - updateReserve)
+        let screenH = Double(popoverHostScreenHeight ?? NSScreen.main?.visibleFrame.height ?? 900)
+        let closedNotchH = Double(notchVM?.closedNotchSize.height ?? 32)
+        return CGFloat(PanelHeightBudget.maxContentHeight(
+            hostAvailableHeight: screenH,
+            isNotch: isNotch,
+            notchClosedHeight: closedNotchH,
+            hasUpdateBanner: updateService.state.bannerDisplay != .none
+        ))
+    }
+
+    private var isContentScrollable: Bool {
+        !isStaticRender && heightState.currentHeight > Double(maxContentHeight) + 2.0
     }
 
     private var clampedContentHeight: CGFloat {
@@ -213,11 +430,11 @@ struct PopoverView: View {
             )
 
             ZStack(alignment: .top) {
-                ScrollView(showsIndicators: false) {
+                ScrollView(showsIndicators: isContentScrollable) {
                     tabContentWithHeightReporting(for: activeTab, key: activeKey)
                         .frame(maxWidth: .infinity, alignment: .top)
                 }
-                .id(activeTab)
+                .id("\(activeTab.rawValue)-\(activeTab == .session ? sessionDeckMode.rawValue : "")")
                 .transition(
                     TelemetryMotion.tabContentTransition(
                         direction: tabTransition.direction,
@@ -232,9 +449,19 @@ struct PopoverView: View {
             .clipped()
             .onPreferenceChange(ContentHeightsKey.self) { heights in
                 let activeKey = currentHeightKey
-                guard let next = heights[activeKey], next > 1 else { return }
+                let isBlackBoxLoading = (tabTransition.activeId == .session && sessionDeckMode == .blackBox && isReplayLoading)
+                if !isBlackBoxLoading {
+                    for (key, height) in heights where height.isFinite && height > 1 {
+                        if let existing = latestContentHeights[key], abs(existing - height) <= 0.5 {
+                            continue
+                        }
+                        latestContentHeights[key] = height
+                    }
+                }
+                guard !isBlackBoxLoading, let next = heights[activeKey], next.isFinite, next > 1 else { return }
                 var nextState = heightState
                 if nextState.activeKey != activeKey {
+                    seedSharedHeight(&nextState, for: activeKey)
                     _ = nextState.switchKey(to: activeKey, allowsAnimation: allowsPanelHeightAnimation)
                 }
                 let update = nextState.recordMeasurement(
@@ -242,7 +469,10 @@ struct PopoverView: View {
                     height: Double(next),
                     allowsAnimation: allowsPanelHeightAnimation
                 )
-                PopoverHeightMemory.byKey = nextState.memory
+                if activeKey.shouldPersistToMemory, let recorded = nextState.memory[activeKey] {
+                    PopoverHeightMemory.record(recorded, for: activeKey)
+                }
+                guard nextState != heightState else { return }
                 if let update = update, update.animate {
                     withAnimation(panelHeightAnimation) {
                         heightState = nextState
@@ -272,23 +502,15 @@ struct PopoverView: View {
             }
             var nextTransition = tabTransition
             nextTransition.transition(to: nextTab, in: Self.canonicalTabOrder)
-            let nextKey = PanelHeightKey.make(store: store, tabOverride: nextTab)
-            var nextHeight = heightState
-            let heightUpdate = nextHeight.switchKey(
-                to: nextKey,
-                allowsAnimation: allowsPanelHeightAnimation
-            )
+            if nextTab != .session || tabTransition.activeId != .session {
+                activeLiveFilter = .all
+            }
+            let nextKey = heightKey(tab: nextTab, sessionFilter: .all)
             // Keep `tabTransition` outside `withAnimation` so `.animation(tabContentAnimation, value: tabTransition)`
             // animates ONLY the inner tab ZStack, while `heightState` updates non-animated in Menu Bar mode
             // (eliminating VStack vertical centering bounce & NSPopover spring churn) and smoothly in Notch mode.
             tabTransition = nextTransition
-            if let heightUpdate = heightUpdate, heightUpdate.animate {
-                withAnimation(panelHeightAnimation) {
-                    heightState = nextHeight
-                }
-            } else {
-                heightState = nextHeight
-            }
+            applyPanelHeightSwitch(to: nextKey)
         }
         .onChange(of: store.visualMode) { nextMode in
             syncPanelHeightKey()
@@ -321,13 +543,54 @@ struct PopoverView: View {
         }
         .onChange(of: store.viewingMonth) { _ in syncPanelHeightKey() }
         .onChange(of: store.viewingYear) { _ in syncPanelHeightKey() }
+        .onChange(of: store.selectedPeriodScope) { _ in syncPanelHeightKey() }
+        .onChange(of: currentHeightKey) { nextKey in
+            applyPanelHeightSwitch(to: nextKey)
+        }
         .onReceive(
             store.sessionStore.$sessions
                 .map { min($0.count, 6) }
                 .removeDuplicates()
-        ) { _ in
+        ) { nextBucket in
+            liveSessionBucket = nextBucket
+            if tabTransition.activeId == .session && sessionDeckMode == .live {
+                applyPanelHeightSwitch(to: heightKey(liveSessionBucket: nextBucket))
+            }
+        }
+        .onReceive(
+            store.sessionStore.$deckMode
+                .removeDuplicates()
+        ) { nextMode in
+            sessionDeckMode = nextMode
+            if nextMode != .live {
+                activeLiveFilter = .all
+            }
             if tabTransition.activeId == .session {
-                syncPanelHeightKey()
+                let nextFilter: SessionStatusFilter = (nextMode == .live) ? activeLiveFilter : .all
+                applyPanelHeightSwitch(to: heightKey(sessionDeckMode: nextMode, sessionFilter: nextFilter))
+            }
+        }
+        .onReceive(
+            store.sessionStore.$replayState
+                .map { ReplayLayoutSignal(state: $0) }
+                .removeDuplicates()
+        ) { signal in
+            isReplayLoading = signal.isTransientLoading
+            let nextBucket: Int
+            let nextPhase: Int
+            if signal.isTransientLoading {
+                nextBucket = replayLayoutBucket >= 1 ? replayLayoutBucket : 1
+                nextPhase = 0
+            } else {
+                nextBucket = signal.settledBucket
+                nextPhase = signal.settledContentPhase
+            }
+            replayLayoutBucket = nextBucket
+            replayContentPhase = nextPhase
+            if tabTransition.activeId == .session && sessionDeckMode == .blackBox {
+                applyPanelHeightSwitch(
+                    to: heightKey(replayBucket: nextBucket, replayContentPhase: nextPhase)
+                )
             }
         }
         .onReceive(NSWorkspace.shared.notificationCenter.publisher(
@@ -341,17 +604,44 @@ struct PopoverView: View {
         .environment(\.craftHapticsEnabled, instrumentHapticsEnabled)
     }
 
-    private func syncPanelHeightKey() {
-        let nextKey = currentHeightKey
+    private func seedSharedHeight(_ state: inout PanelHeightState<PanelHeightKey>, for key: PanelHeightKey) {
+        guard state.activeKey != key,
+              state.memory[key] == nil,
+              let remembered = PopoverHeightMemory.height(for: key) else {
+            return
+        }
+        _ = state.recordMeasurement(
+            for: key,
+            height: remembered,
+            allowsAnimation: allowsPanelHeightAnimation
+        )
+    }
+
+    private func applyPanelHeightSwitch(to nextKey: PanelHeightKey) {
         var nextHeight = heightState
-        if let update = nextHeight.switchKey(to: nextKey, allowsAnimation: allowsPanelHeightAnimation),
-           update.animate {
+        seedSharedHeight(&nextHeight, for: nextKey)
+        let switchUpdate = nextHeight.switchKey(to: nextKey, allowsAnimation: allowsPanelHeightAnimation)
+        var measurementUpdate: PanelHeightUpdate? = nil
+        if let freshHeight = latestContentHeights[nextKey], freshHeight.isFinite, freshHeight > 1 {
+            measurementUpdate = nextHeight.recordMeasurement(
+                for: nextKey,
+                height: Double(freshHeight),
+                allowsAnimation: allowsPanelHeightAnimation
+            )
+        }
+        guard nextHeight != heightState else { return }
+        let shouldAnimate = (measurementUpdate?.animate ?? false) || (switchUpdate?.animate ?? false)
+        if shouldAnimate {
             withAnimation(panelHeightAnimation) {
                 heightState = nextHeight
             }
         } else {
             heightState = nextHeight
         }
+    }
+
+    private func syncPanelHeightKey() {
+        applyPanelHeightSwitch(to: currentHeightKey)
     }
 
     /// Emits `ContentHeightsKey` for the active tab. `.time` reports its own height from inside
@@ -386,7 +676,10 @@ struct PopoverView: View {
                     .foregroundColor(theme.inkPrimary)
                     .lineLimit(1)
 
-                liveHeaderTag
+                LiveHeaderTagView(sessionStore: store.sessionStore) {
+                    store.sessionStore.deckMode = .live
+                    store.selectedTab = .session
+                }
             }
             .frame(height: 20, alignment: .leading)
 
@@ -402,41 +695,6 @@ struct PopoverView: View {
             .animation(tabContentAnimation, value: headerAccessoryTransitionId)
         }
         .frame(height: 20)
-    }
-
-    @ViewBuilder
-    private var liveHeaderTag: some View {
-        let waitingCount = store.sessionStore.sessions.filter { $0.status == .waiting }.count
-        let busyCount = store.sessionStore.sessions.filter { $0.status == .busy }.count
-        if waitingCount > 0 {
-            HStack(spacing: 4) {
-                Rectangle()
-                    .fill(theme.signalAmber)
-                    .frame(width: 4.5, height: 4.5)
-                    .rotationEffect(.degrees(45))
-                Text(String(format: loc("waitTagFmt"), waitingCount))
-                    .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
-                    .tracking(0.4)
-                    .foregroundColor(theme.signalAmber)
-                    .lineLimit(1)
-            }
-            .padding(.horizontal, 5.5)
-            .padding(.vertical, 2)
-            .background(theme.signalAmber.opacity(theme.isDark ? 0.12 : 0.08))
-            .overlay(Rectangle().strokeBorder(theme.signalAmber.opacity(0.48), lineWidth: 0.75))
-            .contentShape(Rectangle())
-            .onTapGesture { store.selectedTab = .session }
-        } else if busyCount > 0 {
-            HStack(spacing: 3.5) {
-                Circle().fill(theme.accent).frame(width: 4, height: 4)
-                Text(String(format: loc("runTagFmt"), busyCount))
-                    .font(.system(size: 8.5, weight: .medium, design: .monospaced))
-                    .foregroundColor(theme.accent)
-                    .lineLimit(1)
-            }
-            .contentShape(Rectangle())
-            .onTapGesture { store.selectedTab = .session }
-        }
     }
 
     @ViewBuilder
@@ -469,10 +727,7 @@ struct PopoverView: View {
                 )
             }
         case .session:
-            Text(String(format: loc("liveTagFmt"), store.sessionStore.liveCount))
-                .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
-                .foregroundColor(theme.inkSecondary)
-                .lineLimit(1)
+            LiveHeaderCountView(sessionStore: store.sessionStore)
         case .subscription:
             if let badge = formatPlanTierBadge(store.subscriptionQuota?.planTier) {
                 let badgeColor = theme.isMultiColorSpectrum ? theme.accent : theme.accentSecondary
@@ -501,7 +756,14 @@ struct PopoverView: View {
                 sessionStore: store.sessionStore,
                 visualMode: store.visualMode,
                 isActiveTab: store.selectedTab == .session,
-                onClose: onClose
+                onClose: onClose,
+                onFilterChange: { nextFilter in
+                    guard activeLiveFilter != nextFilter else { return }
+                    activeLiveFilter = nextFilter
+                    if tabTransition.activeId == .session && sessionDeckMode == .live {
+                        applyPanelHeightSwitch(to: heightKey(sessionFilter: nextFilter))
+                    }
+                }
             )
         case .subscription:
             SubscriptionView(store: store)
@@ -521,7 +783,7 @@ struct PopoverView: View {
             HStack(spacing: 4) {
                 LanguageSwitcher(store: store)
                 footerSeparator
-                OptionsMenu(store: store, loc: loc)
+                OptionsMenu(store: store, loc: loc, onClose: onClose)
                 footerSeparator
                 RefreshToolbarButton(isLoading: store.isLoading, helpText: loc("refresh")) {
                     store.refresh(force: true)
@@ -609,6 +871,67 @@ struct PopoverView: View {
     }
 }
 
+// MARK: - Live Header Session Subviews (Isolated SessionStore Observation)
+
+/// Isolated header pill observing `SessionStore` directly so `WAIT N` / `RUN N` updates
+/// in real time on 2s polls without re-evaluating `PopoverView.body`.
+private struct LiveHeaderTagView: View {
+    @ObservedObject var sessionStore: SessionStore
+    let onTap: () -> Void
+
+    @Environment(\.localizer) private var loc
+    @Environment(\.agyTheme) private var theme
+
+    var body: some View {
+        let waitingCount = sessionStore.sessions.filter { $0.status == .waiting }.count
+        let busyCount = sessionStore.sessions.filter { $0.status == .busy }.count
+        if waitingCount > 0 {
+            HStack(spacing: 4) {
+                Rectangle()
+                    .fill(theme.signalAmber)
+                    .frame(width: 4.5, height: 4.5)
+                    .rotationEffect(.degrees(45))
+                Text(String(format: loc("waitTagFmt"), waitingCount))
+                    .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
+                    .tracking(0.4)
+                    .foregroundColor(theme.signalAmber)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 5.5)
+            .padding(.vertical, 2)
+            .background(theme.signalAmber.opacity(theme.isDark ? 0.12 : 0.08))
+            .overlay(Rectangle().strokeBorder(theme.signalAmber.opacity(0.48), lineWidth: 0.75))
+            .contentShape(Rectangle())
+            .onTapGesture(perform: onTap)
+        } else if busyCount > 0 {
+            HStack(spacing: 3.5) {
+                Circle().fill(theme.accent).frame(width: 4, height: 4)
+                Text(String(format: loc("runTagFmt"), busyCount))
+                    .font(.system(size: 8.5, weight: .medium, design: .monospaced))
+                    .foregroundColor(theme.accent)
+                    .lineLimit(1)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture(perform: onTap)
+        }
+    }
+}
+
+/// Isolated right-aligned Tab 04 `N LIVE` accessory observing `SessionStore` directly.
+private struct LiveHeaderCountView: View {
+    @ObservedObject var sessionStore: SessionStore
+
+    @Environment(\.localizer) private var loc
+    @Environment(\.agyTheme) private var theme
+
+    var body: some View {
+        Text(String(format: loc("liveTagFmt"), sessionStore.liveCount))
+            .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+            .foregroundColor(theme.inkSecondary)
+            .lineLimit(1)
+    }
+}
+
 // MARK: - In-App Update Status Strip
 
 /// Compact Swiss Telemetry strip rendered above the footer when a new GitHub Release
@@ -664,6 +987,8 @@ struct UpdateBannerStrip: View {
                         .onTapGesture {
                             updateService.openReleasePage()
                         }
+                        .accessibilityAddTraits(.isButton)
+                        .accessibilityLabel(loc("updateBannerView"))
 
                     Image(systemName: "xmark")
                         .font(.system(size: 8.5, weight: .bold))
@@ -680,6 +1005,8 @@ struct UpdateBannerStrip: View {
                             PointingCursorCoordinator.shared.setPointing(false, token: "updateBanner.skip")
                             updateService.dismissAvailableUpdate()
                         }
+                        .accessibilityAddTraits(.isButton)
+                        .accessibilityLabel(loc("updateBannerSkip"))
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 6)

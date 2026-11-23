@@ -75,7 +75,7 @@ struct UsageScriptClient {
             }
             DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 120, execute: timeoutItem)
             // Read pipe BEFORE waitUntilExit to avoid deadlock when output > 64KB
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let data = (try? pipe.fileHandleForReading.readToEnd()) ?? Data()
             process.waitUntilExit()
 
             stateLock.lock()

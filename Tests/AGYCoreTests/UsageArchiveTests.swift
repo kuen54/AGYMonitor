@@ -73,4 +73,37 @@ struct UsageArchiveTests {
         let yearSecs = UsageArchiveLogic.yearSeconds(archive, year: 2026)
         #expect(yearSecs == ["2026-11-16": 5400, "2026-11-15": 1800])
     }
+
+    @Test("UsageArchiveLogic rejects 'unknown' and malformed day keys on merge and read")
+    func rejectsMalformedDayKeys() {
+        var archive = UsageArchiveData()
+
+        let bogusModel = ModelUsage(id: "carbon", name: "Carbon", cost: 1.0, messages: 1, inputTokens: 100, outputTokens: 20)
+        let bogusDays = [
+            DailyUsage(dateString: "unknown", day: 1, cost: 1.0, totalTokens: 120, models: [bogusModel]),
+            DailyUsage(dateString: "../2026-11", day: 1, cost: 1.0, totalTokens: 120, models: [bogusModel]),
+            DailyUsage(dateString: "2026-02-30", day: 30, cost: 1.0, totalTokens: 120, models: [bogusModel]),
+            DailyUsage(dateString: "2026-11-05", day: 5, cost: 1.0, totalTokens: 120, models: [bogusModel]),
+        ]
+        let changed = UsageArchiveLogic.mergeDaily(bogusDays, into: &archive)
+        #expect(changed == ["2026-11-05"])
+        #expect(Array(archive.days.keys) == ["2026-11-05"])
+
+        let td = TimeData(gapMinutes: 10, days: [
+            "unknown": DayTimeUsage(intervals: [], totalSeconds: 120),
+            "2026-11-31": DayTimeUsage(intervals: [], totalSeconds: 120),
+            "2026-11-05": DayTimeUsage(intervals: [], totalSeconds: 120),
+        ])
+        #expect(UsageArchiveLogic.mergeTime(td, into: &archive) == ["2026-11-05"])
+        #expect(UsageArchiveLogic.mergeYearSeconds(["unknown": 500, "9999-01-01": 500], into: &archive).isEmpty)
+
+        // Even if corrupted keys were injected directly into UsageArchiveData, reads filter them out
+        archive.days["unknown"] = ArchivedDay(models: ["carbon": ArchivedModel(inputTokens: 10, outputTokens: 10, cacheRead: 0, cacheWrite: 0, messages: 1, cost: 0.1)], timeSeconds: 300)
+        archive.days["2026-11-xx"] = ArchivedDay(models: ["carbon": ArchivedModel(inputTokens: 10, outputTokens: 10, cacheRead: 0, cacheWrite: 0, messages: 1, cost: 0.1)], timeSeconds: 300)
+        #expect(UsageArchiveLogic.dailyBreakdown(archive, yearMonth: "2026-11").map(\.dateString) == ["2026-11-05"])
+        #expect(UsageArchiveLogic.dailyBreakdown(archive, yearMonth: "unknown").isEmpty)
+        #expect(Array(UsageArchiveLogic.timeDays(archive, yearMonth: "2026-11").keys) == ["2026-11-05"])
+        #expect(UsageArchiveLogic.yearSeconds(archive, year: 2026) == ["2026-11-05": 120])
+        #expect(UsageArchiveLogic.yearSeconds(archive, year: 9999).isEmpty)
+    }
 }

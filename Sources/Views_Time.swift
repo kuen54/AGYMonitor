@@ -17,7 +17,6 @@ struct TimeTabView: View {
     @ObservedObject var store: UsageStore
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
-    @Environment(\.telemetryPanelVisible) private var isPanelVisible
     @Environment(\.telemetryStaticRender) private var isStaticRender
     @Environment(\.telemetryReduceMotion) private var reduceMotion
     @State private var rangeTransition: TabTransitionState<TimeRange>
@@ -126,9 +125,9 @@ struct TimeTabView: View {
 
     private var activeTimeData: TimeData? {
         if store.isCurrentMonth {
-            return store.effectiveCurrentMonthPhase.value?.time ?? store.viewingTimeData
+            return store.effectiveCurrentMonthPhase.value?.time
         }
-        return store.effectiveHistoricalMonthPhase.value?.time ?? store.viewingTimeData
+        return store.effectiveHistoricalMonthPhase.value?.time
     }
 
     @ViewBuilder
@@ -297,11 +296,15 @@ struct WeekTimeChart: View {
     @Environment(\.agyTheme) private var theme
     @Environment(\.telemetryPanelVisible) private var isPanelVisible
 
-    private struct HoveredInterval: Equatable {
+    private struct HoveredInterval: Equatable, Sendable {
         let dayKey: String
         let interval: ActiveInterval
     }
-    @State private var hovered: HoveredInterval? = nil
+    @State private var inspection = ChartInspectionState<[String], HoveredInterval>(scope: [])
+
+    private var hovered: HoveredInterval? {
+        inspection.scope == dayKeys ? inspection.target : nil
+    }
 
     private let rowHeight: CGFloat = 21
     private let labelWidth: CGFloat = 32
@@ -377,8 +380,10 @@ struct WeekTimeChart: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 9)
         }
-        .onChange(of: dayKeys) { _ in hovered = nil }
-        .onChange(of: isPanelVisible) { visible in if !visible { hovered = nil } }
+        .onAppear { inspection.syncScope(dayKeys) }
+        .onChange(of: dayKeys) { nextKeys in inspection.syncScope(nextKeys) }
+        .onChange(of: isPanelVisible) { visible in if !visible { inspection.reset() } }
+        .onDisappear { inspection.reset() }
     }
 
     private var hoverReadout: some View {
@@ -465,14 +470,15 @@ struct WeekTimeChart: View {
             .onContinuousHover(coordinateSpace: .local) { phase in
                 switch phase {
                 case .active(let pt):
+                    inspection.syncScope(dayKeys)
                     if let hit = Self.hitTestInterval(x: pt.x, width: w, intervals: intervals) {
-                        hovered = HoveredInterval(dayKey: dayKey, interval: hit)
+                        inspection.setTarget(HoveredInterval(dayKey: dayKey, interval: hit))
                     } else if hovered?.dayKey == dayKey {
-                        hovered = nil
+                        inspection.reset()
                     }
                 case .ended:
                     if hovered?.dayKey == dayKey {
-                        hovered = nil
+                        inspection.reset()
                     }
                 }
             }
@@ -545,11 +551,15 @@ struct MonthTimeChart: View {
     @Environment(\.agyTheme) private var theme
     @Environment(\.telemetryPanelVisible) private var isPanelVisible
 
-    private struct HoveredInterval: Equatable {
+    private struct HoveredInterval: Equatable, Sendable {
         let dayKey: String
         let interval: ActiveInterval
     }
-    @State private var hovered: HoveredInterval? = nil
+    @State private var inspection = ChartInspectionState<String, HoveredInterval>(scope: "")
+
+    private var hovered: HoveredInterval? {
+        inspection.scope == monthPrefix ? inspection.target : nil
+    }
 
     private let rowHeight: CGFloat = 25
     private let labelWidth: CGFloat = 32
@@ -614,13 +624,19 @@ struct MonthTimeChart: View {
             .padding(.top, 8)
             .padding(.bottom, 8)
         }
-        .onChange(of: monthPrefix) { _ in
-            hovered = nil
+        .onAppear {
+            inspection.syncScope(monthPrefix)
+        }
+        .onChange(of: monthPrefix) { nextPrefix in
+            inspection.syncScope(nextPrefix)
         }
         .onChange(of: isPanelVisible) { visible in
             if !visible {
-                hovered = nil
+                inspection.reset()
             }
+        }
+        .onDisappear {
+            inspection.reset()
         }
     }
 
@@ -725,6 +741,7 @@ struct MonthTimeChart: View {
                 switch phase {
                 case .active(let pt):
                     guard dayW > 0 else { return }
+                    inspection.syncScope(monthPrefix)
                     let idx = min(dayKeys.count - 1, max(0, Int(floor(pt.x / dayW))))
                     let key = dayKeys[idx]
                     if key.hasPrefix(monthPrefix), let day = timeData.days[key] {
@@ -736,15 +753,15 @@ struct MonthTimeChart: View {
                             innerW: innerW,
                             intervals: day.intervals
                         ) {
-                            hovered = HoveredInterval(dayKey: key, interval: hit)
+                            inspection.setTarget(HoveredInterval(dayKey: key, interval: hit))
                         } else if let h = hovered, dayKeys.contains(h.dayKey) {
-                            hovered = nil
+                            inspection.reset()
                         }
                     } else if let h = hovered, dayKeys.contains(h.dayKey) {
-                        hovered = nil
+                        inspection.reset()
                     }
                 case .ended:
-                    if let h = hovered, dayKeys.contains(h.dayKey) { hovered = nil }
+                    if let h = hovered, dayKeys.contains(h.dayKey) { inspection.reset() }
                 }
             }
         }
@@ -804,7 +821,11 @@ struct YearHeatmap: View {
     @Environment(\.agyTheme) private var theme
     @Environment(\.telemetryPanelVisible) private var isPanelVisible
 
-    @State private var hoveredKey: String? = nil
+    @State private var inspection = ChartInspectionState<Int, String>(scope: 0)
+
+    private var hoveredKey: String? {
+        inspection.scope == store.viewingTimeYear ? inspection.target : nil
+    }
 
     private let cellSize: CGFloat = 5.9
     private let cellSpacing: CGFloat = 1.1
@@ -841,12 +862,14 @@ struct YearHeatmap: View {
             }
         }
         .onAppear {
+            inspection.syncScope(store.viewingTimeYear)
             if case .idle = store.effectiveYearPhase {
                 store.loadYearTime(store.viewingTimeYear)
             }
         }
-        .onChange(of: store.viewingTimeYear) { _ in hoveredKey = nil }
-        .onChange(of: isPanelVisible) { visible in if !visible { hoveredKey = nil } }
+        .onChange(of: store.viewingTimeYear) { nextYear in inspection.syncScope(nextYear) }
+        .onChange(of: isPanelVisible) { visible in if !visible { inspection.reset() } }
+        .onDisappear { inspection.reset() }
     }
 
     @ViewBuilder
@@ -923,7 +946,7 @@ struct YearHeatmap: View {
             ForEach(0..<7, id: \.self) { row in
                 HStack(spacing: cellSpacing) {
                     ForEach(0..<53, id: \.self) { col in
-                        cell(col: col, row: row, startMonday: startMonday,
+                        cell(col: col, row: row, year: year, startMonday: startMonday,
                              yearPrefix: yearPrefix, days: days)
                     }
                 }
@@ -932,7 +955,7 @@ struct YearHeatmap: View {
     }
 
     @ViewBuilder
-    private func cell(col: Int, row: Int, startMonday: Date?, yearPrefix: String,
+    private func cell(col: Int, row: Int, year: Int, startMonday: Date?, yearPrefix: String,
                       days: [String: Int]) -> some View {
         let key = startMonday.flatMap { TimeLogic.dayKey(col: col, row: row, startMonday: $0) }
         if let key = key, key.hasPrefix(yearPrefix) {
@@ -945,7 +968,14 @@ struct YearHeatmap: View {
                         ? Rectangle().stroke(theme.inkPrimary, lineWidth: 1)
                         : nil
                 )
-                .onHover { h in hoveredKey = h ? key : (hoveredKey == key ? nil : hoveredKey) }
+                .onHover { inside in
+                    inspection.syncScope(year)
+                    if inside {
+                        inspection.setTarget(key)
+                    } else if inspection.target == key {
+                        inspection.reset()
+                    }
+                }
         } else {
             Color.clear.frame(width: cellSize, height: cellSize)
         }

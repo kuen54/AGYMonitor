@@ -101,7 +101,7 @@ class TestPython39CompatibilityAndMeta(unittest.TestCase):
     def test_python39_syntax_and_version(self) -> None:
         src = SCRIPT_PATH.read_text(encoding="utf-8")
         tree = ast.parse(src, filename=str(SCRIPT_PATH))
-        self.assertEqual(au.__version__, "1.9.0")
+        self.assertEqual(au.__version__, "2.0.0")
         self.assertEqual(
             au.MODEL_CLASSES,
             ("carbon", "argon", "neon", "hydrogen", "flash", "claude", "other"),
@@ -361,6 +361,30 @@ class TestPricingAndFallback(unittest.TestCase):
         self.assertAlmostEqual(p_38["input"], 1.50)
         self.assertAlmostEqual(p_38["output"], 7.50)
         self.assertAlmostEqual(p_38["cache_read"], 0.15)
+
+    def test_corrupt_pricing_cache_deleted_and_backoff_written_when_offline_fetch_fails(self) -> None:
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_file = self.cache_dir / "litellm_pricing.json"
+        backoff_file = self.cache_dir / "litellm_pricing.json.backoff"
+
+        for payload in ("{corrupt json!!!", "[1, 2, 3]"):
+            with self.subTest(payload=payload):
+                backoff_file.unlink(missing_ok=True)
+                cache_file.write_text(payload, encoding="utf-8")
+
+                with mock.patch.object(
+                    au.urllib.request, "urlopen", side_effect=OSError("offline")
+                ) as mock_open:
+                    au.load_pricing(offline=False)
+                    self.assertEqual(au._PRICING_SOURCE, "fallback")
+                    self.assertEqual(mock_open.call_count, 1)
+                    self.assertFalse(cache_file.exists())
+                    self.assertTrue(backoff_file.exists())
+
+                    # Subsequent scan honors `.backoff` and does NOT stall on network again.
+                    au.load_pricing(offline=False)
+                    self.assertEqual(au._PRICING_SOURCE, "fallback")
+                    self.assertEqual(mock_open.call_count, 1)
 
 
 class TestScannerTokenMathDedupSentinelAndSQLite(unittest.TestCase):
@@ -1216,6 +1240,121 @@ class TestActiveTimeIntervalsAndCache(unittest.TestCase):
         self.assertEqual(len(yr["days"]), 365)
         local_day = datetime.fromisoformat("2026-11-16T02:00:00+00:00").astimezone().strftime("%Y-%m-%d")
         self.assertEqual(yr["days"][local_day], 180)
+
+    def test_nan_inf_guards_time_year_cap_and_strict_json(self) -> None:
+        # 1. _is_num and _nonneg_int reject NaN/Inf cleanly without raising
+        for bad in (float("nan"), float("inf"), float("-inf"), True, False, None, "nan"):
+            self.assertFalse(au._is_num(bad))
+            self.assertEqual(au._nonneg_int(bad), 0)
+        self.assertTrue(au._is_num(1.5))
+        self.assertTrue(au._is_num(0))
+
+        # 2. Malicious/corrupt NaN & Inf in LiteLLM pricing entries are rejected safely
+        self.assertIsNone(au._extract_litellm_entry({
+            "input_cost_per_token": float("nan"),
+            "output_cost_per_token": 0.00001,
+        }))
+        self.assertIsNone(au._extract_litellm_entry({
+            "input_cost_per_token": float("inf"),
+            "output_cost_per_token": 0.00001,
+        }))
+        self.assertIsNone(au._extract_litellm_entry({
+            "input_cost_per_token": 1e308,
+            "output_cost_per_token": 0.00001,
+        }))
+        # Non-finite cache_read falls back to inp * 0.1 rather than poisoning pricing
+        clean_entry = au._extract_litellm_entry({
+            "input_cost_per_token": 1e-6,
+            "output_cost_per_token": 2e-6,
+            "cache_read_input_token_cost": float("nan"),
+            "cache_creation_input_token_cost": float("inf"),
+        })
+        self.assertIsNotNone(clean_entry)
+        assert clean_entry is not None
+        self.assertAlmostEqual(clean_entry["input"], 1.0)
+        self.assertAlmostEqual(clean_entry["cache_read"], 0.1)
+        self.assertAlmostEqual(clean_entry["cache_write"], 1.25)
+
+        # 3. Transcript containing literal NaN/Infinity token counts parses safely and emits strict JSON (allow_nan=False)
+        _write_transcript(
+            self.gemini_dir,
+            "antigravity-cli",
+            "nan-conv",
+            [
+                '{"step_index": 1, "type": "PLANNER_RESPONSE", "created_at": "2026-11-16T03:00:00Z", "model": "gemini-4-carbon-high", "input_tokens": NaN, "output_tokens": Infinity, "cache_read_tokens": -Infinity}',
+                '{"step_index": 2, "type": "PLANNER_RESPONSE", "created_at": "2026-11-16T03:01:00Z", "model": "gemini-4-carbon-high", "input_tokens": 2000, "output_tokens": 500, "cache_read_tokens": 1000}',
+            ],
+        )
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT_PATH),
+                "--json",
+                "--no-sessions",
+                "--offline",
+                "--data-dir",
+                str(self.gemini_dir),
+                "--cache-dir",
+                str(self.cache_dir),
+                "--range",
+                "2026-11-01:2026-11-30",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        parsed = json.loads(proc.stdout)
+        self.assertEqual(parsed["totals_by_model"]["carbon"]["input_tokens"], 2000)
+        # Re-serializing with allow_nan=False succeeds (zero NaN/Inf in payload)
+        json.dumps(parsed, allow_nan=False)
+
+        # 4. _sanitize_json_value strips non-finite floats even if injected directly into print_json
+        sanitized = au._sanitize_json_value({
+            "a": float("nan"),
+            "b": [1.0, float("inf"), float("-inf")],
+            "c": {"nested": float("nan")},
+        })
+        self.assertEqual(sanitized, {"a": 0.0, "b": [1.0, 0.0, 0.0], "c": {"nested": 0.0}})
+        json.dumps(sanitized, allow_nan=False)
+
+        # 5. --time-year 9999 returns clean exit code 2 instead of datetime(10000, 1, 1) ValueError crash
+        proc_9999 = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT_PATH),
+                "--time-year",
+                "9999",
+                "--data-dir",
+                str(self.gemini_dir),
+                "--cache-dir",
+                str(self.cache_dir),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(proc_9999.returncode, 2)
+        self.assertIn("1970-9998", proc_9999.stderr)
+        self.assertNotIn("Traceback", proc_9999.stderr)
+
+        # 6. _fetch_litellm_pricing bounds resp.read(16 * 1024 * 1024)
+        read_sizes: List[Optional[int]] = []
+
+        class _FakeResp:
+            def read(self, amt: Optional[int] = None) -> bytes:
+                read_sizes.append(amt)
+                return b'{"gemini/gemini-2.5-flash":{"input_cost_per_token":1e-6,"output_cost_per_token":2e-6}}'
+
+            def __enter__(self) -> "_FakeResp":
+                return self
+
+            def __exit__(self, *args: Any) -> None:
+                return None
+
+        with mock.patch.object(au.urllib.request, "urlopen", return_value=_FakeResp()):
+            fetched = au._fetch_litellm_pricing(offline=False)
+        self.assertIsNotNone(fetched)
+        self.assertEqual(read_sizes, [16 * 1024 * 1024])
 
 
 if __name__ == "__main__":

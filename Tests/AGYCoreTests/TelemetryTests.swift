@@ -169,6 +169,58 @@ struct TelemetryTests {
         #expect(state.activeWing == .waiting(sessionId: "s-wait", workspace: "hyperframes", surface: "cli", needsConfirm: true))
     }
 
+    @Test("NotchLiveWingMachine.dismissed only suppresses dismissedWaitingIds for active .waiting wing, never .done")
+    func notchLiveWingDismissDoneDoesNotSuppressFutureWaiting() {
+        var state = NotchLiveWingState()
+        let t0 = Date(timeIntervalSince1970: 20_000)
+
+        let doneSnap = NotchWingSessionSnapshot(
+            sessionId: "s-1",
+            workspace: "AGYMonitor",
+            surface: "cli",
+            isWaiting: false,
+            needsConfirm: false,
+            isDoneUnseen: true
+        )
+
+        // Show .done wing for s-1
+        let eShow = NotchLiveWingMachine.reduce(&state, event: .sessionsUpdated([doneSnap], now: t0))
+        #expect(eShow == [.scheduleDoneRetract(after: 5.0)])
+        #expect(state.activeWing == .done(sessionId: "s-1", workspace: "AGYMonitor", surface: "cli"))
+
+        // Dismissing an unrelated ID is a no-op and does NOT poison dismissedWaitingIds
+        let eOther = NotchLiveWingMachine.reduce(&state, event: .dismissed(sessionId: "unrelated"))
+        #expect(eOther == [])
+        #expect(state.activeWing == .done(sessionId: "s-1", workspace: "AGYMonitor", surface: "cli"))
+        #expect(state.dismissedWaitingIds.isEmpty)
+
+        // Tapping/dismissing .done wing clears activeWing + cancels retract, NEVER inserts into dismissedWaitingIds
+        let eDismissDone = NotchLiveWingMachine.reduce(&state, event: .dismissed(sessionId: "s-1"))
+        #expect(eDismissDone == [.cancelDoneRetract])
+        #expect(state.activeWing == nil)
+        #expect(state.doneBannerExpiresAt == nil)
+        #expect(state.dismissedWaitingIds.isEmpty)
+
+        // Immediately afterwards, s-1 enters .waiting -> MUST appear without being suppressed!
+        let waitingSnap = NotchWingSessionSnapshot(
+            sessionId: "s-1",
+            workspace: "AGYMonitor",
+            surface: "cli",
+            isWaiting: true,
+            needsConfirm: true,
+            isDoneUnseen: false
+        )
+        let eWait = NotchLiveWingMachine.reduce(&state, event: .sessionsUpdated([waitingSnap], now: t0.addingTimeInterval(1)))
+        #expect(eWait == [])
+        #expect(state.activeWing == .waiting(sessionId: "s-1", workspace: "AGYMonitor", surface: "cli", needsConfirm: true))
+
+        // Dismissing active .waiting wing DOES insert into dismissedWaitingIds
+        let eDismissWait = NotchLiveWingMachine.reduce(&state, event: .dismissed(sessionId: "s-1"))
+        #expect(eDismissWait == [])
+        #expect(state.activeWing == nil)
+        #expect(state.dismissedWaitingIds == ["s-1"])
+    }
+
     @Test("SessionNavLogic wraps cleanly up and down")
     func sessionNavMovement() {
         #expect(SessionNavLogic.moveSelection(currentId: nil, orderedIds: [], delta: 1) == nil)

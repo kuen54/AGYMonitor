@@ -195,14 +195,19 @@ public enum TranscriptParse {
     }
 
     /// One in-order pass over a tail buffer's lines, last qualifying entry winning.
-    public static func scan(_ buffer: Data) -> TranscriptSummary {
-        scan(text: String(decoding: buffer, as: UTF8.self))
+    /// Pass `fileMtime` (Unix epoch seconds) when available so a trailing `PLANNER_RESPONSE`
+    /// whose `created_at` is the turn start time resolves its true completion time & duration.
+    public static func scan(_ buffer: Data, fileMtime: TimeInterval? = nil) -> TranscriptSummary {
+        scan(text: String(decoding: buffer, as: UTF8.self), fileMtime: fileMtime)
     }
 
     /// String overload — handles both Antigravity `transcript.jsonl` step records
     /// (`USER_INPUT`, `PLANNER_RESPONSE`, `SYSTEM_MESSAGE`, `GENERIC`) and legacy
     /// `ai-title` / `last-prompt` / `user` records.
-    public static func scan(text: String) -> TranscriptSummary {
+    public static func scan(text: String, fileMtime: TimeInterval? = nil) -> TranscriptSummary {
+        let maxInferredTurnDuration: Double = 600.0
+        let validEpochFloor: Double = 946_684_800.0
+
         var title: String? = nil
         var instruction: String? = nil
         var lastStep: TranscriptStep? = nil
@@ -215,6 +220,14 @@ public enum TranscriptParse {
         var activePlannerHasQuestion = false
         var completedToolOutputsAfterPlanner = 0
 
+        // Tracks the most recent PLANNER_RESPONSE awaiting its completion bound
+        // (Antigravity writes `created_at` = turn start time, and only flushes the
+        // line to `transcript.jsonl` once the entire LLM generation completes).
+        var pendingSampleStepIndex: Int? = nil
+        var pendingSampleStartTs: Double = 0
+        var pendingSampleTokens: Int = 0
+        var pendingSampleHadTools: Bool = false
+
         for sub in text.split(separator: "\n", omittingEmptySubsequences: true) {
             let line = String(sub)
 
@@ -226,6 +239,27 @@ public enum TranscriptParse {
             }
 
             if let step = parseStep(line) {
+                // If a prior PLANNER_RESPONSE is awaiting its completion timestamp, close it
+                // when an automated continuation step (GENERIC tool result, next PLANNER_RESPONSE,
+                // or SYSTEM_MESSAGE after a tool-calling turn) immediately follows within 600s.
+                if let pendingIdx = pendingSampleStepIndex, step.stepIndex > pendingIdx {
+                    let isAutomatedFollowup = (step.type == .generic || step.type == .plannerResponse)
+                        || (pendingSampleHadTools && step.type == .systemMessage)
+                    if isAutomatedFollowup,
+                       let nextTs = step.createdAt?.timeIntervalSince1970,
+                       nextTs >= pendingSampleStartTs,
+                       (nextTs - pendingSampleStartTs) <= maxInferredTurnDuration {
+                        let delta = nextTs - pendingSampleStartTs
+                        outputSamplesByStep[pendingIdx] = OutputTokenSample(
+                            stepIndex: pendingIdx,
+                            timestamp: nextTs,
+                            outputTokens: pendingSampleTokens,
+                            durationSeconds: delta >= 1.0 ? delta : nil
+                        )
+                    }
+                    pendingSampleStepIndex = nil
+                }
+
                 lastStep = step
                 if let model = step.model, !model.isEmpty {
                     lastSeenModel = model
@@ -253,11 +287,16 @@ public enum TranscriptParse {
                         }
                     }
                     if step.outputTokens > 0, let createdAt = step.createdAt {
+                        let startTs = createdAt.timeIntervalSince1970
                         outputSamplesByStep[step.stepIndex] = OutputTokenSample(
                             stepIndex: step.stepIndex,
-                            timestamp: createdAt.timeIntervalSince1970,
+                            timestamp: startTs,
                             outputTokens: step.outputTokens
                         )
+                        pendingSampleStepIndex = step.stepIndex
+                        pendingSampleStartTs = startTs
+                        pendingSampleTokens = step.outputTokens
+                        pendingSampleHadTools = !step.toolNames.isEmpty
                     }
                     if step.status == .error {
                         activePlannerTools = []
@@ -279,6 +318,25 @@ public enum TranscriptParse {
                     instruction = txt
                 }
             }
+        }
+
+        // If the final step in the transcript is a completed PLANNER_RESPONSE with output tokens,
+        // `fileMtime` is the exact disk-flush completion time (e.g. a 71s coding turn whose
+        // `created_at` was 71s earlier).
+        if let pendingIdx = pendingSampleStepIndex,
+           lastStep?.stepIndex == pendingIdx,
+           let mtime = fileMtime,
+           mtime.isFinite,
+           mtime > validEpochFloor,
+           mtime >= pendingSampleStartTs,
+           (mtime - pendingSampleStartTs) <= maxInferredTurnDuration {
+            let delta = mtime - pendingSampleStartTs
+            outputSamplesByStep[pendingIdx] = OutputTokenSample(
+                stepIndex: pendingIdx,
+                timestamp: mtime,
+                outputTokens: pendingSampleTokens,
+                durationSeconds: delta >= 1.0 ? delta : nil
+            )
         }
 
         // Compute remaining pending tools from the latest PLANNER_RESPONSE after

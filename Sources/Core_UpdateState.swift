@@ -36,8 +36,18 @@ public struct SemanticVersion: Equatable, Hashable, Comparable, Sendable {
         }
         guard !s.isEmpty else { return nil }
 
-        // Strip build metadata (+...)
+        // Validate and strip build metadata (+...) strictly against SemVer [0-9A-Za-z.-]+
         if let plusIdx = s.firstIndex(of: "+") {
+            let buildRaw = String(s[s.index(after: plusIdx)...])
+            let buildParts = buildRaw.split(separator: ".", omittingEmptySubsequences: false)
+            guard !buildRaw.isEmpty,
+                  buildParts.allSatisfy({ part in
+                      !part.isEmpty && part.allSatisfy({ ch in
+                          ch.isASCII && (ch.isLetter || ch.isNumber || ch == "-")
+                      })
+                  }) else {
+                return nil
+            }
             s = String(s[..<plusIdx])
         }
         guard !s.isEmpty else { return nil }
@@ -49,7 +59,12 @@ public struct SemanticVersion: Equatable, Hashable, Comparable, Sendable {
             corePart = String(s[..<dashIdx])
             let preRaw = String(s[s.index(after: dashIdx)...])
             let split = preRaw.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
-            guard !preRaw.isEmpty, split.allSatisfy({ !$0.isEmpty }) else { return nil }
+            guard !preRaw.isEmpty,
+                  split.allSatisfy({ part in
+                      !part.isEmpty && part.allSatisfy({ ch in
+                          ch.isASCII && (ch.isLetter || ch.isNumber || ch == "-")
+                      })
+                  }) else { return nil }
             preParts = split
         } else {
             corePart = s
@@ -154,7 +169,9 @@ public enum UpdateReleaseParser {
         "https://api.github.com/repos/\(repoOwner)/\(repoName)/releases/latest"
     }
 
-    /// Verifies that a URL points to a release or asset on `https://github.com/<owner>/<repo>/...`.
+    /// Verifies that a URL points strictly to a release or asset under
+    /// `https://github.com/<owner>/<repo>/releases/` with no userinfo, port,
+    /// backslash, percent-encoded traversal, or dot path segments.
     public static func isAllowedReleaseURL(
         _ urlString: String,
         repoOwner: String = defaultRepoOwner,
@@ -162,12 +179,55 @@ public enum UpdateReleaseParser {
     ) -> Bool {
         guard let comps = URLComponents(string: urlString),
               comps.scheme?.lowercased() == "https",
-              comps.host?.lowercased() == "github.com" else {
+              comps.host?.lowercased() == "github.com",
+              comps.user == nil,
+              comps.password == nil,
+              comps.port == nil else {
             return false
         }
-        let expectedPrefix = "/\(repoOwner)/\(repoName)/releases".lowercased()
-        let path = comps.path.lowercased()
-        return path == expectedPrefix || path.hasPrefix(expectedPrefix + "/")
+
+        let lowerEncodedPath = comps.percentEncodedPath.lowercased()
+        if lowerEncodedPath.contains("%2e")
+            || lowerEncodedPath.contains("%2f")
+            || lowerEncodedPath.contains("%5c")
+            || lowerEncodedPath.contains("\\") {
+            return false
+        }
+
+        let decodedPath = comps.path
+        if decodedPath.contains("\\") {
+            return false
+        }
+        for segment in decodedPath.split(separator: "/", omittingEmptySubsequences: false) {
+            if segment == "." || segment == ".." {
+                return false
+            }
+        }
+
+        let expectedPrefix = "/\(repoOwner)/\(repoName)/releases/".lowercased()
+        let normalizedPath = (decodedPath as NSString).standardizingPath.lowercased()
+        return decodedPath.lowercased().hasPrefix(expectedPrefix)
+            && normalizedPath.hasPrefix(expectedPrefix)
+    }
+
+    /// Safely constructs a canonical GitHub release tag URL, returning `nil` if `tag`
+    /// is not a valid SemVer tag or would yield an untrusted/traversal URL.
+    public static func releasePageURLString(
+        forTag rawTag: String,
+        repoOwner: String = defaultRepoOwner,
+        repoName: String = defaultRepoName
+    ) -> String? {
+        let tag = rawTag.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !tag.isEmpty,
+              tag == rawTag,
+              SemanticVersion.parse(tag) != nil else {
+            return nil
+        }
+        let candidate = "https://github.com/\(repoOwner)/\(repoName)/releases/tag/\(tag)"
+        guard isAllowedReleaseURL(candidate, repoOwner: repoOwner, repoName: repoName) else {
+            return nil
+        }
+        return candidate
     }
 
     /// Parses a GitHub `/releases/latest` 302 redirect target such as
@@ -204,11 +264,16 @@ public enum UpdateReleaseParser {
         }
 
         let tag = parts[4]
-        guard let version = SemanticVersion.parse(tag), !version.isPrerelease else {
+        guard let version = SemanticVersion.parse(tag),
+              !version.isPrerelease,
+              let canonicalPage = releasePageURLString(
+                  forTag: tag,
+                  repoOwner: repoOwner,
+                  repoName: repoName
+              ) else {
             return nil
         }
 
-        let canonicalPage = "https://github.com/\(repoOwner)/\(repoName)/releases/tag/\(tag)"
         return ReleaseInfo(
             version: version,
             tag: tag,
@@ -229,13 +294,20 @@ public enum UpdateReleaseParser {
         if (obj["draft"] as? Bool) == true { return nil }
         if (obj["prerelease"] as? Bool) == true { return nil }
 
-        guard let tag = obj["tag_name"] as? String,
-              let version = SemanticVersion.parse(tag),
-              !version.isPrerelease else {
+        guard let rawTag = obj["tag_name"] as? String else {
+            return nil
+        }
+        let tag = rawTag.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let version = SemanticVersion.parse(tag),
+              !version.isPrerelease,
+              let fallbackPage = releasePageURLString(
+                  forTag: tag,
+                  repoOwner: repoOwner,
+                  repoName: repoName
+              ) else {
             return nil
         }
 
-        let fallbackPage = "https://github.com/\(repoOwner)/\(repoName)/releases/tag/\(tag)"
         let pageURL: String
         if let htmlURL = obj["html_url"] as? String,
            isAllowedReleaseURL(htmlURL, repoOwner: repoOwner, repoName: repoName) {
@@ -367,14 +439,18 @@ public struct UpdateCheckerState: Equatable, Sendable {
         repoName: String = UpdateReleaseParser.defaultRepoName
     ) {
         self.currentVersion = currentVersion
-        if let tag = cachedLatestTag,
-           let cachedVersion = SemanticVersion.parse(tag),
+        if let rawTag = cachedLatestTag?.trimmingCharacters(in: .whitespacesAndNewlines),
+           let cachedVersion = SemanticVersion.parse(rawTag),
            !cachedVersion.isPrerelease,
-           cachedVersion > currentVersion {
-            let pageURL = "https://github.com/\(repoOwner)/\(repoName)/releases/tag/\(tag)"
+           cachedVersion > currentVersion,
+           let pageURL = UpdateReleaseParser.releasePageURLString(
+               forTag: rawTag,
+               repoOwner: repoOwner,
+               repoName: repoName
+           ) {
             let info = ReleaseInfo(
                 version: cachedVersion,
-                tag: tag,
+                tag: rawTag,
                 releasePageURLString: pageURL
             )
             self.knownRelease = info
@@ -394,6 +470,14 @@ public struct UpdateCheckerState: Equatable, Sendable {
 
     public var isChecking: Bool {
         if case .checking = phase { return true }
+        return false
+    }
+
+    /// True ONLY when a user-initiated manual update check is in flight.
+    /// Context menus should bind to this instead of `isChecking` so silent automatic
+    /// background checks never disable or flip the "Check for Updates…" item.
+    public var isManualChecking: Bool {
+        if case .checking(.manual) = phase { return true }
         return false
     }
 

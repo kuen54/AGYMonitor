@@ -286,23 +286,28 @@ public enum NotchLiveWingMachine {
             return [.cancelDoneRetract]
 
         case .dismissed(let sessionId):
-            var effects: [NotchLiveWingEffect] = []
-            if case .waiting(let activeId, _, _, _) = state.activeWing, activeId == sessionId {
+            switch state.activeWing {
+            case .waiting(let activeId, _, _, _) where activeId == sessionId:
                 state.dismissedWaitingIds.insert(sessionId)
                 state.activeWing = nil
-            } else {
-                // Record waiting dismissal defensively if active matches or caller dismissed a waiting session.
-                state.dismissedWaitingIds.insert(sessionId)
-            }
-            if case .done(let activeId, _, _) = state.activeWing, activeId == sessionId {
+                if state.doneBannerExpiresAt != nil {
+                    state.doneBannerExpiresAt = nil
+                    return [.cancelDoneRetract]
+                }
+                return []
+
+            case .done(let activeId, _, _) where activeId == sessionId:
                 state.activeWing = nil
                 state.doneBannerExpiresAt = nil
-                effects.append(.cancelDoneRetract)
-            } else if state.doneBannerExpiresAt != nil && state.activeWing == nil {
-                state.doneBannerExpiresAt = nil
-                effects.append(.cancelDoneRetract)
+                return [.cancelDoneRetract]
+
+            default:
+                if state.doneBannerExpiresAt != nil && state.activeWing == nil {
+                    state.doneBannerExpiresAt = nil
+                    return [.cancelDoneRetract]
+                }
+                return []
             }
-            return effects
         }
     }
 }

@@ -160,8 +160,12 @@ struct MonitorStateTests {
         #expect(SessionMonitorLifecycleMachine.reduce(&state, event: .start(now: t0)).isEmpty)
 
         // Healthy watcher + 0 live sessions + inactive -> 15s poll
-        let fsEffects = SessionMonitorLifecycleMachine.reduce(&state, event: .fsWatcherAttempted(healthy: true, at: t0))
+        let fsEffects = SessionMonitorLifecycleMachine.reduce(
+            &state,
+            event: .fsWatcherAttempted(healthy: true, watchedDirs: ["/cli"], at: t0)
+        )
         #expect(fsEffects == [.setPollTimer(15.0)])
+        #expect(state.watchedDirs == ["/cli"])
 
         // Scan detects 2 live sessions while inactive -> tightens to 6s
         let scan1 = SessionMonitorLifecycleMachine.reduce(&state, event: .scanCompleted(liveCount: 2))
@@ -173,17 +177,59 @@ struct MonitorStateTests {
         let scan2 = SessionMonitorLifecycleMachine.reduce(&state, event: .scanCompleted(liveCount: 2))
         #expect(scan2 == [.setPollTimer(2.0)])
 
-        // Degraded watcher retries after 30s on next timer tick
-        SessionMonitorLifecycleMachine.reduce(&state, event: .fsWatcherAttempted(healthy: false, at: t0.addingTimeInterval(10)))
+        // Panel closes -> relaxes poll timer (2s -> 6s) WITHOUT emitting a redundant .runScan!
+        let inactiveEffects = SessionMonitorLifecycleMachine.reduce(&state, event: .setActive(false, now: t0.addingTimeInterval(6)))
+        #expect(inactiveEffects == [.setPollTimer(6.0)])
+        #expect(!inactiveEffects.contains(.runScan))
+
+        // Newly added directory triggers .restartFSEvents EVEN when fsHealthy == true (e.g. CLI -> CLI+Desktop)
+        let sameDirs = SessionMonitorLifecycleMachine.reduce(&state, event: .reconcileWatchedDirs(["/cli", "/cli"]))
+        #expect(sameDirs.isEmpty)
+        let addedDir = SessionMonitorLifecycleMachine.reduce(
+            &state,
+            event: .reconcileWatchedDirs(["/desktop/brain", "/cli"])
+        )
+        #expect(addedDir == [.restartFSEvents(dirs: ["/cli", "/desktop/brain"])])
+        _ = SessionMonitorLifecycleMachine.reduce(
+            &state,
+            event: .fsWatcherAttempted(healthy: true, watchedDirs: ["/cli", "/desktop/brain"], at: t0.addingTimeInterval(8))
+        )
+        #expect(state.watchedDirs == ["/cli", "/desktop/brain"])
+
+        // Degraded watcher does not thrash on the exact same failed dir set, and retries after 30s on next timer tick
+        _ = SessionMonitorLifecycleMachine.reduce(
+            &state,
+            event: .fsWatcherAttempted(healthy: false, watchedDirs: ["/cli", "/desktop/brain"], at: t0.addingTimeInterval(10))
+        )
+        #expect(!state.fsHealthy)
+        #expect(state.watchedDirs.isEmpty)
+        #expect(SessionMonitorLifecycleMachine.reduce(&state, event: .reconcileWatchedDirs(["/cli", "/desktop/brain"])).isEmpty)
+        // Brand-new IDE dir appearing while unhealthy attaches immediately
+        #expect(
+            SessionMonitorLifecycleMachine.reduce(&state, event: .reconcileWatchedDirs(["/cli", "/desktop/brain", "/ide/brain"]))
+                == [.restartFSEvents(dirs: ["/cli", "/desktop/brain", "/ide/brain"])]
+        )
         let retryTick = SessionMonitorLifecycleMachine.reduce(&state, event: .pollTimerFired(now: t0.addingTimeInterval(45)))
         #expect(retryTick == [.startFSWatcher, .runScan])
+
+        // All directories disappearing stops watcher cleanly
+        _ = SessionMonitorLifecycleMachine.reduce(
+            &state,
+            event: .fsWatcherAttempted(healthy: true, watchedDirs: ["/cli"], at: t0.addingTimeInterval(46))
+        )
+        _ = SessionMonitorLifecycleMachine.reduce(&state, event: .scanCompleted(liveCount: 0))
+        let emptyDirs = SessionMonitorLifecycleMachine.reduce(&state, event: .reconcileWatchedDirs([]))
+        #expect(emptyDirs == [.stopFSWatcher, .setPollTimer(6.0)])
+        #expect(state.watchedDirs.isEmpty)
 
         // Stop tears down coalesce, timer, and FS watcher; late callbacks become no-ops
         let stopEffects = SessionMonitorLifecycleMachine.reduce(&state, event: .stop)
         #expect(!state.isStarted)
         #expect(state.runGeneration == 1)
+        #expect(state.watchedDirs.isEmpty)
         #expect(stopEffects == [.cancelFSCoalesce, .setPollTimer(nil), .stopFSWatcher])
         #expect(SessionMonitorLifecycleMachine.reduce(&state, event: .fsCoalesceFired(now: t0.addingTimeInterval(50))).isEmpty)
+        #expect(SessionMonitorLifecycleMachine.reduce(&state, event: .reconcileWatchedDirs(["/cli"])).isEmpty)
 
         // setActive(true) before start() is preserved instead of dropped
         var cold = SessionMonitorLifecycleState()
@@ -634,120 +680,175 @@ struct MonitorStateTests {
         #expect(clampedRect.minY == 763.0)
     }
 
-    @Test("MenuBarAnchorResolver.isPopoverFrameAnchored detects top-left clamps, wrong display, and vertical drops")
-    func anchorLiveDriftDetection() {
-        let host = Self.externalRightDisplay
-        let expectedRightAnchor = ScreenRect(x: 4020, y: 1415, width: 64, height: 24)
-
-        // Normal centered popover under anchor
-        let normalPopover = ScreenRect(x: 3842, y: 900, width: 420, height: 515)
-        #expect(MenuBarAnchorResolver.isPopoverFrameAnchored(
-            popoverFrame: normalPopover,
-            expectedAnchorRect: expectedRightAnchor,
-            hostDisplay: host
-        ))
-
-        // Right-edge-clamped popover (anchor near far right edge of screen)
-        let farRightAnchor = ScreenRect(x: 4220, y: 1415, width: 50, height: 24)
-        let clampedRightPopover = ScreenRect(x: 3860, y: 900, width: 420, height: 515)
-        #expect(MenuBarAnchorResolver.isPopoverFrameAnchored(
-            popoverFrame: clampedRightPopover,
-            expectedAnchorRect: farRightAnchor,
-            hostDisplay: host
-        ))
-
-        // Issue #2 failure: popover jumped to exact top-left of external display (x = 1728)
-        let topLeftJumped = ScreenRect(x: 1728, y: 900, width: 420, height: 515)
-        #expect(!MenuBarAnchorResolver.isPopoverFrameAnchored(
-            popoverFrame: topLeftJumped,
-            expectedAnchorRect: expectedRightAnchor,
-            hostDisplay: host
-        ))
-
-        // Popover drifted onto wrong display (built-in [0, 1728])
-        let wrongDisplay = ScreenRect(x: 1200, y: 560, width: 420, height: 515)
-        #expect(!MenuBarAnchorResolver.isPopoverFrameAnchored(
-            popoverFrame: wrongDisplay,
-            expectedAnchorRect: expectedRightAnchor,
-            hostDisplay: host
-        ))
-
-        // Popover dragged upward by 24pt retracting fullscreen menu bar (> 20pt tolerance)
-        let draggedUpByMenuBar = ScreenRect(x: 3842, y: 924, width: 420, height: 515)
-        #expect(!MenuBarAnchorResolver.isPopoverFrameAnchored(
-            popoverFrame: draggedUpByMenuBar,
-            expectedAnchorRect: expectedRightAnchor,
-            hostDisplay: host
-        ))
-
-        // Popover dropped vertically away from menu bar (> 20pt gap)
-        let droppedVertically = ScreenRect(x: 3842, y: 700, width: 420, height: 515)
-        #expect(!MenuBarAnchorResolver.isPopoverFrameAnchored(
-            popoverFrame: droppedVertically,
-            expectedAnchorRect: expectedRightAnchor,
-            hostDisplay: host
-        ))
-    }
-
-    @Test("PopoverAnchorSessionState suppresses transient click-to-toggle double-bounce within click window")
-    func popoverAnchorSessionSuppressesTransientBounce() {
-        var session = PopoverAnchorSessionState()
-        let t0 = Date(timeIntervalSince1970: 1_700_000_000)
-
-        let pinnedRect = ScreenRect(x: 1411, y: 1086, width: 2, height: 2)
-        session.beginSession(decision: .fallbackMenuBar(displayId: 1, anchorRect: pinnedRect, reason: .ephemeralMenuBar))
-        session.noteTransientCloseFromStatusItemClick(at: t0)
-        // popoverClosed() preserves the suppression window until leftMouseUp arrives
-        session.popoverClosed()
-
-        let consumed = session.consumeSuppressedStatusItemClick(at: t0.addingTimeInterval(0.08))
-        #expect(consumed == true)
-        // Consumed once; subsequent click opens normally
-        let secondClick = session.consumeSuppressedStatusItemClick(at: t0.addingTimeInterval(0.12))
-        #expect(secondClick == false)
-
-        // Expired window (e.g. user pressed down then dragged off button) does not suppress later click
-        session.noteTransientCloseFromStatusItemClick(at: t0)
-        let expired = session.consumeSuppressedStatusItemClick(at: t0.addingTimeInterval(0.75))
-        #expect(expired == false)
-    }
-
-    @Test("PopoverAnchorSessionState bounds re-anchor attempts to max 2, guards re-entrancy, and resets on close")
-    func popoverAnchorSessionBounds() {
-        var session = PopoverAnchorSessionState()
-        #expect(session.mode == .none)
-        #expect(session.consumeReanchorAttempt() == false) // closed session cannot re-anchor
-
+    @Test("MenuBarPanelMachine manages animated open/close tokens, prevents stale close orderOut on rapid reopen, and handles terminate")
+    func menuBarPanelAnimatedLifecycleAndTokenSafety() {
+        var state = MenuBarPanelState()
         let btnRect = ScreenRect(x: 1420, y: 1086, width: 64, height: 24)
-        session.beginSession(decision: .statusItem(displayId: 1, buttonRect: btnRect))
-        #expect(session.mode == .statusItem(displayId: 1, anchorRect: btnRect))
-        #expect(session.reanchorAttempts == 0)
+        let anchorMode = PopoverAnchorSessionMode(decision: .statusItem(displayId: 1, buttonRect: btnRect))
 
-        // Attempt 1 succeeds and enters reanchoring guard
-        #expect(session.consumeReanchorAttempt() == true)
-        #expect(session.isReanchoring == true)
-        #expect(session.reanchorAttempts == 1)
-        // Re-entrant call while already re-anchoring is rejected
-        #expect(session.consumeReanchorAttempt() == false)
-        session.finishReanchor(decision: .statusItem(displayId: 1, buttonRect: btnRect))
-        #expect(session.isReanchoring == false)
-        #expect(session.reanchorAttempts == 1)
+        // Invalid .none anchor is a safe no-op
+        #expect(MenuBarPanelMachine.reduce(
+            &state,
+            event: .openRequested(anchorMode: .none, height: 500, animated: true)
+        ).isEmpty)
+        #expect(state.phase == .closed)
 
-        // Attempt 2 succeeds and switches to fallback
-        let fallbackRect = ScreenRect(x: 1505, y: 1080, width: 2, height: 2)
-        #expect(session.consumeReanchorAttempt() == true)
-        #expect(session.reanchorAttempts == 2)
-        session.finishReanchor(decision: .fallbackMenuBar(displayId: 1, anchorRect: fallbackRect, reason: .offScreen))
-        #expect(session.mode == .fallback(displayId: 1, anchorRect: fallbackRect))
+        // Animated open -> .opening(token: 1)
+        let openEff = MenuBarPanelMachine.reduce(
+            &state,
+            event: .openRequested(anchorMode: anchorMode, height: 520.4, animated: true)
+        )
+        #expect(state.phase == .opening(token: 1))
+        #expect(state.measuredHeight == 521.0)
+        #expect(state.anchorMode == anchorMode)
+        #expect(openEff == [
+            .presentPanel(animated: true, token: 1),
+            .syncAppPresentationShown,
+            .attachDismissMonitors,
+        ])
 
-        // Attempt 3 is blocked by maxReanchorAttempts = 2
-        #expect(session.consumeReanchorAttempt() == false)
+        // Stale openAnimationFinished token is ignored; matching token transitions to .open
+        #expect(MenuBarPanelMachine.reduce(&state, event: .openAnimationFinished(token: 99)).isEmpty)
+        #expect(state.phase == .opening(token: 1))
+        #expect(MenuBarPanelMachine.reduce(&state, event: .openAnimationFinished(token: 1)).isEmpty)
+        #expect(state.phase == .open)
 
-        // Closing popover resets mode, attempts, and guard cleanly
-        session.popoverClosed()
-        #expect(session.mode == .none)
-        #expect(session.reanchorAttempts == 0)
-        #expect(session.isReanchoring == false)
+        // Animated close -> .closing(token: 2)
+        let closeEff = MenuBarPanelMachine.reduce(
+            &state,
+            event: .closeRequested(animated: true, suppressStatusItemClickUntil: nil)
+        )
+        #expect(state.phase == .closing(token: 2))
+        #expect(state.anchorMode == .none)
+        #expect(closeEff == [
+            .detachDismissMonitors,
+            .syncAppPresentationClosed,
+            .dismissPanel(animated: true, token: 2),
+        ])
+
+        // Rapid re-open while close animation (token 2) is still running -> .opening(token: 3)
+        let reopenEff = MenuBarPanelMachine.reduce(
+            &state,
+            event: .openRequested(anchorMode: anchorMode, height: 520, animated: true)
+        )
+        #expect(state.phase == .opening(token: 3))
+        #expect(reopenEff == [
+            .presentPanel(animated: true, token: 3),
+            .syncAppPresentationShown,
+            .attachDismissMonitors,
+        ])
+
+        // Late close completion for stale token 2 MUST NOT emit .orderOutPanel or close the reopened panel!
+        #expect(MenuBarPanelMachine.reduce(&state, event: .closeAnimationFinished(token: 2)).isEmpty)
+        #expect(state.phase == .opening(token: 3))
+
+        // Normal close + matching completion emits .orderOutPanel and settles in .closed
+        _ = MenuBarPanelMachine.reduce(&state, event: .closeRequested(animated: true, suppressStatusItemClickUntil: nil))
+        #expect(state.phase == .closing(token: 4))
+        let finishEff = MenuBarPanelMachine.reduce(&state, event: .closeAnimationFinished(token: 4))
+        #expect(finishEff == [.orderOutPanel])
+        #expect(state.phase == .closed)
+
+        // Non-animated open jumps straight to .open; non-animated close interrupting .closing snaps immediately
+        let instantOpen = MenuBarPanelMachine.reduce(
+            &state,
+            event: .openRequested(anchorMode: anchorMode, height: 480, animated: false)
+        )
+        #expect(state.phase == .open)
+        #expect(instantOpen == [
+            .presentPanel(animated: false, token: 5),
+            .syncAppPresentationShown,
+            .attachDismissMonitors,
+        ])
+        _ = MenuBarPanelMachine.reduce(&state, event: .closeRequested(animated: true, suppressStatusItemClickUntil: nil))
+        #expect(state.phase == .closing(token: 6))
+        // Duplicate animated close while closing is a no-op
+        #expect(MenuBarPanelMachine.reduce(&state, event: .closeRequested(animated: true, suppressStatusItemClickUntil: nil)).isEmpty)
+        // Immediate close (e.g. Space switch) snaps to .closed
+        let snapClose = MenuBarPanelMachine.reduce(&state, event: .closeRequested(animated: false, suppressStatusItemClickUntil: nil))
+        #expect(state.phase == .closed)
+        #expect(snapClose == [.dismissPanel(animated: false, token: 7)])
+    }
+
+    @Test("MenuBarPanelMachine guards dismiss events during nested menu tracking, syncs height, and suppresses status-item click bounce")
+    func menuBarPanelMenuTrackingHeightAndClickSuppression() {
+        var state = MenuBarPanelState()
+        let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+        let pinnedRect = ScreenRect(x: 1411, y: 1086, width: 2, height: 2)
+        let fallbackMode = PopoverAnchorSessionMode(
+            decision: .fallbackMenuBar(displayId: 1, anchorRect: pinnedRect, reason: .ephemeralMenuBar)
+        )
+
+        // Height measured while closed updates stored height without emitting .updatePanelHeight
+        #expect(MenuBarPanelMachine.reduce(&state, event: .heightMeasured(440.2)).isEmpty)
+        #expect(state.measuredHeight == 441.0)
+        // Invalid/NaN/tiny height is ignored
+        #expect(MenuBarPanelMachine.reduce(&state, event: .heightMeasured(.nan)).isEmpty)
+        #expect(state.measuredHeight == 441.0)
+
+        _ = MenuBarPanelMachine.reduce(
+            &state,
+            event: .openRequested(anchorMode: fallbackMode, height: 441, animated: false)
+        )
+        // Height change while open emits .updatePanelHeight (clamped to >= 180)
+        #expect(MenuBarPanelMachine.reduce(&state, event: .heightMeasured(120)) == [.updatePanelHeight(180.0)])
+        #expect(MenuBarPanelMachine.reduce(&state, event: .heightMeasured(179.7)).isEmpty) // ceil(179.7) == 180.0
+        #expect(MenuBarPanelMachine.reduce(&state, event: .heightMeasured(512.2)) == [.updatePanelHeight(513.0)])
+
+        // Nested NSMenu tracking (depth 2) blocks outsideClick, appDeactivated, and escapePressed
+        _ = MenuBarPanelMachine.reduce(&state, event: .menuTrackingBegan)
+        _ = MenuBarPanelMachine.reduce(&state, event: .menuTrackingBegan)
+        #expect(state.activeMenuTrackingDepth == 2)
+        #expect(state.isMenuTrackingActive)
+        #expect(MenuBarPanelMachine.reduce(&state, event: .outsideClick).isEmpty)
+        #expect(MenuBarPanelMachine.reduce(&state, event: .appDeactivated).isEmpty)
+        #expect(MenuBarPanelMachine.reduce(&state, event: .escapePressed).isEmpty)
+
+        // Ending one menu still keeps depth == 1 -> still guarded
+        _ = MenuBarPanelMachine.reduce(&state, event: .menuTrackingEnded)
+        #expect(state.activeMenuTrackingDepth == 1)
+        #expect(MenuBarPanelMachine.reduce(&state, event: .outsideClick).isEmpty)
+
+        // Ending second menu unlocks dismiss; extra end clamps safely at 0
+        _ = MenuBarPanelMachine.reduce(&state, event: .menuTrackingEnded)
+        _ = MenuBarPanelMachine.reduce(&state, event: .menuTrackingEnded)
+        #expect(state.activeMenuTrackingDepth == 0)
+
+        let escEff = MenuBarPanelMachine.reduce(&state, event: .escapePressed)
+        #expect(escEff.contains(.detachDismissMonitors))
+        #expect(escEff.contains(.syncAppPresentationClosed))
+        #expect(state.phase == .closing(token: 2))
+
+        // Re-open and close with status-item click suppression window (e.g. resign-key on leftMouseDown)
+        _ = MenuBarPanelMachine.reduce(
+            &state,
+            event: .openRequested(anchorMode: fallbackMode, height: 500, animated: false)
+        )
+        _ = MenuBarPanelMachine.reduce(
+            &state,
+            event: .closeRequested(animated: true, suppressStatusItemClickUntil: t0.addingTimeInterval(0.5))
+        )
+        // Matching closeAnimationFinished preserves suppression window until leftMouseUp arrives
+        _ = MenuBarPanelMachine.reduce(&state, event: .closeAnimationFinished(token: 4))
+        #expect(state.consumeSuppressedStatusItemClick(at: t0.addingTimeInterval(0.08)) == true)
+        // One-shot: second click opens normally
+        #expect(state.consumeSuppressedStatusItemClick(at: t0.addingTimeInterval(0.12)) == false)
+
+        // Terminate forces immediate cleanup even if a menu is tracking
+        _ = MenuBarPanelMachine.reduce(
+            &state,
+            event: .openRequested(anchorMode: fallbackMode, height: 500, animated: false)
+        )
+        _ = MenuBarPanelMachine.reduce(&state, event: .menuTrackingBegan)
+        let termEff = MenuBarPanelMachine.reduce(&state, event: .terminate)
+        #expect(state.phase == .closed)
+        #expect(state.activeMenuTrackingDepth == 0)
+        #expect(state.anchorMode == .none)
+        #expect(termEff == [
+            .detachDismissMonitors,
+            .syncAppPresentationClosed,
+            .dismissPanel(animated: false, token: 6),
+        ])
     }
 
     @Test("MenuBarAnchorResolver.panelFrame centers under icon, clamps edges/Dock/negative-X, and resizedPanelFrame locks topY & minX")

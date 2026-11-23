@@ -31,6 +31,8 @@ final class UsageArchive {
         if let files = try? FileManager.default.contentsOfDirectory(
             at: shardDir, includingPropertiesForKeys: nil) {
             for file in files where file.pathExtension == "json" {
+                let monthKey = file.deletingPathExtension().lastPathComponent
+                guard AppDate.isValidMonthKey(monthKey) else { continue }
                 guard let raw = try? Data(contentsOf: file),
                       let shard = try? JSONDecoder().decode(UsageArchiveData.self, from: raw) else { continue }
                 if shard.schemaVersion < UsageArchiveData.currentSchema {
@@ -43,7 +45,8 @@ final class UsageArchive {
                           file.lastPathComponent, shard.schemaVersion, UsageArchiveData.currentSchema)
                     continue
                 }
-                loaded.days.merge(shard.days) { a, _ in a }
+                let validDays = shard.days.filter { AppDate.isValidDayKey($0.key) }
+                loaded.days.merge(validDays) { a, _ in a }
             }
         }
         if droppedStaleSchema {
@@ -146,12 +149,19 @@ final class UsageArchive {
 
     private func enqueuePersistLocked(changedDays: Set<String>) {
         guard !changedDays.isEmpty else { return }
-        let months = Set(changedDays.map { String($0.prefix(7)) })  // "yyyy-MM"
+        let months = Set(
+            changedDays
+                .filter { AppDate.isValidDayKey($0) }
+                .map { String($0.prefix(7)) }
+                .filter { AppDate.isValidMonthKey($0) }
+        )
+        guard !months.isEmpty else { return }
         let shards: [(month: String, data: UsageArchiveData)] = months.map { m in
-            (m, UsageArchiveData(days: data.days.filter { $0.key.hasPrefix(m) }))
+            (m, UsageArchiveData(days: data.days.filter { AppDate.isValidDayKey($0.key) && $0.key.hasPrefix(m) }))
         }
         ioQueue.async { [shardDir] in
             for shard in shards {
+                guard AppDate.isValidMonthKey(shard.month) else { continue }
                 let url = shardDir.appendingPathComponent("\(shard.month).json")
                 if shard.data.days.isEmpty {
                     try? FileManager.default.removeItem(at: url)

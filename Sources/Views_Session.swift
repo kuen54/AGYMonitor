@@ -18,9 +18,13 @@ private struct HostWindowProbe: NSViewRepresentable {
 
 // MARK: - Sessions Tab
 
-private enum SessionDeckMode: Equatable {
-    case live
-    case blackBox
+private final class SessionKeyMonitorGate {
+    var isPanelVisible: Bool = true
+    var isActiveTab: Bool = true
+}
+
+private final class WeakHostWindowBox {
+    weak var window: NSWindow?
 }
 
 struct SessionTabView: View {
@@ -28,19 +32,39 @@ struct SessionTabView: View {
     var visualMode: TelemetryVisualMode = .instrument
     var isActiveTab: Bool = true
     var onClose: (() -> Void)? = nil
+    var onFilterChange: ((SessionStatusFilter) -> Void)? = nil
 
     @Environment(\.localizer) private var loc
     @Environment(\.agyTheme) private var theme
     @Environment(\.telemetryStaticRender) private var isStaticRender
     @Environment(\.telemetryPanelVisible) private var isPanelVisible
+    @Environment(\.telemetryReduceMotion) private var reduceMotion
     @Environment(\.craftHapticsEnabled) private var hapticsEnabled
 
-    @State private var deckMode: SessionDeckMode = .live
-    @State private var deck = SessionDeckState()
+    @State private var deck: SessionDeckState
     @State private var hoveredFilter: SessionStatusFilter? = nil
     @State private var hoveredMode: SessionDeckMode? = nil
-    @State private var hostWindow: NSWindow? = nil
+    @State private var hostWindowBox = WeakHostWindowBox()
     @State private var keyMonitor: Any? = nil
+    @State private var keyGate = SessionKeyMonitorGate()
+    @State private var replayKeyTrigger: ReplayKeyboardTrigger? = nil
+
+    init(
+        sessionStore: SessionStore,
+        visualMode: TelemetryVisualMode = .instrument,
+        isActiveTab: Bool = true,
+        onClose: (() -> Void)? = nil,
+        onFilterChange: ((SessionStatusFilter) -> Void)? = nil
+    ) {
+        self.sessionStore = sessionStore
+        self.visualMode = visualMode
+        self.isActiveTab = isActiveTab
+        self.onClose = onClose
+        self.onFilterChange = onFilterChange
+        _deck = State(initialValue: SessionDeckState(mode: sessionStore.deckMode))
+    }
+
+    private var deckMode: SessionDeckMode { sessionStore.deckMode }
 
     private var allSessions: [SessionInfo] { sessionStore.sessions }
     private var waitingSessions: [SessionInfo] { allSessions.filter { $0.status == .waiting } }
@@ -100,6 +124,8 @@ struct SessionTabView: View {
                 if let match = sessionStore.sessions.first(where: { $0.sessionId == sid }) {
                     sessionStore.jump(match)
                 }
+            case .openBlackBox(let preferredMissionId):
+                sessionStore.openBlackBox(preferredMissionId: preferredMissionId)
             }
         }
     }
@@ -114,19 +140,29 @@ struct SessionTabView: View {
     }
 
     private func switchDeckMode(_ target: SessionDeckMode) {
-        guard deckMode != target else { return }
+        guard sessionStore.deckMode != target else { return }
         CraftEngine.shared.perform(.tabDetent, enabled: hapticsEnabled)
-        deckMode = target
         if target == .blackBox {
-            sessionStore.loadReplayIndex()
+            hoveredFilter = nil
+        }
+        sessionStore.deckMode = target
+        if deck.mode != target {
+            dispatchDeck(.setMode(target))
+        } else if target == .blackBox {
+            sessionStore.openBlackBox(preferredMissionId: nil)
         }
     }
 
     private func openSessionReplay(_ sessionId: String) {
         CraftEngine.shared.perform(.tabDetent, enabled: hapticsEnabled)
-        deckMode = .blackBox
-        sessionStore.loadReplayIndex()
-        sessionStore.selectReplayMission(sessionId)
+        hoveredFilter = nil
+        sessionStore.deckMode = .blackBox
+        dispatchDeck(.openBlackBox(preferredMissionId: sessionId))
+    }
+
+    private func emitReplayKey(_ command: ReplayKeyboardCommand) {
+        let nextId = (replayKeyTrigger?.id ?? 0) &+ 1
+        replayKeyTrigger = ReplayKeyboardTrigger(id: nextId, command: command)
     }
 
     var body: some View {
@@ -137,7 +173,8 @@ struct SessionTabView: View {
             if deckMode == .blackBox {
                 SessionReplayDeckView(
                     sessionStore: sessionStore,
-                    isActiveMode: deckMode == .blackBox
+                    isActiveMode: sessionStore.deckMode == .blackBox && isActiveTab,
+                    keyboardTrigger: replayKeyTrigger
                 )
             } else if allSessions.isEmpty {
                 emptyState
@@ -191,24 +228,52 @@ struct SessionTabView: View {
         .background {
             if !isStaticRender {
                 HostWindowProbe { w in
-                    if hostWindow !== w { hostWindow = w }
+                    if hostWindowBox.window !== w { hostWindowBox.window = w }
                 }
                 .frame(width: 0, height: 0)
             }
         }
-        .animation(.easeInOut(duration: 0.16), value: sessionStore.jumpHint)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.16), value: sessionStore.jumpHint)
         .onChange(of: orderedVisibleSessionIds) { ids in
             dispatchDeck(.reconcileVisibleIds(ids))
         }
+        .onChange(of: deck.filter) { nextFilter in
+            onFilterChange?(nextFilter)
+        }
+        .onChange(of: sessionStore.deckMode) { nextMode in
+            if nextMode == .blackBox {
+                hoveredFilter = nil
+            }
+            if deck.mode != nextMode {
+                _ = SessionDeckMachine.reduce(&deck, event: .setMode(nextMode))
+            }
+        }
+        .onChange(of: isActiveTab) { active in
+            keyGate.isActiveTab = active
+        }
         .onChange(of: isPanelVisible) { visible in
+            keyGate.isPanelVisible = visible
             if !visible {
                 hoveredFilter = nil
                 hoveredMode = nil
+                PointingCursorCoordinator.shared.setPointing(false, token: "session-deck-mode-0")
+                PointingCursorCoordinator.shared.setPointing(false, token: "session-deck-mode-1")
                 dispatchDeck(.setHoveredSession(nil, visibleIds: orderedVisibleSessionIds))
             }
         }
-        .onAppear { if !isStaticRender { installKeyMonitor() } }
-        .onDisappear { removeKeyMonitor() }
+        .onAppear {
+            keyGate.isPanelVisible = isPanelVisible
+            keyGate.isActiveTab = isActiveTab
+            if deck.mode != sessionStore.deckMode {
+                _ = SessionDeckMachine.reduce(&deck, event: .setMode(sessionStore.deckMode))
+            }
+            onFilterChange?(deck.filter)
+            if !isStaticRender { installKeyMonitor() }
+        }
+        .onDisappear {
+            removeKeyMonitor()
+            hostWindowBox.window = nil
+        }
     }
 
     // MARK: De-Slabbed Hairline Filter Index Strip
@@ -294,6 +359,8 @@ struct SessionTabView: View {
                         .onTapGesture {
                             dispatchDeck(.selectFilter(item.kind, visibleIds: visibleSessionIds(for: item.kind)))
                         }
+                        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+                        .accessibilityLabel("\(item.label) \(item.count)")
                     }
                 }
             } else {
@@ -364,6 +431,8 @@ struct SessionTabView: View {
                 .onTapGesture {
                     switchDeckMode(item.mode)
                 }
+                .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+                .accessibilityLabel(item.label)
 
                 if idx == 0 {
                     Rectangle()
@@ -504,12 +573,14 @@ struct SessionTabView: View {
         .transition(.opacity)
     }
 
-    // MARK: - Keyboard ↑/↓/Return Navigation (routed via pure SessionKeyRouter)
+    // MARK: - Keyboard Navigation & Replay Controls (routed via pure SessionKeyRouter)
 
     private func installKeyMonitor() {
         guard keyMonitor == nil else { return }
+        let gate = keyGate
+        let windowBox = hostWindowBox
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            guard deckMode == .live, let hw = hostWindow, event.window === hw else { return event }
+            guard let hw = windowBox.window, event.window === hw else { return event }
             let rawMods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             var mods = SessionKeyModifiers()
             if rawMods.contains(.command)    { mods.insert(.command) }
@@ -522,8 +593,9 @@ struct SessionTabView: View {
             let action = SessionKeyRouter.route(
                 keyCode: event.keyCode,
                 modifiers: mods,
-                isPanelVisible: isPanelVisible,
-                isSessionTabActive: isActiveTab
+                isPanelVisible: gate.isPanelVisible,
+                isSessionTabActive: gate.isActiveTab,
+                mode: sessionStore.deckMode
             )
             switch action {
             case .moveSelection(let delta):
@@ -533,6 +605,18 @@ struct SessionTabView: View {
                 let ids = orderedVisibleSessionIds
                 guard !ids.isEmpty else { return event }
                 dispatchDeck(.activateSelected(visibleIds: ids))
+                return nil
+            case .replayTogglePlay:
+                guard sessionStore.activeReplay != nil else { return event }
+                emitReplayKey(.togglePlay)
+                return nil
+            case .replayStepPrev:
+                guard sessionStore.activeReplay != nil else { return event }
+                emitReplayKey(.stepPrev)
+                return nil
+            case .replayStepNext:
+                guard sessionStore.activeReplay != nil else { return event }
+                emitReplayKey(.stepNext)
                 return nil
             case .ignore:
                 return event
@@ -677,6 +761,7 @@ struct SessionRow: View {
                         SessionContextMicroMeter(
                             snapshot: ctx,
                             theme: theme,
+                            loc: loc,
                             tooltipText: contextTooltip(ctx)
                         )
                         .fixedSize()
@@ -851,6 +936,7 @@ struct SessionRow: View {
 private struct SessionContextMicroMeter: View, Equatable {
     let snapshot: SessionContextSnapshot
     let theme: AGYTheme
+    let loc: Localizer
     let tooltipText: String
 
     private var labelColor: Color {
@@ -872,7 +958,7 @@ private struct SessionContextMicroMeter: View, Equatable {
     var body: some View {
         HStack(spacing: 4.5) {
             if snapshot.needsCompactHint {
-                Text("/compact")
+                Text(loc("contextCompactHint"))
                     .font(.system(size: 7, weight: .semibold, design: .monospaced))
                     .tracking(0.25)
                     .foregroundColor(theme.signalRed)
@@ -918,7 +1004,7 @@ private struct SessionContextMicroMeter: View, Equatable {
             }
             .frame(width: 28, height: 3.5)
 
-            Text("CTX \(snapshot.remainingPercent)%")
+            Text("\(loc("contextRemainingShort")) \(snapshot.remainingPercent)%")
                 .font(.system(size: 7.5, weight: snapshot.pressureLevel == .nominal ? .regular : .semibold, design: .monospaced))
                 .monospacedDigit()
                 .tracking(0.3)
