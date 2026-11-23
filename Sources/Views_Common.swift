@@ -51,14 +51,10 @@ func formatPlanTierBadge(_ raw: String?) -> String? {
     }
 }
 
-/// Split formatted tabular currency (e.g. "$36.40") into prefix/whole/decimal parts.
+/// Split formatted tabular currency (e.g. "$1,577.55") into prefix/whole/decimal parts.
 func splitCurrencyParts(_ value: Double) -> (prefix: String, whole: String, frac: String) {
-    let raw = formatCostTabular(value)
-    let stripped = raw.hasPrefix("$") ? String(raw.dropFirst()) : raw
-    if let dot = stripped.lastIndex(of: ".") {
-        return ("$", String(stripped[..<dot]), String(stripped[dot...]))
-    }
-    return ("$", stripped, "")
+    let parts = CurrencyFormatting.tabularParts(for: value)
+    return (parts.prefix, parts.whole, parts.fraction)
 }
 
 /// Split compact token readout (e.g. "23.8M") into numeric body and unit suffix.
@@ -1173,6 +1169,8 @@ struct PrecisionHeroNumber: View {
                     .padding(.leading, 3)
             }
         }
+        .lineLimit(1)
+        .fixedSize(horizontal: true, vertical: false)
     }
 }
 

@@ -395,3 +395,73 @@ public enum TelemetryVisualMode: String, CaseIterable, Codable, Sendable {
         self == .instrument ? .classic : .instrument
     }
 }
+
+// MARK: - Deterministic Tabular Currency Formatting
+
+public struct CurrencyParts: Equatable, Sendable {
+    public let prefix: String
+    public let whole: String
+    public let fraction: String
+
+    public init(prefix: String, whole: String, fraction: String) {
+        self.prefix = prefix
+        self.whole = whole
+        self.fraction = fraction
+    }
+
+    public var formatted: String {
+        prefix + whole + fraction
+    }
+}
+
+public enum CurrencyFormatting {
+    /// Deterministic tabular two-decimal USD formatting with ASCII comma grouping
+    /// and zero locale-injected whitespace (avoiding ICU `en_US_POSIX` currency
+    /// `U+00A0` NBSP between `$` and digits for values >= 1000).
+    public static func tabularParts(for value: Double) -> CurrencyParts {
+        let v = value.isFinite ? value : 0
+        let isNegative = v < 0
+        let magnitude = abs(v)
+
+        // Round to integer cents first so boundary values like 999.996 round cleanly to 1,000.00.
+        let scaled = (magnitude * 100.0).rounded()
+        if scaled.isFinite && scaled < 9e15 {
+            let totalCents = Int64(scaled)
+            let prefix = (isNegative && totalCents > 0) ? "-$" : "$"
+            let wholeInt = totalCents / 100
+            let fracCents = totalCents % 100
+            let wholeStr = groupDigits(String(wholeInt))
+            let fracStr = String(format: ".%02lld", fracCents)
+            return CurrencyParts(prefix: prefix, whole: wholeStr, fraction: fracStr)
+        }
+
+        let prefix = isNegative ? "-$" : "$"
+        let raw = String(format: "%.2f", locale: Locale(identifier: "en_US_POSIX"), magnitude)
+        if let dot = raw.lastIndex(of: ".") {
+            return CurrencyParts(
+                prefix: prefix,
+                whole: groupDigits(String(raw[..<dot])),
+                fraction: String(raw[dot...])
+            )
+        }
+        return CurrencyParts(prefix: prefix, whole: groupDigits(raw), fraction: ".00")
+    }
+
+    public static func formatTabular(_ value: Double) -> String {
+        tabularParts(for: value).formatted
+    }
+
+    private static func groupDigits(_ digits: String) -> String {
+        guard digits.count > 3 else { return digits }
+        var result = ""
+        result.reserveCapacity(digits.count + (digits.count - 1) / 3)
+        let count = digits.count
+        for (idx, ch) in digits.enumerated() {
+            if idx > 0 && (count - idx) % 3 == 0 {
+                result.append(",")
+            }
+            result.append(ch)
+        }
+        return result
+    }
+}
