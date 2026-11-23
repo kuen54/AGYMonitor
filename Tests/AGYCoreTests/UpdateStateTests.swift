@@ -137,10 +137,10 @@ struct UpdateStateTests {
         // Recently checked 4 hours ago -> waits remaining 20 hours
         var recent = UpdateCheckerState(
             currentVersion: SemanticVersion(major: 1, minor: 5, patch: 2),
-            lastCheckAt: now.addingTimeInterval(-4 * 3600)
+            lastCheckAt: now.addingTimeInterval(-4.0 * 3600.0)
         )
         let recentEffects = UpdateCheckerMachine.reduce(&recent, event: .start(now: now))
-        #expect(recentEffects == [.scheduleAutoCheck(afterSeconds: 20 * 3600)])
+        #expect(recentEffects == [.scheduleAutoCheck(afterSeconds: 20.0 * 3600.0)])
 
         // Auto-check disabled -> schedules nothing
         var disabled = UpdateCheckerState(
