@@ -70,7 +70,7 @@ struct TranscriptTests {
         #expect(TranscriptParse.parseAnnotationTitle(octal) == #"中文 Title "Quoted""#)
     }
 
-    @Test("Handles SYSTEM_MESSAGE followup with/without tools, >600s rejection, <1.0s nil duration, clock skew, and sentinel fileMtime")
+    @Test("Handles SYSTEM_MESSAGE followup with/without tools, >1800s rejection, <1.0s nil duration, clock skew, and sentinel fileMtime")
     func outputSampleDurationInferenceEdgeCases() throws {
         // 1. SYSTEM_MESSAGE after tool-calling PLANNER_RESPONSE closes sample & computes duration
         let sysWithTools = """
@@ -94,15 +94,15 @@ struct TranscriptTests {
         #expect(abs(sWithoutTools.timestamp - t0) < 1e-6)
         #expect(sWithoutTools.durationSeconds == nil)
 
-        // 3. Followup > 600s after PLANNER_RESPONSE is rejected (keeps start timestamp & nil duration)
-        let over600s = """
+        // 3. Followup > 1800s after PLANNER_RESPONSE is rejected (keeps start timestamp & nil duration)
+        let over1800s = """
         {"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-23T04:00:00Z","model":"gemini-4-carbon-high","output_tokens":1200,"tool_calls":[{"name":"run_command"}]}
-        {"step_index":2,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"2026-11-23T04:10:01Z","content":"slow"}
+        {"step_index":2,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"2026-11-23T04:30:01Z","content":"slow"}
         """
-        let sumOver600 = TranscriptParse.scan(text: over600s)
-        let sOver600 = try #require(sumOver600.recentOutputSamples.last)
-        #expect(abs(sOver600.timestamp - t0) < 1e-6)
-        #expect(sOver600.durationSeconds == nil)
+        let sumOver1800 = TranscriptParse.scan(text: over1800s)
+        let sOver1800 = try #require(sumOver1800.recentOutputSamples.last)
+        #expect(abs(sOver1800.timestamp - t0) < 1e-6)
+        #expect(sOver1800.durationSeconds == nil)
 
         // 4. Sub-second (< 1.0s) followup updates timestamp but keeps durationSeconds == nil
         let subSecond = """
@@ -126,11 +126,11 @@ struct TranscriptTests {
         #expect(abs(sNegSkew.timestamp - t10) < 1e-6)
         #expect(sNegSkew.durationSeconds == nil)
 
-        // 6. Negative clock skew, sentinel (<= 2000-01-01), >600s, <1.0s, and non-finite fileMtime
+        // 6. Negative clock skew, sentinel (<= 2000-01-01), >1800s, <1.0s, and non-finite fileMtime
         let trailing = """
         {"step_index":5,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-23T04:00:10Z","model":"gemini-4-carbon-high","output_tokens":400}
         """
-        for badMtime in [t10 - 5.0, 0.0, 946_684_799.0, t10 + 601.0, Double.nan, Double.infinity] {
+        for badMtime in [t10 - 5.0, 0.0, 946_684_799.0, t10 + 1801.0, Double.nan, Double.infinity] {
             let sum = TranscriptParse.scan(text: trailing, fileMtime: badMtime)
             let sample = try #require(sum.recentOutputSamples.last)
             #expect(abs(sample.timestamp - t10) < 1e-6)

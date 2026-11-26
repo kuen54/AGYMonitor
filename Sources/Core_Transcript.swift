@@ -205,7 +205,7 @@ public enum TranscriptParse {
     /// (`USER_INPUT`, `PLANNER_RESPONSE`, `SYSTEM_MESSAGE`, `GENERIC`) and legacy
     /// `ai-title` / `last-prompt` / `user` records.
     public static func scan(text: String, fileMtime: TimeInterval? = nil) -> TranscriptSummary {
-        let maxInferredTurnDuration: Double = 600.0
+        let maxInferredTurnDuration: Double = 1800.0
         let validEpochFloor: Double = 946_684_800.0
 
         var title: String? = nil
@@ -222,11 +222,13 @@ public enum TranscriptParse {
 
         // Tracks the most recent PLANNER_RESPONSE awaiting its completion bound
         // (Antigravity writes `created_at` = turn start time, and only flushes the
-        // line to `transcript.jsonl` once the entire LLM generation completes).
+        // line's `output_tokens` once the entire LLM generation / last tool call completes).
         var pendingSampleStepIndex: Int? = nil
         var pendingSampleStartTs: Double = 0
         var pendingSampleTokens: Int = 0
-        var pendingSampleHadTools: Bool = false
+        var pendingSampleExpectedTools: Int = 0
+        var pendingSampleSeenGenericCount: Int = 0
+        var pendingSampleLatestEndTs: Double? = nil
 
         for sub in text.split(separator: "\n", omittingEmptySubsequences: true) {
             let line = String(sub)
@@ -239,25 +241,51 @@ public enum TranscriptParse {
             }
 
             if let step = parseStep(line) {
-                // If a prior PLANNER_RESPONSE is awaiting its completion timestamp, close it
-                // when an automated continuation step (GENERIC tool result, next PLANNER_RESPONSE,
-                // or SYSTEM_MESSAGE after a tool-calling turn) immediately follows within 600s.
+                // If a prior PLANNER_RESPONSE is awaiting its completion timestamp:
+                // - Multi-tool turns emit one GENERIC step per tool call as each finishes streaming,
+                //   so keep advancing `pendingSampleLatestEndTs` across consecutive GENERIC steps up
+                //   to `pendingSampleExpectedTools` before closing.
+                // - When a non-GENERIC step arrives, close immediately; only adopt `nextTs` for
+                //   `.plannerResponse` or tool-calling `.systemMessage` if no GENERIC already
+                //   extended it (never adopt `.userInput` human reply time).
                 if let pendingIdx = pendingSampleStepIndex, step.stepIndex > pendingIdx {
-                    let isAutomatedFollowup = (step.type == .generic || step.type == .plannerResponse)
-                        || (pendingSampleHadTools && step.type == .systemMessage)
-                    if isAutomatedFollowup,
-                       let nextTs = step.createdAt?.timeIntervalSince1970,
-                       nextTs >= pendingSampleStartTs,
-                       (nextTs - pendingSampleStartTs) <= maxInferredTurnDuration {
-                        let delta = nextTs - pendingSampleStartTs
-                        outputSamplesByStep[pendingIdx] = OutputTokenSample(
-                            stepIndex: pendingIdx,
-                            timestamp: nextTs,
-                            outputTokens: pendingSampleTokens,
-                            durationSeconds: delta >= 1.0 ? delta : nil
-                        )
+                    if step.type == .generic {
+                        pendingSampleSeenGenericCount += 1
+                        if let nextTs = step.createdAt?.timeIntervalSince1970,
+                           nextTs >= pendingSampleStartTs,
+                           (nextTs - pendingSampleStartTs) <= maxInferredTurnDuration {
+                            let extendedEndTs = max(pendingSampleLatestEndTs ?? nextTs, nextTs)
+                            pendingSampleLatestEndTs = extendedEndTs
+                            let delta = extendedEndTs - pendingSampleStartTs
+                            outputSamplesByStep[pendingIdx] = OutputTokenSample(
+                                stepIndex: pendingIdx,
+                                timestamp: extendedEndTs,
+                                outputTokens: pendingSampleTokens,
+                                durationSeconds: delta >= 1.0 ? delta : nil
+                            )
+                        }
+                        if pendingSampleSeenGenericCount >= max(1, pendingSampleExpectedTools) {
+                            pendingSampleStepIndex = nil
+                        }
+                    } else {
+                        let isAutomatedFollowup = (step.type == .plannerResponse)
+                            || (pendingSampleExpectedTools > 0 && step.type == .systemMessage)
+                        if isAutomatedFollowup,
+                           pendingSampleSeenGenericCount == 0,
+                           pendingSampleLatestEndTs == nil,
+                           let nextTs = step.createdAt?.timeIntervalSince1970,
+                           nextTs >= pendingSampleStartTs,
+                           (nextTs - pendingSampleStartTs) <= maxInferredTurnDuration {
+                            let delta = nextTs - pendingSampleStartTs
+                            outputSamplesByStep[pendingIdx] = OutputTokenSample(
+                                stepIndex: pendingIdx,
+                                timestamp: nextTs,
+                                outputTokens: pendingSampleTokens,
+                                durationSeconds: delta >= 1.0 ? delta : nil
+                            )
+                        }
+                        pendingSampleStepIndex = nil
                     }
-                    pendingSampleStepIndex = nil
                 }
 
                 lastStep = step
@@ -296,7 +324,9 @@ public enum TranscriptParse {
                         pendingSampleStepIndex = step.stepIndex
                         pendingSampleStartTs = startTs
                         pendingSampleTokens = step.outputTokens
-                        pendingSampleHadTools = !step.toolNames.isEmpty
+                        pendingSampleExpectedTools = step.toolNames.count
+                        pendingSampleSeenGenericCount = 0
+                        pendingSampleLatestEndTs = nil
                     }
                     if step.status == .error {
                         activePlannerTools = []

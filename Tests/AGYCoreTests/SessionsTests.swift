@@ -652,6 +652,89 @@ struct SessionsTests {
             transcriptFileMtime: nil,
             now: now
         ) == false)
+
+        // 11. Long-turn DB generating step (status == 8) & dbActivityMtime support
+        // Live DB generating step keeps subagent active through 1800s even with stale transcript
+        #expect(SessionLogic.isSubagentActivelyGenerating(
+            rawStatus: "CASCADE_RUN_STATUS_IDLE",
+            notFullyIdle: false,
+            killed: false,
+            isAliveDescriptor: false,
+            transcriptSummary: crashedDoneSummary,
+            transcriptFileMtime: now - 1200.0,
+            now: now,
+            hasLiveGeneratingDBStep: true,
+            dbActivityMtime: now - 1500.0
+        ) == true)
+
+        // Killed still overrides live DB generating step
+        #expect(SessionLogic.isSubagentActivelyGenerating(
+            rawStatus: "CASCADE_RUN_STATUS_IDLE",
+            notFullyIdle: false,
+            killed: true,
+            isAliveDescriptor: true,
+            transcriptSummary: nil,
+            transcriptFileMtime: nil,
+            now: now,
+            hasLiveGeneratingDBStep: true,
+            dbActivityMtime: now - 5.0
+        ) == false)
+
+        // Hung DB generating step (> 1800s) is rejected
+        #expect(SessionLogic.isSubagentActivelyGenerating(
+            rawStatus: "CASCADE_RUN_STATUS_IDLE",
+            notFullyIdle: false,
+            killed: false,
+            isAliveDescriptor: false,
+            transcriptSummary: nil,
+            transcriptFileMtime: nil,
+            now: now,
+            hasLiveGeneratingDBStep: true,
+            dbActivityMtime: now - 1850.0
+        ) == false)
+
+        // Fresh dbActivityMtime satisfies RUNNING / notFullyIdle recency when transcript lags
+        #expect(SessionLogic.isSubagentActivelyGenerating(
+            rawStatus: "CASCADE_RUN_STATUS_RUNNING",
+            notFullyIdle: true,
+            killed: false,
+            isAliveDescriptor: true,
+            transcriptSummary: crashedDoneSummary,
+            transcriptFileMtime: now - 1200.0,
+            now: now,
+            hasLiveGeneratingDBStep: false,
+            dbActivityMtime: now - 15.0
+        ) == true)
+
+        // Orphan freshness accepts dbActivityMtime <= 300s and live DB generating step <= 600s, rejects > 600s
+        #expect(SessionLogic.isOrphanSubagentFresh(
+            transcriptSummary: nil,
+            transcriptFileMtime: nil,
+            now: now,
+            hasLiveGeneratingDBStep: false,
+            dbActivityMtime: now - 250.0
+        ) == true)
+        #expect(SessionLogic.isOrphanSubagentFresh(
+            transcriptSummary: errorSummary,
+            transcriptFileMtime: nil,
+            now: now,
+            hasLiveGeneratingDBStep: false,
+            dbActivityMtime: now - 10.0
+        ) == false)
+        #expect(SessionLogic.isOrphanSubagentFresh(
+            transcriptSummary: nil,
+            transcriptFileMtime: nil,
+            now: now,
+            hasLiveGeneratingDBStep: true,
+            dbActivityMtime: now - 550.0
+        ) == true)
+        #expect(SessionLogic.isOrphanSubagentFresh(
+            transcriptSummary: nil,
+            transcriptFileMtime: nil,
+            now: now,
+            hasLiveGeneratingDBStep: true,
+            dbActivityMtime: now - 650.0
+        ) == false)
     }
 
     @Test("Cross-surface SQLite merge preserves live CLI RUNNING/killed state over newer Desktop mirrors and accepts sentinel subagent timestamps")

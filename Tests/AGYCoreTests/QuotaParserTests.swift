@@ -387,4 +387,591 @@ struct QuotaParserTests {
         #expect(buckets[3].id == "claude_partner_weekly")
         #expect(buckets[3].remainingPercent == 100)
     }
+
+    @Test("Decoupled AICode unused Gemini pool never clobbers consumed 5h or injects fake 100% gemini_weekly")
+    func decoupledAICodeDoesNotClobberOrInjectFakeWeekly() throws {
+        // Exact user bug reproduction:
+        // - daily fetchAvailableModels reports Gemini at 87% remaining with 1h reset
+        // - retrieveUserQuotaSummary returns 3P-only buckets with Claude & GPT at 26%
+        // - decoupled aicode returns dummy 100% buckets with 5h/7d resets
+        let availableModelsJSON = """
+        {
+          "models": {
+            "gemini-4-carbon-medium": {
+              "displayName": "Gemini 4 Carbon (Medium)",
+              "quotaInfo": { "remainingFraction": 0.87, "resetTime": "2026-11-26T08:20:00Z" }
+            },
+            "claude-opus-5-5-high": {
+              "displayName": "Claude Opus 5.5 (High)",
+              "quotaInfo": { "remainingFraction": 0.26, "resetTime": "2026-11-26T10:00:00Z" }
+            }
+          }
+        }
+        """
+        let summary3POnlyJSON = """
+        {
+          "groups": [
+            {
+              "displayName": "Claude and GPT models",
+              "description": "Models within this group: Claude Opus 5.5, Claude Sonnet 5.5, GPT-OSS 120B",
+              "buckets": [
+                {
+                  "bucketId": "3p-5h",
+                  "displayName": "Five Hour Limit Remaining",
+                  "window": "5h",
+                  "remainingFraction": 0.26,
+                  "resetTime": "2026-11-26T10:00:00Z"
+                },
+                {
+                  "bucketId": "3p-weekly",
+                  "displayName": "Weekly Limit Remaining",
+                  "window": "weekly",
+                  "remainingFraction": 0.64,
+                  "resetTime": "2026-12-03T07:00:00Z"
+                }
+              ]
+            }
+          ]
+        }
+        """
+        let decoupledAICodeJSON = """
+        {
+          "quotaSummary": {
+            "groups": [
+              {
+                "displayName": "Gemini Models",
+                "buckets": [
+                  {
+                    "bucketId": "gemini-5h",
+                    "displayName": "Five Hour Limit Remaining",
+                    "refreshWindowLabel": "5h",
+                    "remainingFraction": 1.0,
+                    "resetTime": "2026-11-26T12:20:00Z"
+                  },
+                  {
+                    "bucketId": "gemini-weekly",
+                    "displayName": "Weekly Limit Remaining",
+                    "refreshWindowLabel": "weekly",
+                    "remainingFraction": 1.0,
+                    "resetTime": "2026-12-03T07:20:00Z"
+                  }
+                ]
+              },
+              {
+                "displayName": "Claude and GPT models",
+                "buckets": [
+                  {
+                    "bucketId": "3p-5h",
+                    "displayName": "Five Hour Limit Remaining",
+                    "refreshWindowLabel": "5h",
+                    "remainingFraction": 1.0,
+                    "resetTime": "2026-11-26T12:20:00Z"
+                  },
+                  {
+                    "bucketId": "3p-weekly",
+                    "displayName": "Weekly Limit Remaining",
+                    "refreshWindowLabel": "weekly",
+                    "remainingFraction": 1.0,
+                    "resetTime": "2026-12-03T07:20:00Z"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+        """
+
+        let merged = AGYQuotaParser.mergeLiveQuotaBuckets(
+            availableModelsData: Data(availableModelsJSON.utf8),
+            quotaSummaryData: Data(summary3POnlyJSON.utf8),
+            aicodeQuotaData: Data(decoupledAICodeJSON.utf8)
+        )
+
+        #expect(merged.count == 3)
+        #expect(!AGYQuotaParser.hasGeminiWeeklyBucket(merged))
+        #expect(merged.map(\.id) == ["gemini", "claude_partner", "claude_partner_weekly"])
+
+        let expectedGeminiReset = try #require(AppDate.parseISO8601("2026-11-26T08:20:00Z"))
+        #expect(merged[0].remainingPercent == 87)
+        #expect(merged[0].resetAt == expectedGeminiReset)
+        #expect(merged[1].remainingPercent == 26)
+        #expect(merged[1].title == "Claude & GPT · 5h")
+        #expect(merged[2].remainingPercent == 64)
+    }
+
+    @Test("Parses modern Hub retrieveUserQuotaSummary with all 4 standard buckets")
+    func parseModernHubFourBucketSummary() throws {
+        let hubSummaryJSON = """
+        {
+          "groups": [
+            {
+              "displayName": "Gemini Models",
+              "description": "Models within this group: Gemini Flash, Gemini Pro",
+              "buckets": [
+                {
+                  "bucketId": "gemini-weekly",
+                  "displayName": "Weekly Limit Remaining",
+                  "window": "weekly",
+                  "remainingFraction": 0.77,
+                  "resetTime": "2026-12-01T02:27:57Z"
+                },
+                {
+                  "bucketId": "gemini-5h",
+                  "displayName": "Five Hour Limit Remaining",
+                  "window": "5h",
+                  "remainingFraction": 0.87,
+                  "resetTime": "2026-11-26T08:20:00Z"
+                }
+              ]
+            },
+            {
+              "displayName": "Claude and GPT models",
+              "description": "Models within this group: Claude Opus, Claude Sonnet, GPT-OSS",
+              "buckets": [
+                {
+                  "bucketId": "3p-weekly",
+                  "displayName": "Weekly Limit Remaining",
+                  "window": "weekly",
+                  "remainingFraction": 0.52,
+                  "resetTime": "2026-12-02T14:00:00Z"
+                },
+                {
+                  "bucketId": "3p-5h",
+                  "displayName": "Five Hour Limit Remaining",
+                  "window": "5h",
+                  "remainingFraction": 0.26,
+                  "resetTime": "2026-11-26T10:15:00Z"
+                }
+              ]
+            }
+          ]
+        }
+        """
+
+        let buckets = AGYQuotaParser.parseAvailableModelsJSON(Data(hubSummaryJSON.utf8))
+        #expect(buckets.count == 4)
+        #expect(AGYQuotaParser.hasGeminiWeeklyBucket(buckets))
+        #expect(buckets.map(\.id) == ["gemini", "gemini_weekly", "claude_partner", "claude_partner_weekly"])
+        #expect(buckets[0].remainingPercent == 87)
+        #expect(buckets[1].remainingPercent == 77)
+        #expect(buckets[1].resetAt == AppDate.parseISO8601("2026-12-01T02:27:57Z"))
+        #expect(buckets[2].remainingPercent == 26)
+        #expect(buckets[3].remainingPercent == 52)
+    }
+
+    @Test("Parses agy -p /usage --output-format json including epoch sentinel filtering, rejections, and CLI fallback merge")
+    func parseCLIUsageJSONAndFallbackMerge() throws {
+        let cliUsageJSON = """
+        {
+          "status": "SUCCESS",
+          "command": {
+            "name": "usage",
+            "data": {
+              "description": "Current plan usage summary",
+              "groups": [
+                {
+                  "name": "Gemini Models",
+                  "description": "Models within this group: Gemini 4 Carbon, Gemini 4 Neon, Gemini Flash",
+                  "buckets": [
+                    {
+                      "id": "gemini-weekly",
+                      "name": "Weekly Limit Remaining",
+                      "window": "weekly",
+                      "remaining_fraction": 0.77,
+                      "reset_time": "2026-12-01T02:27:57Z"
+                    },
+                    {
+                      "id": "gemini-5h",
+                      "name": "Five Hour Limit Remaining",
+                      "window": "5h",
+                      "remaining_fraction": 0.87,
+                      "reset_time": "1970-01-01T00:00:00Z"
+                    }
+                  ]
+                },
+                {
+                  "name": "Claude and GPT models",
+                  "description": "Models within this group: Claude Opus, Claude Sonnet, GPT-OSS",
+                  "buckets": [
+                    {
+                      "id": "3p-weekly",
+                      "name": "Weekly Limit Remaining",
+                      "window": "weekly",
+                      "remaining_fraction": 1.0,
+                      "reset_time": "0001-01-01T00:00:00Z"
+                    },
+                    {
+                      "id": "3p-5h",
+                      "name": "Five Hour Limit Remaining",
+                      "window": "5h",
+                      "remaining_fraction": 0.91,
+                      "reset_time": "2026-11-26T11:30:00Z"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+        """
+
+        let cliBuckets = AGYQuotaParser.parseCLIUsageJSON(Data(cliUsageJSON.utf8))
+        #expect(cliBuckets.count == 4)
+        #expect(AGYQuotaParser.hasGeminiWeeklyBucket(cliBuckets))
+        #expect(cliBuckets[0].id == "gemini")
+        #expect(cliBuckets[0].remainingPercent == 87)
+        #expect(cliBuckets[0].resetAt == nil) // 1970-01-01T00:00:00Z treated as nil
+        #expect(cliBuckets[1].id == "gemini_weekly")
+        #expect(cliBuckets[1].remainingPercent == 77)
+        #expect(cliBuckets[1].resetAt == AppDate.parseISO8601("2026-12-01T02:27:57Z"))
+        #expect(cliBuckets[2].id == "claude_partner")
+        #expect(cliBuckets[2].remainingPercent == 91)
+        #expect(cliBuckets[3].id == "claude_partner_weekly")
+        #expect(cliBuckets[3].resetAt == nil) // 0001-01-01T00:00:00Z treated as nil
+
+        // Reject non-SUCCESS status and non-usage commands
+        let errorStatusJSON = """
+        { "status": "ERROR", "command": { "name": "usage", "data": { "groups": [{ "name": "Gemini Models", "buckets": [{ "id": "gemini-weekly", "remaining_fraction": 0.5 }] }] } } }
+        """
+        #expect(AGYQuotaParser.parseCLIUsageJSON(Data(errorStatusJSON.utf8)).isEmpty)
+
+        let wrongCommandJSON = """
+        { "status": "SUCCESS", "command": { "name": "models", "data": { "groups": [{ "name": "Gemini Models", "buckets": [{ "id": "gemini-weekly", "remaining_fraction": 0.5 }] }] } } }
+        """
+        #expect(AGYQuotaParser.parseCLIUsageJSON(Data(wrongCommandJSON.utf8)).isEmpty)
+
+        // Merge with fetchAvailableModels (which has a real resetTime for gemini 5h) + CLI fallback
+        let modelsJSON = """
+        {
+          "models": {
+            "gemini-4-carbon-medium": {
+              "displayName": "Gemini 4 Carbon (Medium)",
+              "quotaInfo": { "remainingFraction": 0.87, "resetTime": "2026-11-26T08:20:00Z" }
+            }
+          }
+        }
+        """
+        let merged = AGYQuotaParser.mergeLiveQuotaBuckets(
+            availableModelsData: Data(modelsJSON.utf8),
+            quotaSummaryData: nil,
+            aicodeQuotaData: nil,
+            cliUsageData: Data(cliUsageJSON.utf8)
+        )
+        #expect(merged.count == 4)
+        #expect(AGYQuotaParser.hasGeminiWeeklyBucket(merged))
+        let expectedGeminiReset = try #require(AppDate.parseISO8601("2026-11-26T08:20:00Z"))
+        // Tied remainingFraction (0.87): valid non-nil resetAt from models wins over nil epoch reset from CLI
+        #expect(merged[0].id == "gemini")
+        #expect(merged[0].remainingPercent == 87)
+        #expect(merged[0].resetAt == expectedGeminiReset)
+        #expect(merged[1].id == "gemini_weekly")
+        #expect(merged[1].remainingPercent == 77)
+    }
+
+    @Test("Preserves distinct Gemini sub-tier buckets (gemini-argon-wtu-weekly) alongside gemini-weekly and deduplicates safely")
+    func distinctGeminiSubTierAndSafeDedup() throws {
+        let cliJSON = """
+        {
+          "status": "SUCCESS",
+          "command": {
+            "name": "usage",
+            "data": {
+              "groups": [
+                {
+                  "name": "Gemini Models",
+                  "buckets": [
+                    {
+                      "id": "gemini-weekly",
+                      "name": "Weekly Limit Remaining",
+                      "window": "weekly",
+                      "remaining_fraction": 0.90,
+                      "reset_time": "2026-12-01T08:00:00Z"
+                    },
+                    {
+                      "id": "gemini-weekly",
+                      "name": "Weekly Limit Remaining",
+                      "window": "weekly",
+                      "remaining_fraction": 0.77,
+                      "reset_time": "2026-12-01T02:27:57Z"
+                    },
+                    {
+                      "id": "gemini-5h",
+                      "name": "Five Hour Limit Remaining",
+                      "window": "5h",
+                      "remaining_fraction": 0.85,
+                      "reset_time": "2026-11-26T10:00:00Z"
+                    },
+                    {
+                      "id": "gemini-5h",
+                      "name": "Five Hour Limit Remaining",
+                      "window": "5h",
+                      "remaining_fraction": 0.85,
+                      "reset_time": "2026-11-26T09:00:00Z"
+                    }
+                  ]
+                },
+                {
+                  "name": "Gemini Argon WTU",
+                  "description": "Models within this group: Gemini 4 Argon",
+                  "buckets": [
+                    {
+                      "id": "gemini-argon-wtu-weekly",
+                      "name": "Weekly Limit Remaining",
+                      "window": "weekly",
+                      "remaining_fraction": 0.42,
+                      "reset_time": "2026-12-01T04:00:00Z"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+        """
+
+        let buckets = AGYQuotaParser.parseCLIUsageJSON(Data(cliJSON.utf8))
+        #expect(buckets.count == 3)
+        #expect(AGYQuotaParser.hasGeminiWeeklyBucket(buckets))
+        #expect(buckets.map(\.id) == ["gemini", "gemini_weekly", "gemini_argon_wtu_weekly"])
+
+        // Tied remainingFraction on gemini-5h deduplicates to earlier resetAt
+        #expect(buckets[0].remainingPercent == 85)
+        #expect(buckets[0].resetAt == AppDate.parseISO8601("2026-11-26T09:00:00Z"))
+
+        // Duplicate gemini-weekly deduplicates to lower remainingFraction (0.77)
+        #expect(buckets[1].remainingPercent == 77)
+        #expect(buckets[1].resetAt == AppDate.parseISO8601("2026-12-01T02:27:57Z"))
+
+        // Sub-tier bucket stays distinct and never clobbers gemini_weekly
+        #expect(buckets[2].id == "gemini_argon_wtu_weekly")
+        #expect(buckets[2].title == "Gemini Argon WTU")
+        #expect(buckets[2].remainingPercent == 42)
+        #expect(buckets[2].modelClasses == [.argon])
+        #expect(buckets[2].resetAt == AppDate.parseISO8601("2026-12-01T04:00:00Z"))
+
+        // A sub-tier bucket alone does NOT satisfy hasGeminiWeeklyBucket
+        #expect(!AGYQuotaParser.hasGeminiWeeklyBucket([buckets[2]]))
+    }
+
+    @Test("Handles proto3/Go omitempty zero exhaustion and skips empty sentinel summary buckets")
+    func proto3ZeroExhaustionAndEmptySummaryBucketSkipping() throws {
+        let cliJSON = """
+        {
+          "status": "SUCCESS",
+          "command": {
+            "name": "usage",
+            "data": {
+              "groups": [
+                {
+                  "name": "Gemini Models",
+                  "buckets": [
+                    {
+                      "id": "gemini-5h",
+                      "name": "Five Hour Limit Remaining",
+                      "window": "5h",
+                      "remaining_fraction": 0,
+                      "reset_time": "2026-11-26T10:00:00Z"
+                    },
+                    {
+                      "id": "gemini-weekly",
+                      "name": "Weekly Limit Remaining",
+                      "window": "weekly",
+                      "reset_time": "2026-12-01T02:27:57Z"
+                    }
+                  ]
+                },
+                {
+                  "name": "Claude and GPT models",
+                  "buckets": [
+                    {
+                      "id": "3p-5h",
+                      "name": "Five Hour Limit Remaining",
+                      "window": "5h",
+                      "reset_time": "1970-01-01T00:00:00Z"
+                    },
+                    {
+                      "id": "3p-weekly",
+                      "name": "Weekly Limit Remaining",
+                      "window": "weekly",
+                      "remaining_fraction": true
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+        """
+
+        let buckets = AGYQuotaParser.parseCLIUsageJSON(Data(cliJSON.utf8))
+        #expect(buckets.count == 2)
+        #expect(buckets.map(\.id) == ["gemini", "gemini_weekly"])
+
+        // Explicit 0 -> 0% remaining
+        #expect(buckets[0].remainingPercent == 0)
+        #expect(buckets[0].usedPercent == 100)
+        #expect(buckets[0].resetAt == AppDate.parseISO8601("2026-11-26T10:00:00Z"))
+
+        // Omitted remaining_fraction with valid future reset_time -> 0% remaining (exhausted)
+        #expect(buckets[1].remainingPercent == 0)
+        #expect(buckets[1].usedPercent == 100)
+        #expect(buckets[1].resetAt == AppDate.parseISO8601("2026-12-01T02:27:57Z"))
+        // 3p-5h (omitted fraction + sentinel reset) and 3p-weekly (Bool fraction + missing reset) are skipped
+    }
+
+    @Test("Nested gemini-argon-wtu-weekly inside Gemini Models group keeps distinct Argon title and class despite Hydrogen in group description")
+    func nestedArgonSubTierInsideGenericGeminiModelsGroup() {
+        let cliJSON = """
+        {
+          "status": "SUCCESS",
+          "command": {
+            "name": "usage",
+            "data": {
+              "groups": [
+                {
+                  "name": "Gemini Models",
+                  "description": "Models within this group: Gemini 4 Hydrogen, Gemini 4 Argon, Gemini 4 Carbon",
+                  "buckets": [
+                    {
+                      "id": "gemini-weekly",
+                      "name": "Weekly Limit Remaining",
+                      "window": "weekly",
+                      "remaining_fraction": 0.77,
+                      "reset_time": "2026-12-01T02:27:57Z"
+                    },
+                    {
+                      "id": "gemini-argon-wtu-weekly",
+                      "name": "Weekly Limit Remaining",
+                      "window": "weekly",
+                      "remaining_fraction": 0.55,
+                      "reset_time": "2026-12-01T02:27:57Z"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+        """
+
+        let buckets = AGYQuotaParser.parseCLIUsageJSON(Data(cliJSON.utf8))
+        #expect(buckets.count == 2)
+        #expect(buckets[0].id == "gemini_weekly")
+        #expect(buckets[1].id == "gemini_argon_wtu_weekly")
+        #expect(buckets[1].title == "Gemini Argon WTU · Weekly")
+        #expect(buckets[1].modelClasses == [.argon])
+        #expect(ModelClass.classify(buckets[1].title) == .argon)
+    }
+
+    @Test("Merge preserves valid resetAt from losing bucket when lower-fraction winner has nil resetAt")
+    func mergePreservesValidResetAtWhenWinnerResetIsNil() throws {
+        let modelsJSON = """
+        {
+          "models": {
+            "gemini-4-carbon-medium": {
+              "displayName": "Gemini 4 Carbon (Medium)",
+              "quotaInfo": { "remainingFraction": 0.87, "resetTime": "2026-11-26T08:20:00Z" }
+            }
+          }
+        }
+        """
+        let cliJSON = """
+        {
+          "status": "SUCCESS",
+          "command": {
+            "name": "usage",
+            "data": {
+              "groups": [
+                {
+                  "name": "Gemini Models",
+                  "buckets": [
+                    {
+                      "id": "gemini-5h",
+                      "name": "Five Hour Limit Remaining",
+                      "window": "5h",
+                      "remaining_fraction": 0.85,
+                      "reset_time": "1970-01-01T00:00:00Z"
+                    },
+                    {
+                      "id": "gemini-weekly",
+                      "name": "Weekly Limit Remaining",
+                      "window": "weekly",
+                      "remaining_fraction": 0.77,
+                      "reset_time": "2026-12-01T02:27:57Z"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+        """
+
+        let merged = AGYQuotaParser.mergeLiveQuotaBuckets(
+            availableModelsData: Data(modelsJSON.utf8),
+            quotaSummaryData: nil,
+            aicodeQuotaData: nil,
+            cliUsageData: Data(cliJSON.utf8)
+        )
+        #expect(merged.count == 2)
+        let expectedReset = try #require(AppDate.parseISO8601("2026-11-26T08:20:00Z"))
+        // CLI's lower remainingFraction (0.85) wins, while models' valid resetAt is preserved
+        #expect(merged[0].id == "gemini")
+        #expect(merged[0].remainingPercent == 85)
+        #expect(merged[0].resetAt == expectedReset)
+        #expect(merged[1].id == "gemini_weekly")
+        #expect(merged[1].remainingPercent == 77)
+    }
+
+    @Test("Unused 100% summary bucket with nil reset wins over fetchAvailableModels synthetic rolling reset")
+    func unusedSummaryNilResetBeatsSyntheticModelReset() {
+        let modelsJSON = """
+        {
+          "models": {
+            "claude-opus-5-5-high": {
+              "displayName": "Claude Opus 5.5 (High)",
+              "quotaInfo": { "remainingFraction": 1.0, "resetTime": "2026-11-26T12:42:28Z" }
+            }
+          }
+        }
+        """
+        let summaryJSON = """
+        {
+          "groups": [
+            {
+              "displayName": "Claude and GPT models",
+              "buckets": [
+                {
+                  "bucketId": "3p-5h",
+                  "displayName": "Five Hour Limit Remaining",
+                  "window": "5h",
+                  "remainingFraction": 1.0,
+                  "resetTime": "1970-01-01T00:00:00Z"
+                },
+                {
+                  "bucketId": "3p-weekly",
+                  "displayName": "Weekly Limit Remaining",
+                  "window": "weekly",
+                  "remainingFraction": 0.26,
+                  "resetTime": "2026-11-30T00:52:12Z"
+                }
+              ]
+            }
+          ]
+        }
+        """
+
+        let merged = AGYQuotaParser.mergeLiveQuotaBuckets(
+            availableModelsData: Data(modelsJSON.utf8),
+            quotaSummaryData: Data(summaryJSON.utf8)
+        )
+        #expect(merged.count == 2)
+        #expect(merged[0].id == "claude_partner")
+        #expect(merged[0].title == "Claude & GPT · 5h")
+        #expect(merged[0].remainingPercent == 100)
+        #expect(merged[0].resetAt == nil)
+        #expect(merged[1].id == "claude_partner_weekly")
+        #expect(merged[1].remainingPercent == 26)
+        #expect(merged[1].resetAt == AppDate.parseISO8601("2026-11-30T00:52:12Z"))
+    }
 }

@@ -439,30 +439,112 @@ public enum AGYQuotaParser {
         return aggregateModelQuotaSamples(samples)
     }
 
+    /// Parse stdout JSON from `agy -p "/usage" --output-format json`:
+    /// `{"status":"SUCCESS","command":{"name":"usage","data":{"groups":[...]}}}`.
+    /// Rejects non-SUCCESS status or non-usage commands when those fields are present.
+    public static func parseCLIUsageJSON(_ data: Data) -> [AGYModelQuotaBucket] {
+        guard !data.isEmpty,
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return []
+        }
+
+        if let statusAny = root["status"] {
+            guard let status = (statusAny as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .uppercased(),
+                  status == "SUCCESS" else {
+                return []
+            }
+        }
+
+        if let commandAny = root["command"] {
+            guard let command = commandAny as? [String: Any] else {
+                return []
+            }
+            if let nameAny = command["name"] {
+                guard let name = (nameAny as? String)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased(),
+                      name == "usage" else {
+                    return []
+                }
+            }
+            guard let commandData = command["data"] as? [String: Any] else {
+                return []
+            }
+            return parseQuotaSummaryBuckets(commandData)
+        }
+
+        return parseQuotaSummaryBuckets(root)
+    }
+
+    /// True when `buckets` contains the canonical standard Gemini weekly bucket (`gemini_weekly`).
+    public static func hasGeminiWeeklyBucket(_ buckets: [AGYModelQuotaBucket]) -> Bool {
+        buckets.contains(where: { $0.id == "gemini_weekly" })
+    }
+
     /// Merge live buckets from `v1internal:fetchAvailableModels` (which holds Gemini's
-    /// 5h rolling quota), `v1internal:retrieveUserQuotaSummary` (3P "Claude and GPT models"
-    /// 5h + weekly buckets), and `aicode.googleapis.com/v1alpha:fetchQuotaStatus` (all
-    /// Gemini + 3P 5h/weekly buckets).
+    /// 5h rolling quota), `v1internal:retrieveUserQuotaSummary` (Gemini & 3P 5h + weekly
+    /// buckets), optional `aicode.googleapis.com/v1alpha:fetchQuotaStatus`, and optional
+    /// `agy -p "/usage" --output-format json` fallback output.
     public static func mergeLiveQuotaBuckets(
         availableModelsData: Data?,
         quotaSummaryData: Data?,
-        aicodeQuotaData: Data? = nil
+        aicodeQuotaData: Data? = nil,
+        cliUsageData: Data? = nil
     ) -> [AGYModelQuotaBucket] {
         let modelBuckets = availableModelsData.map(parseAvailableModelsJSON) ?? []
         let summaryBuckets = quotaSummaryData.map(parseAvailableModelsJSON) ?? []
-        let aicodeBuckets = aicodeQuotaData.map(parseAvailableModelsJSON) ?? []
+        let cliUsageBuckets = cliUsageData.map(parseCLIUsageJSON) ?? []
+        var aicodeBuckets = aicodeQuotaData.map(parseAvailableModelsJSON) ?? []
 
-        var merged: [String: AGYModelQuotaBucket] = [:]
-        for bucket in modelBuckets {
-            merged[bucket.id] = bucket
+        // Decoupled AICode guard: when primary live sources report consumed Gemini 5h quota
+        // while AICode reports Gemini 5h as unused (100%), drop AICode's unused Gemini 5h
+        // and unused Gemini weekly buckets so a decoupled pool never injects a fake 100% 7D bar.
+        let primaryConsumedGemini = (modelBuckets + summaryBuckets + cliUsageBuckets).contains {
+            $0.id == "gemini" && $0.remainingFraction < 0.999
         }
-        for bucket in summaryBuckets {
-            merged[bucket.id] = bucket
+        let aicodeUnusedGemini = aicodeBuckets.contains {
+            $0.id == "gemini" && $0.remainingFraction >= 0.999
         }
-        for bucket in aicodeBuckets {
-            merged[bucket.id] = bucket
+        if primaryConsumedGemini && aicodeUnusedGemini {
+            aicodeBuckets.removeAll {
+                ($0.id == "gemini" || $0.id == "gemini_weekly") && $0.remainingFraction >= 0.999
+            }
         }
-        return merged.values.sorted(by: bucketSortOrder)
+
+        var merged: [String: (bucket: AGYModelQuotaBucket, rank: Int)] = [:]
+        func mergeSource(_ buckets: [AGYModelQuotaBucket], rank: Int) {
+            for bucket in buckets {
+                if let existing = merged[bucket.id] {
+                    if preferCandidateBucket(
+                        existing: existing.bucket,
+                        existingRank: existing.rank,
+                        candidate: bucket,
+                        candidateRank: rank
+                    ) {
+                        merged[bucket.id] = (
+                            combineMergedBucket(winner: bucket, loser: existing.bucket),
+                            rank
+                        )
+                    } else {
+                        merged[bucket.id] = (
+                            combineMergedBucket(winner: existing.bucket, loser: bucket),
+                            existing.rank
+                        )
+                    }
+                } else {
+                    merged[bucket.id] = (bucket, rank)
+                }
+            }
+        }
+
+        mergeSource(modelBuckets, rank: 0)
+        mergeSource(summaryBuckets, rank: 1)
+        mergeSource(cliUsageBuckets, rank: 1)
+        mergeSource(aicodeBuckets, rank: 1)
+
+        return merged.values.map(\.bucket).sorted(by: bucketSortOrder)
     }
 
     // MARK: 3b) `agi` / `agy` Keychain OAuth payload (`go-keyring-base64:`)
@@ -791,9 +873,16 @@ public enum AGYQuotaParser {
         return nil
     }
 
+    private static func parseResetTime(_ raw: String?) -> Date? {
+        guard let date = AppDate.parseISO8601(raw) else { return nil }
+        // Treat epoch/near-epoch sentinel timestamps (e.g. "1970-01-01T00:00:00Z") as unset.
+        guard date.timeIntervalSince1970 > 86_400 else { return nil }
+        return date
+    }
+
     private static func decodeProtoTimestamp(_ data: Data) -> Date? {
         if let str = ProtobufWire.utf8PrintableString(data),
-           let iso = AppDate.parseISO8601(str) {
+           let iso = parseResetTime(str) {
             return iso
         }
         guard let msg = ProtobufWire.parse(data), !msg.fields.isEmpty else { return nil }
@@ -1021,15 +1110,9 @@ public enum AGYQuotaParser {
             return nil
         }
 
-        let rawRem: Double? = {
-            if let d = qInfo["remainingFraction"] as? Double { return d }
-            if let i = qInfo["remainingFraction"] as? Int { return Double(i) }
-            if let d = qInfo["remaining_fraction"] as? Double { return d }
-            if let i = qInfo["remaining_fraction"] as? Int { return Double(i) }
-            return nil
-        }()
+        let rawRem = parseJSONFraction(qInfo, keys: ["remainingFraction", "remaining_fraction"])
         let resetStr = (qInfo["resetTime"] as? String) ?? (qInfo["reset_time"] as? String)
-        let resetAt = AppDate.parseISO8601(resetStr)
+        let resetAt = parseResetTime(resetStr)
 
         guard rawRem != nil || resetAt != nil else { return nil }
         let remaining = min(1.0, max(0.0, rawRem ?? 0.0))
@@ -1047,6 +1130,152 @@ public enum AGYQuotaParser {
         )
     }
 
+    private static let standardGeminiSummaryIds: Set<String> = [
+        "",
+        "gemini",
+        "gemini_5h",
+        "gemini_weekly",
+        "1p",
+        "1p_5h",
+        "1p_weekly"
+    ]
+
+    private static func parseJSONFraction(_ dict: [String: Any], keys: [String]) -> Double? {
+        let cfBoolClass: AnyClass = type(of: NSNumber(value: true))
+        for key in keys {
+            guard let raw = dict[key] else { continue }
+            // Avoid `raw is Bool`, which bridges NSNumber(0)/NSNumber(1) to Bool on Darwin.
+            if type(of: raw) == Bool.self { continue }
+            if let num = raw as? NSNumber {
+                if type(of: num) === cfBoolClass { continue }
+                let d = num.doubleValue
+                if d.isFinite { return d }
+            } else if let d = raw as? Double, d.isFinite {
+                return d
+            } else if let i = raw as? Int {
+                return Double(i)
+            }
+        }
+        return nil
+    }
+
+    private static func isGenericGeminiGroupTitle(_ title: String) -> Bool {
+        let lower = title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return lower.isEmpty || lower == "gemini" || lower == "gemini models" || lower == "1p"
+    }
+
+    private static func isGenericWindowBucketTitle(_ title: String) -> Bool {
+        let lower = title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if lower.isEmpty { return true }
+        return lower == "weekly"
+            || lower == "5h"
+            || lower.contains("limit remaining")
+            || lower == "weekly limit"
+            || lower == "five hour limit"
+    }
+
+    private static func humanizeSubTierBucketId(_ sanitizedId: String, isWeekly: Bool) -> String {
+        let tokens = sanitizedId.split(separator: "_").map(String.init)
+        var baseTokens: [String] = []
+        var windowSuffix: String? = isWeekly ? "Weekly" : nil
+        for tok in tokens {
+            if tok == "weekly" || tok == "week" {
+                windowSuffix = "Weekly"
+                continue
+            }
+            if tok == "5h" || tok == "5hr" {
+                windowSuffix = "5h"
+                continue
+            }
+            if tok == "wtu" || tok == "ai" || tok == "gpt" || tok == "oss" || tok == "api" {
+                baseTokens.append(tok.uppercased())
+            } else {
+                baseTokens.append(tok.prefix(1).uppercased() + tok.dropFirst())
+            }
+        }
+        let base = baseTokens.joined(separator: " ")
+        if base.isEmpty { return sanitizedId }
+        if let suffix = windowSuffix {
+            return "\(base) · \(suffix)"
+        }
+        return base
+    }
+
+    private static func combineMergedBucket(
+        winner: AGYModelQuotaBucket,
+        loser: AGYModelQuotaBucket
+    ) -> AGYModelQuotaBucket {
+        // Only backfill `loser.resetAt` when the bucket is actually consumed (< 0.999);
+        // an unused 100% bucket with `resetAt == nil` intentionally represents an unstarted
+        // window and must not inherit a synthetic rolling `now + 5h` reset from `fetchAvailableModels`.
+        guard winner.remainingFraction < 0.999,
+              winner.resetAt == nil,
+              let fallbackReset = loser.resetAt else {
+            return winner
+        }
+        return AGYModelQuotaBucket(
+            id: winner.id,
+            title: winner.title,
+            remainingFraction: winner.remainingFraction,
+            resetAt: fallbackReset,
+            modelClasses: winner.modelClasses
+        )
+    }
+
+    private static func sanitizeBucketId(_ rawId: String) -> String {
+        let trimmed = rawId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        var out = ""
+        out.reserveCapacity(trimmed.count)
+        var lastWasUnderscore = false
+        for scalar in trimmed.unicodeScalars {
+            let v = scalar.value
+            let isAlnum = (v >= 97 && v <= 122) || (v >= 48 && v <= 57) // a-z, 0-9
+            if isAlnum {
+                out.append(Character(scalar))
+                lastWasUnderscore = false
+            } else if !lastWasUnderscore && !out.isEmpty {
+                out.append("_")
+                lastWasUnderscore = true
+            }
+        }
+        while out.hasSuffix("_") { out.removeLast() }
+        return out
+    }
+
+    private static func preferCandidateBucket(
+        existing: AGYModelQuotaBucket,
+        existingRank: Int,
+        candidate: AGYModelQuotaBucket,
+        candidateRank: Int
+    ) -> Bool {
+        let eps = 0.0005
+        if candidate.remainingFraction < existing.remainingFraction - eps {
+            return true
+        }
+        if existing.remainingFraction < candidate.remainingFraction - eps {
+            return false
+        }
+        // When both buckets are unused (>= 0.999) and come from different tiers (model-aggregated
+        // rank 0 vs authoritative summary/CLI rank 1), trust the authoritative summary/CLI bucket
+        // (including `resetAt == nil` for an unstarted 5h window) over a synthetic `now + 5h` reset.
+        if existing.remainingFraction >= 0.999 && candidate.remainingFraction >= 0.999
+            && candidateRank != existingRank {
+            return candidateRank > existingRank
+        }
+        switch (existing.resetAt, candidate.resetAt) {
+        case (nil, .some):
+            return true
+        case (.some, nil):
+            return false
+        case (.some(let eDate), .some(let cDate)):
+            if cDate < eDate { return true }
+            if eDate < cDate { return false }
+        case (nil, nil):
+            break
+        }
+        return candidateRank > existingRank
+    }
+
     private static func parseQuotaSummaryBuckets(_ root: [String: Any]) -> [AGYModelQuotaBucket] {
         let summaryRoot = (root["quotaSummary"] as? [String: Any])
             ?? (root["quota_summary"] as? [String: Any])
@@ -1055,7 +1284,10 @@ public enum AGYQuotaParser {
         var entries: [(groupTitle: String, groupDesc: String, bucket: [String: Any])] = []
         if let groups = summaryRoot["groups"] as? [[String: Any]] {
             for g in groups {
-                let gTitle = (g["displayName"] as? String) ?? (g["display_name"] as? String) ?? ""
+                let gTitle = (g["displayName"] as? String)
+                    ?? (g["display_name"] as? String)
+                    ?? (g["name"] as? String)
+                    ?? ""
                 let gDesc = (g["description"] as? String) ?? ""
                 if let bList = g["buckets"] as? [[String: Any]] {
                     for b in bList {
@@ -1068,6 +1300,7 @@ public enum AGYQuotaParser {
             for b in topBuckets {
                 let hasSummaryKeys = (b["bucketId"] as? String) != nil
                     || (b["bucket_id"] as? String) != nil
+                    || ((b["id"] as? String) != nil && b["model"] == nil)
                     || (b["window"] as? String) != nil
                     || (b["refreshWindowLabel"] as? String) != nil
                     || (b["refresh_window_label"] as? String) != nil
@@ -1078,35 +1311,35 @@ public enum AGYQuotaParser {
         }
         guard !entries.isEmpty else { return [] }
 
-        var results: [AGYModelQuotaBucket] = []
+        var deduped: [String: AGYModelQuotaBucket] = [:]
         for entry in entries {
             let b = entry.bucket
             if (b["disabled"] as? Bool) == true { continue }
-            let rawId = (b["bucketId"] as? String)
+            let rawId = ((b["bucketId"] as? String)
                 ?? (b["bucket_id"] as? String)
                 ?? (b["id"] as? String)
-                ?? ""
-            let rawTitle = (b["displayName"] as? String)
+                ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let rawTitle = ((b["displayName"] as? String)
                 ?? (b["display_name"] as? String)
+                ?? (b["name"] as? String)
                 ?? (b["title"] as? String)
-                ?? ""
+                ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             guard !rawId.isEmpty || !rawTitle.isEmpty else { continue }
 
-            let rem: Double = {
-                if let d = b["remainingFraction"] as? Double { return d }
-                if let i = b["remainingFraction"] as? Int { return Double(i) }
-                if let d = b["remaining_fraction"] as? Double { return d }
-                if let i = b["remaining_fraction"] as? Int { return Double(i) }
-                return 1.0
-            }()
-            let resetAt = AppDate.parseISO8601(
+            let rawRem = parseJSONFraction(b, keys: ["remainingFraction", "remaining_fraction"])
+            let resetAt = parseResetTime(
                 (b["resetTime"] as? String) ?? (b["reset_time"] as? String)
             )
+            // Proto3 JSON and Go `omitempty` omit `remainingFraction == 0.0` while keeping a
+            // valid `resetTime`; require at least one of fraction or valid reset time.
+            guard rawRem != nil || resetAt != nil else { continue }
+            let rem = min(1.0, max(0.0, rawRem ?? 0.0))
             let window = ((b["window"] as? String)
                 ?? (b["refreshWindowLabel"] as? String)
                 ?? (b["refresh_window_label"] as? String)
                 ?? "").lowercased()
             let lowerId = rawId.lowercased()
+            let sanitizedId = sanitizeBucketId(rawId)
             let lowerTitle = rawTitle.lowercased()
             let isWeekly = window.contains("week") || lowerId.contains("week") || lowerTitle.contains("week")
             let familyProbe = "\(entry.groupTitle) \(entry.groupDesc) \(rawId) \(rawTitle)".lowercased()
@@ -1122,9 +1355,29 @@ public enum AGYQuotaParser {
             let canonicalTitle: String
             let classes: [ModelClass]
             if isGemini && !isClaudeOrGPT {
-                canonicalId = isWeekly ? "gemini_weekly" : "gemini"
-                canonicalTitle = isWeekly ? "Gemini · Weekly" : "Gemini Models"
-                classes = ModelClass.allCases.filter(\.isGeminiFamily)
+                if standardGeminiSummaryIds.contains(sanitizedId) {
+                    canonicalId = isWeekly ? "gemini_weekly" : "gemini"
+                    canonicalTitle = isWeekly ? "Gemini · Weekly" : "Gemini Models"
+                    classes = ModelClass.allCases.filter(\.isGeminiFamily)
+                } else {
+                    // Preserve distinct Gemini sub-tier buckets (e.g. `gemini-argon-wtu-weekly`)
+                    // under their own sanitized canonical ID so they never clobber `gemini` / `gemini_weekly`.
+                    canonicalId = sanitizedId
+                    if let group = nonEmptyTrimmed(entry.groupTitle), !isGenericGeminiGroupTitle(group) {
+                        canonicalTitle = group
+                    } else if let title = nonEmptyTrimmed(rawTitle), !isGenericWindowBucketTitle(title) {
+                        canonicalTitle = title
+                    } else {
+                        canonicalTitle = humanizeSubTierBucketId(sanitizedId, isWeekly: isWeekly)
+                    }
+                    let bucketInferred = ModelClass.classify("\(rawId) \(rawTitle)")
+                    let inferred = bucketInferred.isGeminiFamily
+                        ? bucketInferred
+                        : ModelClass.classify(familyProbe)
+                    classes = inferred.isGeminiFamily
+                        ? [inferred]
+                        : ModelClass.allCases.filter(\.isGeminiFamily)
+                }
             } else if isClaudeOrGPT {
                 canonicalId = isWeekly ? "claude_partner_weekly" : "claude_partner"
                 canonicalTitle = isWeekly ? "Claude & GPT · Weekly" : "Claude & GPT · 5h"
@@ -1136,16 +1389,31 @@ public enum AGYQuotaParser {
                 classes = fallback.defaultClasses
             }
 
-            results.append(AGYModelQuotaBucket(
+            let candidate = AGYModelQuotaBucket(
                 id: canonicalId,
                 title: canonicalTitle,
                 remainingFraction: rem,
                 resetAt: resetAt,
                 modelClasses: classes
-            ))
+            )
+
+            if let existing = deduped[canonicalId] {
+                if preferCandidateBucket(
+                    existing: existing,
+                    existingRank: 1,
+                    candidate: candidate,
+                    candidateRank: 1
+                ) {
+                    deduped[canonicalId] = combineMergedBucket(winner: candidate, loser: existing)
+                } else {
+                    deduped[canonicalId] = combineMergedBucket(winner: existing, loser: candidate)
+                }
+            } else {
+                deduped[canonicalId] = candidate
+            }
         }
 
-        return results.sorted(by: bucketSortOrder)
+        return deduped.values.sorted(by: bucketSortOrder)
     }
 
     private static func aggregateModelQuotaSamples(_ samples: [ModelQuotaSample]) -> [AGYModelQuotaBucket] {

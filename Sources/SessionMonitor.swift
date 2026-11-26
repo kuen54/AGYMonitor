@@ -108,6 +108,17 @@ final class SessionMonitor {
     }
     private var transcriptCache: [String: TranscriptCacheEntry] = [:]
 
+    private struct ConversationDBCacheEntry {
+        let path: String
+        let dbMtime: TimeInterval
+        let dbSize: Int64
+        let walMtime: TimeInterval
+        let walSize: Int64
+        let modelHint: String?
+        let telemetry: ConversationDBTelemetry?
+    }
+    private var conversationDBCache: [String: ConversationDBCacheEntry] = [:]
+
     private struct AnnotationCacheEntry {
         let path: String
         let mtime: TimeInterval
@@ -309,13 +320,22 @@ final class SessionMonitor {
 
     private func existingWatchCandidateDirs() -> [String] {
         let fm = FileManager.default
-        var candidateDirs = usesCustomProjectsDir
-            ? [
-                cliRootDir,
-                (geminiDir as NSString).appendingPathComponent("antigravity/brain"),
-                (geminiDir as NSString).appendingPathComponent("antigravity-ide/brain"),
-            ]
-            : [cliRootDir] + AGYLocator.brainDirs(home: homeDir)
+        let desktopAndIDESurfaces: [AGYSurface] = [.desktop, .ide]
+        var candidateDirs: [String]
+        if usesCustomProjectsDir {
+            candidateDirs = [cliRootDir]
+            for surface in desktopAndIDESurfaces {
+                let surfaceRoot = (geminiDir as NSString).appendingPathComponent(surface.rawValue)
+                candidateDirs.append((surfaceRoot as NSString).appendingPathComponent("brain"))
+                candidateDirs.append((surfaceRoot as NSString).appendingPathComponent("conversations"))
+            }
+        } else {
+            candidateDirs = [cliRootDir] + AGYLocator.brainDirs(home: homeDir)
+            for surface in desktopAndIDESurfaces {
+                let surfaceRoot = AGYLocator.surfaceRoot(home: homeDir, surface: surface)
+                candidateDirs.append((surfaceRoot as NSString).appendingPathComponent("conversations"))
+            }
+        }
         if !candidateDirs.contains(cliRootDir) {
             candidateDirs.insert(cliRootDir, at: 0)
         }
@@ -430,7 +450,8 @@ final class SessionMonitor {
                 self.onChange(scan)
             }
         }
-        dispatchLifecycle(.scanCompleted(liveCount: scan.sessions.count))
+        let anyBusy = scan.sessions.contains { $0.status == .busy } || scan.liveTPS.isWorking
+        dispatchLifecycle(.scanCompleted(liveCount: scan.sessions.count, anyBusy: anyBusy))
         dispatchLifecycle(.reconcileWatchedDirs(existingWatchCandidateDirs()))
     }
 
@@ -636,6 +657,7 @@ final class SessionMonitor {
 
         var allActiveSubagentIds = Set<String>()
         var childTranscriptEntries: [String: TranscriptCacheEntry] = [:]
+        var childDBEntries: [String: ConversationDBTelemetry] = [:]
         for childId in candidateActiveChildren {
             let meta = metaById[childId]
             let killed = isConversationKilled(childId)
@@ -649,6 +671,13 @@ final class SessionMonitor {
             if let childTx = childTx {
                 childTranscriptEntries[childId] = childTx
             }
+            let childDB = readCachedConversationDBTelemetry(
+                sessionId: childId,
+                modelHint: childTx?.tailSummary.latestModel
+            )
+            if let childDB = childDB {
+                childDBEntries[childId] = childDB
+            }
 
             let isActive = isSwarmActive || SessionLogic.isSubagentActivelyGenerating(
                 rawStatus: meta?.rawStatus,
@@ -659,7 +688,9 @@ final class SessionMonitor {
                 transcriptFileMtime: childTx?.mtime,
                 now: now,
                 hasLiveRoot: hasLiveRoot,
-                metaUpdatedAt: meta?.updatedAtMs.map { $0 / 1000.0 }
+                metaUpdatedAt: meta?.updatedAtMs.map { $0 / 1000.0 },
+                hasLiveGeneratingDBStep: childDB?.activeGeneratingStep != nil,
+                dbActivityMtime: childDB?.lastObservedActivityAt
             )
 
             if isActive {
@@ -681,6 +712,9 @@ final class SessionMonitor {
         }
         var candidates: [Candidate] = []
         var seenIds = Set<String>()
+        var preloadedTxEntries: [String: TranscriptCacheEntry] = [:]
+        var preloadedDBEntries: [String: ConversationDBTelemetry] = [:]
+        var probedLocklessCLIIds = Set<String>()
 
         // 5a. Live `agy` CLI sessions holding `presence/<id>.lock`
         for (convId, owner) in cliLockOwners {
@@ -698,7 +732,8 @@ final class SessionMonitor {
             seenIds.insert(convId)
         }
 
-        // 5b. Active Antigravity Desktop & Antigravity IDE conversations
+        // 5b. Active Antigravity Desktop, Antigravity IDE, and lockless running CLI (`agy -p`) conversations
+        let validEpochFloor = 946_684_800.0
         for (convId, meta) in metaById {
             guard !seenIds.contains(convId),
                   !meta.killed,
@@ -737,6 +772,60 @@ final class SessionMonitor {
                     ))
                     seenIds.insert(convId)
                 }
+            } else if surface == "antigravity-cli" {
+                // Lockless/headless `agy -p` runs do not hold `presence/<id>.lock`.
+                // Strictly gate on fresh transcript or conversation DB activity (<= 300s,
+                // or live `status == 8` DB step with activity <= 600s) so crashed/abandoned
+                // SQLite rows never appear as ghost CLI sessions.
+                let activelyRunning = isRunningNow && SessionLogic.shouldProbeRunningSubagentMeta(
+                    updatedAtMs: meta.updatedAtMs,
+                    nowMs: nowMs
+                )
+                guard activelyRunning else { continue }
+                probedLocklessCLIIds.insert(convId)
+                let cliTx = readCachedTranscript(sessionId: convId)
+                let cliDB = readCachedConversationDBTelemetry(
+                    sessionId: convId,
+                    modelHint: cliTx?.tailSummary.latestModel,
+                    maxActivityAgeForOpen: 600.0,
+                    now: now
+                )
+                let notErrored = cliTx?.tailSummary.lastStepStatus != .error
+                let txFresh: Bool = {
+                    guard notErrored, let mtime = cliTx?.mtime, mtime.isFinite, mtime > validEpochFloor else {
+                        return false
+                    }
+                    let age = now - mtime
+                    return age >= -5.0 && age <= 300.0
+                }()
+                let dbFresh: Bool = {
+                    guard notErrored, let dbAt = cliDB?.lastObservedActivityAt, dbAt.isFinite, dbAt > validEpochFloor else {
+                        return false
+                    }
+                    let age = now - dbAt
+                    return age >= -5.0 && age <= 300.0
+                }()
+                let hasLiveDBStep: Bool = {
+                    guard cliDB?.activeGeneratingStep != nil,
+                          let dbAt = cliDB?.lastObservedActivityAt,
+                          dbAt.isFinite, dbAt > validEpochFloor else {
+                        return false
+                    }
+                    let age = now - dbAt
+                    return age >= -5.0 && age <= 600.0
+                }()
+                if txFresh || dbFresh || hasLiveDBStep {
+                    if let cliTx = cliTx { preloadedTxEntries[convId] = cliTx }
+                    if let cliDB = cliDB { preloadedDBEntries[convId] = cliDB }
+                    candidates.append(Candidate(
+                        sessionId: convId,
+                        pid: 0,
+                        cwd: meta.cwd.isEmpty ? homeDir : meta.cwd,
+                        surface: "antigravity-cli",
+                        meta: meta
+                    ))
+                    seenIds.insert(convId)
+                }
             }
         }
 
@@ -761,24 +850,84 @@ final class SessionMonitor {
         var contextSnapshots: [String: SessionContextSnapshot] = [:]
         var busyForTPS = Set<String>()
         var samplesBySession: [String: [OutputTokenSample]] = [:]
+        var generatingBySession: [String: LiveGeneratingStep] = [:]
+        var modelHintBySession: [String: String] = [:]
         var activeBusyWorkerIds = Set<String>()
         var liveIds = Set<String>()
+
+        func recordBusySessionTelemetry(
+            sessionId: String,
+            tx: TranscriptCacheEntry?,
+            db: ConversationDBTelemetry?
+        ) {
+            busyForTPS.insert(sessionId)
+            let merged = LiveTPSTracker.mergeSamples(
+                transcript: tx?.tailSummary.recentOutputSamples ?? [],
+                db: db?.completedSamples ?? []
+            )
+            if !merged.isEmpty {
+                samplesBySession[sessionId] = merged
+            }
+            if let gen = db?.activeGeneratingStep {
+                generatingBySession[sessionId] = gen
+            }
+            if let hint = tx?.tailSummary.latestModel?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !hint.isEmpty {
+                modelHintBySession[sessionId] = hint
+            }
+        }
 
         for c in candidates {
             liveIds.insert(c.sessionId)
             let txEntry = c.sessionId.hasPrefix("proc-")
                 ? nil
-                : readCachedTranscript(sessionId: c.sessionId)
+                : (preloadedTxEntries[c.sessionId] ?? readCachedTranscript(sessionId: c.sessionId))
+
+            let hasBusyWorkers = swarmBusyCoordinators.contains(c.sessionId)
 
             // Canonical status resolution shared with AITitleReader
-            let (status, waitingFor) = SessionLogic.resolveLiveSessionStatus(
-                swarmWorkerBusy: swarmBusyCoordinators.contains(c.sessionId),
+            var (status, waitingFor) = SessionLogic.resolveLiveSessionStatus(
+                swarmWorkerBusy: hasBusyWorkers,
                 rawStatus: c.meta?.rawStatus,
                 notFullyIdle: c.meta?.notFullyIdle ?? false,
                 transcriptSummary: txEntry?.tailSummary,
                 transcriptFileMtime: txEntry?.mtime,
                 now: now
             )
+
+            // Stat-gated per-conversation SQLite DB telemetry for live candidates:
+            // always read for busy sessions; for non-busy live candidates, only open SQLite if
+            // `max(dbMtime, walMtime)` is within 120s so freshly-generating roots are caught
+            // immediately before `conversation_summaries.db` flushes with near-zero idle overhead.
+            let rootModelHint = txEntry?.tailSummary.latestModel
+            let rootDB: ConversationDBTelemetry?
+            if c.sessionId.hasPrefix("proc-") {
+                rootDB = nil
+            } else if let preloaded = preloadedDBEntries[c.sessionId] {
+                rootDB = preloaded
+            } else {
+                rootDB = readCachedConversationDBTelemetry(
+                    sessionId: c.sessionId,
+                    modelHint: rootModelHint,
+                    maxActivityAgeForOpen: status == .busy ? nil : 120.0,
+                    now: now
+                )
+            }
+
+            let rootHasFreshGeneratingDBStep: Bool = {
+                guard rootDB?.activeGeneratingStep != nil,
+                      let dbAt = rootDB?.lastObservedActivityAt,
+                      dbAt.isFinite, dbAt > validEpochFloor else {
+                    return false
+                }
+                let age = now - dbAt
+                return age >= -5.0 && age <= 120.0
+            }()
+
+            if status == .idle && rootHasFreshGeneratingDBStep {
+                status = .busy
+                waitingFor = nil
+            }
 
             // Live context window remaining % telemetry (from latest PLANNER_RESPONSE)
             if let tailSummary = txEntry?.tailSummary,
@@ -790,11 +939,32 @@ final class SessionMonitor {
                 )
             }
 
-            // Live output TPS samples for busy parent sessions
+            // Live output TPS telemetry for busy parent sessions.
+            // A swarm coordinator parked on `swarm_wait` (or idle itself while only its workers are busy)
+            // must not double-count or contribute stale TPS alongside its active workers.
             if status == .busy {
-                busyForTPS.insert(c.sessionId)
-                if let samples = txEntry?.tailSummary.recentOutputSamples, !samples.isEmpty {
-                    samplesBySession[c.sessionId] = samples
+                let pendingTools = txEntry?.tailSummary.pendingToolNames ?? []
+                let isParkedOnSwarmWait = !pendingTools.isEmpty
+                    && pendingTools.allSatisfy { $0 == "swarm_wait" }
+                    && rootDB?.activeGeneratingStep == nil
+                let rootSelfBusy: Bool
+                if isParkedOnSwarmWait {
+                    rootSelfBusy = false
+                } else if hasBusyWorkers {
+                    let (ownStatus, _) = SessionLogic.resolveLiveSessionStatus(
+                        swarmWorkerBusy: false,
+                        rawStatus: c.meta?.rawStatus,
+                        notFullyIdle: c.meta?.notFullyIdle ?? false,
+                        transcriptSummary: txEntry?.tailSummary,
+                        transcriptFileMtime: txEntry?.mtime,
+                        now: now
+                    )
+                    rootSelfBusy = (ownStatus == .busy) || rootHasFreshGeneratingDBStep
+                } else {
+                    rootSelfBusy = true
+                }
+                if rootSelfBusy {
+                    recordBusySessionTelemetry(sessionId: c.sessionId, tx: txEntry, db: rootDB)
                 }
             }
 
@@ -803,12 +973,14 @@ final class SessionMonitor {
             if let workerIds = busyWorkersByCoordinator[c.sessionId], !workerIds.isEmpty {
                 for workerId in workerIds where !isConversationKilled(workerId) {
                     activeBusyWorkerIds.insert(workerId)
-                    busyForTPS.insert(workerId)
                     let workerTx = childTranscriptEntries[workerId]
                         ?? readCachedTranscript(sessionId: workerId)
-                    if let samples = workerTx?.tailSummary.recentOutputSamples, !samples.isEmpty {
-                        samplesBySession[workerId] = samples
-                    }
+                    let workerDB = childDBEntries[workerId]
+                        ?? readCachedConversationDBTelemetry(
+                            sessionId: workerId,
+                            modelHint: workerTx?.tailSummary.latestModel
+                        )
+                    recordBusySessionTelemetry(sessionId: workerId, tx: workerTx, db: workerDB)
                 }
             }
 
@@ -844,11 +1016,14 @@ final class SessionMonitor {
             // Timestamp (ms): reject 0001-01-01 sentinels
             let txMs = txEntry?.tailSummary.lastStepAt.flatMap { d -> Double? in
                 let sec = d.timeIntervalSince1970
-                return sec > 946_684_800 ? sec * 1000.0 : nil
+                return sec > validEpochFloor ? sec * 1000.0 : nil
             }
-                ?? txEntry.map { $0.mtime > 946_684_800 ? $0.mtime * 1000.0 : 0 }
+                ?? txEntry.map { $0.mtime > validEpochFloor ? $0.mtime * 1000.0 : 0 }
                 ?? 0
-            let bestUpdatedMs = max(c.meta?.updatedAtMs ?? 0, txMs)
+            let dbMs = rootDB?.lastObservedActivityAt.flatMap { sec -> Double? in
+                sec > validEpochFloor ? sec * 1000.0 : nil
+            } ?? 0
+            let bestUpdatedMs = max(c.meta?.updatedAtMs ?? 0, max(txMs, dbMs))
             let validUpdatedMs: Double? = bestUpdatedMs > 946_684_800_000 ? bestUpdatedMs : nil
 
             builtSessions.append(SessionInfo(
@@ -869,29 +1044,37 @@ final class SessionMonitor {
 
         // Include any active subagents whose root was not in `candidates` (e.g. detached
         // workflow agents or orphaned subagent trees), gated strictly on fresh transcript
-        // activity so crashed/abandoned SQLite rows never stick `liveTPS.isWorking == true`.
+        // or conversation DB activity so crashed/abandoned SQLite rows never stick `liveTPS.isWorking == true`.
         for childId in allActiveSubagentIds where !activeBusyWorkerIds.contains(childId) {
             guard !isConversationKilled(childId) else { continue }
             let childTx = childTranscriptEntries[childId]
                 ?? readCachedTranscript(sessionId: childId)
+            let childDB = childDBEntries[childId]
+                ?? readCachedConversationDBTelemetry(
+                    sessionId: childId,
+                    modelHint: childTx?.tailSummary.latestModel
+                )
             guard SessionLogic.isOrphanSubagentFresh(
                 transcriptSummary: childTx?.tailSummary,
                 transcriptFileMtime: childTx?.mtime,
-                now: now
+                now: now,
+                hasLiveGeneratingDBStep: childDB?.activeGeneratingStep != nil,
+                dbActivityMtime: childDB?.lastObservedActivityAt
             ) else { continue }
             activeBusyWorkerIds.insert(childId)
-            busyForTPS.insert(childId)
-            if let samples = childTx?.tailSummary.recentOutputSamples, !samples.isEmpty {
-                samplesBySession[childId] = samples
-            }
+            recordBusySessionTelemetry(sessionId: childId, tx: childTx, db: childDB)
         }
 
-        // Prune per-session caches (retain active/candidate subagent transcripts for stat-cache hits)
-        let retainedTranscriptIds = liveIds
+        // Prune per-session caches (retain active/candidate subagent & probed CLI entries for stat-cache hits)
+        let retainedSessionIds = liveIds
             .union(activeBusyWorkerIds)
             .union(candidateActiveChildren)
+            .union(probedLocklessCLIIds)
         if !transcriptCache.isEmpty {
-            transcriptCache = transcriptCache.filter { retainedTranscriptIds.contains($0.key) }
+            transcriptCache = transcriptCache.filter { retainedSessionIds.contains($0.key) }
+        }
+        if !conversationDBCache.isEmpty {
+            conversationDBCache = conversationDBCache.filter { retainedSessionIds.contains($0.key) }
         }
         if !annotationCache.isEmpty {
             annotationCache = annotationCache.filter { liveIds.contains($0.key) }
@@ -907,6 +1090,8 @@ final class SessionMonitor {
             busySessionIds: busyForTPS,
             subagentIds: activeBusyWorkerIds,
             samplesBySession: samplesBySession,
+            generatingBySession: generatingBySession,
+            modelHintBySession: modelHintBySession,
             now: now
         )
 
@@ -1339,8 +1524,8 @@ final class SessionMonitor {
         }
         defer { sqlite3_close_v2(db) }
 
-        let columns = tableColumns(in: db, table: "conversation_summaries")
-        guard columns.contains("conversation_id") else {
+        guard let columns = tableColumns(in: db, table: "conversation_summaries"),
+              columns.contains("conversation_id") else {
             return nil
         }
         func col(_ name: String, fallback: String) -> String {
@@ -1465,21 +1650,27 @@ final class SessionMonitor {
         return nil
     }
 
-    private static func tableColumns(in db: OpaquePointer, table: String) -> Set<String> {
+    private static func tableColumns(in db: OpaquePointer, table: String) -> Set<String>? {
         var stmt: OpaquePointer? = nil
         guard sqlite3_prepare_v2(db, "PRAGMA table_info(\(table))", -1, &stmt, nil) == SQLITE_OK,
               let s = stmt else {
             sqlite3_finalize(stmt)
-            return []
+            return nil
         }
         defer { sqlite3_finalize(s) }
         var cols = Set<String>()
-        while sqlite3_step(s) == SQLITE_ROW {
-            if let ptr = sqlite3_column_text(s, 1) {
-                cols.insert(String(cString: ptr))
+        while true {
+            let rc = sqlite3_step(s)
+            if rc == SQLITE_ROW {
+                if let ptr = sqlite3_column_text(s, 1) {
+                    cols.insert(String(cString: ptr))
+                }
+            } else if rc == SQLITE_DONE {
+                return cols
+            } else {
+                return nil
             }
         }
-        return cols
     }
 
     private static func firstWorkspacePath(from uris: [String]) -> String {
@@ -1541,6 +1732,197 @@ final class SessionMonitor {
         )
         transcriptCache[sessionId] = entry
         return entry
+    }
+
+    private enum ConversationDBReadResult {
+        case rows([ConversationDBStepRow])
+        case incompatibleSchema
+        case transientFailure
+    }
+
+    private func candidateConversationDBPaths(sessionId: String) -> [String] {
+        guard AGYLocator.isSafeConversationId(sessionId) else { return [] }
+        if usesCustomProjectsDir {
+            return AGYSurface.allCases.map { surface in
+                let root = (geminiDir as NSString).appendingPathComponent(surface.rawValue)
+                return AGYLocator.conversationDBPath(surfaceRoot: root, conversationId: sessionId)
+            }
+        }
+        return AGYLocator.candidateConversationDBPaths(home: homeDir, conversationId: sessionId)
+    }
+
+    /// Stat-gated reader for per-conversation SQLite telemetry (`conversations/<id>.db`).
+    /// Picks the existing `.db` across surfaces with the newest `max(dbMtime, walMtime)`.
+    /// Steady-state unchanged DBs perform zero SQLite opens. When `maxActivityAgeForOpen`
+    /// is provided, cold non-cached DBs older than that threshold are skipped without opening SQLite.
+    private func readCachedConversationDBTelemetry(
+        sessionId: String,
+        modelHint: String?,
+        maxActivityAgeForOpen: TimeInterval? = nil,
+        now: Double? = nil
+    ) -> ConversationDBTelemetry? {
+        let candidates = candidateConversationDBPaths(sessionId: sessionId)
+        guard !candidates.isEmpty else { return nil }
+
+        let fm = FileManager.default
+        var best: (
+            path: String,
+            dbMtime: TimeInterval,
+            dbSize: Int64,
+            walMtime: TimeInterval,
+            walSize: Int64,
+            activityMtime: TimeInterval
+        )? = nil
+
+        for path in candidates {
+            guard let dbAttrs = try? fm.attributesOfItem(atPath: path) else { continue }
+            let dbMtime = (dbAttrs[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+            let dbSize = (dbAttrs[.size] as? NSNumber)?.int64Value ?? 0
+
+            let walAttrs = try? fm.attributesOfItem(atPath: path + "-wal")
+            let walMtime = (walAttrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+            let walSize = (walAttrs?[.size] as? NSNumber)?.int64Value ?? 0
+
+            let activityMtime = max(dbMtime, walMtime)
+            if let existing = best {
+                if activityMtime > existing.activityMtime {
+                    best = (path, dbMtime, dbSize, walMtime, walSize, activityMtime)
+                }
+            } else {
+                best = (path, dbMtime, dbSize, walMtime, walSize, activityMtime)
+            }
+        }
+
+        guard let chosen = best else {
+            conversationDBCache.removeValue(forKey: sessionId)
+            return nil
+        }
+
+        let trimmedHint = modelHint?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanHint = (trimmedHint?.isEmpty == true) ? nil : trimmedHint
+
+        if let hit = conversationDBCache[sessionId],
+           hit.path == chosen.path,
+           hit.dbMtime == chosen.dbMtime,
+           hit.dbSize == chosen.dbSize,
+           hit.walMtime == chosen.walMtime,
+           hit.walSize == chosen.walSize,
+           hit.modelHint == cleanHint {
+            return hit.telemetry
+        }
+
+        if let maxAge = maxActivityAgeForOpen, let nowTs = now {
+            guard chosen.activityMtime > 946_684_800, (nowTs - chosen.activityMtime) <= maxAge else {
+                return nil
+            }
+        }
+
+        switch Self.readConversationDBRows(at: chosen.path) {
+        case .rows(let rows):
+            let lastActivity: Double? = chosen.activityMtime > 946_684_800 ? chosen.activityMtime : nil
+            let telemetry = ConversationDBStepDecoder.decode(
+                rows: rows,
+                modelHint: cleanHint,
+                lastObservedActivityAt: lastActivity
+            )
+            conversationDBCache[sessionId] = ConversationDBCacheEntry(
+                path: chosen.path,
+                dbMtime: chosen.dbMtime,
+                dbSize: chosen.dbSize,
+                walMtime: chosen.walMtime,
+                walSize: chosen.walSize,
+                modelHint: cleanHint,
+                telemetry: telemetry
+            )
+            return telemetry
+
+        case .incompatibleSchema:
+            conversationDBCache[sessionId] = ConversationDBCacheEntry(
+                path: chosen.path,
+                dbMtime: chosen.dbMtime,
+                dbSize: chosen.dbSize,
+                walMtime: chosen.walMtime,
+                walSize: chosen.walSize,
+                modelHint: cleanHint,
+                telemetry: nil
+            )
+            return nil
+
+        case .transientFailure:
+            // Do not cache transient open/busy errors so the next poll retries cleanly.
+            return nil
+        }
+    }
+
+    private static func readConversationDBRows(at dbPath: String) -> ConversationDBReadResult {
+        guard let db = openReadOnlySQLite(at: dbPath) else {
+            return .transientFailure
+        }
+        defer { sqlite3_close_v2(db) }
+
+        guard let columns = tableColumns(in: db, table: "steps") else {
+            return .transientFailure
+        }
+        guard columns.contains("idx"),
+              columns.contains("step_type"),
+              columns.contains("status"),
+              columns.contains("metadata") else {
+            return .incompatibleSchema
+        }
+
+        let payloadExpr = columns.contains("step_payload")
+            ? "CASE WHEN status = \(ConversationDBStepDecoder.generatingStatusCode) THEN step_payload ELSE NULL END"
+            : "NULL"
+        let sql = """
+            SELECT idx, step_type, status, metadata,
+                   \(payloadExpr)
+            FROM steps
+            WHERE step_type = 15
+            ORDER BY idx DESC
+            LIMIT 8
+            """
+
+        var stmt: OpaquePointer? = nil
+        let prepareRC = sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
+        guard prepareRC == SQLITE_OK, let s = stmt else {
+            sqlite3_finalize(stmt)
+            return prepareRC == SQLITE_ERROR ? .incompatibleSchema : .transientFailure
+        }
+        defer { sqlite3_finalize(s) }
+
+        var rows: [ConversationDBStepRow] = []
+        rows.reserveCapacity(8)
+        while true {
+            let rc = sqlite3_step(s)
+            if rc == SQLITE_ROW {
+                let stepIndex = Int(sqlite3_column_int(s, 0))
+                let status = Int(sqlite3_column_int(s, 2))
+                let metaBytes = Int(sqlite3_column_bytes(s, 3))
+                let metadata: Data
+                if metaBytes > 0, let ptr = sqlite3_column_blob(s, 3) {
+                    metadata = Data(bytes: ptr, count: metaBytes)
+                } else {
+                    metadata = Data()
+                }
+                let payloadBytes = Int(sqlite3_column_bytes(s, 4))
+                let stepPayload: Data?
+                if payloadBytes > 0, let ptr = sqlite3_column_blob(s, 4) {
+                    stepPayload = Data(bytes: ptr, count: payloadBytes)
+                } else {
+                    stepPayload = nil
+                }
+                rows.append(ConversationDBStepRow(
+                    stepIndex: stepIndex,
+                    status: status,
+                    metadata: metadata,
+                    stepPayload: stepPayload
+                ))
+            } else if rc == SQLITE_DONE {
+                return .rows(rows)
+            } else {
+                return .transientFailure
+            }
+        }
     }
 
     private func cachedAnnotationTitle(sessionId: String) -> String? {

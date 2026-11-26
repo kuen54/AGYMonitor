@@ -708,4 +708,617 @@ struct LiveTelemetryTests {
         )
         #expect(abs(afterExpiry.currentTPS - (beforeExpiry.currentTPS * 0.88)) < 1e-4)
     }
+
+    // MARK: - Multi-tool Transcript Turn Completion
+
+    @Test("Extends multi-tool PLANNER_RESPONSE completion across consecutive GENERIC steps up to 1800s without overwriting on later non-GENERIC")
+    func transcriptMultiToolCompletionAndExtendedMtimeCap() throws {
+        // 1. 6-tool PLANNER_RESPONSE spanning 793s: must advance across all 6 GENERIC steps
+        let t0 = try #require(AppDate.parseISO8601("2026-11-26T08:00:00Z")).timeIntervalSince1970
+        let multiToolTranscript = """
+        {"step_index":10,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-26T08:00:00Z","model":"gemini-4-carbon-high","output_tokens":39650,"tool_calls":[{"name":"update_steps"},{"name":"edit_file"},{"name":"edit_file"},{"name":"edit_file"},{"name":"edit_file"},{"name":"edit_file"}]}
+        {"step_index":11,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"2026-11-26T08:00:12Z","content":"ok"}
+        {"step_index":12,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"2026-11-26T08:02:00Z","content":"ok"}
+        {"step_index":13,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"2026-11-26T08:05:30Z","content":"ok"}
+        {"step_index":14,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"2026-11-26T08:09:10Z","content":"ok"}
+        {"step_index":15,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"2026-11-26T08:11:45Z","content":"ok"}
+        {"step_index":16,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"2026-11-26T08:13:13Z","content":"ok"}
+        {"step_index":17,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"2026-11-26T08:15:00Z","content":"extra unrelated"}
+        """
+        let summary1 = TranscriptParse.scan(text: multiToolTranscript)
+        let s10 = try #require(summary1.recentOutputSamples.first(where: { $0.stepIndex == 10 }))
+        #expect(abs(s10.timestamp - (t0 + 793.0)) < 1e-6)
+        #expect(abs((s10.durationSeconds ?? 0) - 793.0) < 1e-6)
+
+        // Immediately after last tool finishes (now = t0 + 795s), TPS is exact 39650 / 793 = 50.0 t/s!
+        var tracker = LiveTPSTracker()
+        let snap = tracker.update(
+            busySessionIds: ["multi"],
+            samplesBySession: ["multi": summary1.recentOutputSamples],
+            now: t0 + 795.0
+        )
+        #expect(abs(snap.currentTPS - 50.0) < 1e-4)
+
+        // 2. Partial GENERICs (2 of 4 tools) followed by next PLANNER_RESPONSE:
+        //    must keep 2nd GENERIC timestamp (t0 + 80s), NOT overwrite with later PLANNER_RESPONSE (t0 + 180s)!
+        let partialGenericTranscript = """
+        {"step_index":20,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-26T08:00:00Z","model":"gemini-4-neon-high","output_tokens":4000,"tool_calls":[{"name":"read_file"},{"name":"write_file"},{"name":"edit_file"},{"name":"run_command"}]}
+        {"step_index":21,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"2026-11-26T08:00:15Z","content":"ok"}
+        {"step_index":22,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"2026-11-26T08:01:20Z","content":"ok"}
+        {"step_index":23,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-26T08:03:00Z","model":"gemini-4-neon-high","output_tokens":500}
+        """
+        let summary2 = TranscriptParse.scan(text: partialGenericTranscript)
+        let s20 = try #require(summary2.recentOutputSamples.first(where: { $0.stepIndex == 20 }))
+        #expect(abs(s20.timestamp - (t0 + 80.0)) < 1e-6)
+        #expect(abs((s20.durationSeconds ?? 0) - 80.0) < 1e-6)
+
+        // 3. Tool-calling turn with ZERO GENERIC steps followed by SYSTEM_MESSAGE adopts SYSTEM_MESSAGE timestamp
+        let sysFollowupTranscript = """
+        {"step_index":30,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-26T08:00:00Z","model":"claude-opus-4-6","output_tokens":2000,"tool_calls":[{"name":"run_command"}]}
+        {"step_index":31,"source":"SYSTEM","type":"SYSTEM_MESSAGE","status":"DONE","created_at":"2026-11-26T08:00:40Z","content":"tool completed"}
+        """
+        let summary3 = TranscriptParse.scan(text: sysFollowupTranscript)
+        let s30 = try #require(summary3.recentOutputSamples.first(where: { $0.stepIndex == 30 }))
+        #expect(abs(s30.timestamp - (t0 + 40.0)) < 1e-6)
+        #expect(abs((s30.durationSeconds ?? 0) - 40.0) < 1e-6)
+
+        // 4. Trailing EOF fileMtime accepts up to 1800s (e.g. 900s) and rejects > 1800s
+        let eofTranscript = """
+        {"step_index":40,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-26T08:00:00Z","model":"gemini-4-carbon-high","output_tokens":45000}
+        """
+        let eof900 = TranscriptParse.scan(text: eofTranscript, fileMtime: t0 + 900.0)
+        let s40a = try #require(eof900.recentOutputSamples.last)
+        #expect(abs(s40a.timestamp - (t0 + 900.0)) < 1e-6)
+        #expect(abs((s40a.durationSeconds ?? 0) - 900.0) < 1e-6)
+
+        let eofTooOld = TranscriptParse.scan(text: eofTranscript, fileMtime: t0 + 1850.0)
+        let s40b = try #require(eofTooOld.recentOutputSamples.last)
+        #expect(abs(s40b.timestamp - t0) < 1e-6)
+        #expect(s40b.durationSeconds == nil)
+    }
+
+    // MARK: - Protobuf Wire Test Helpers
+
+    private static func encodeVarint(_ value: UInt64) -> Data {
+        var v = value
+        var out = Data()
+        while true {
+            var byte = UInt8(v & 0x7F)
+            v >>= 7
+            if v != 0 {
+                byte |= 0x80
+                out.append(byte)
+            } else {
+                out.append(byte)
+                break
+            }
+        }
+        return out
+    }
+
+    private static func encodeTag(field: UInt64, wire: UInt64) -> Data {
+        encodeVarint((field << 3) | wire)
+    }
+
+    private static func encodeLengthDelimited(field: UInt64, payload: Data) -> Data {
+        var out = encodeTag(field: field, wire: 2)
+        out.append(encodeVarint(UInt64(payload.count)))
+        out.append(payload)
+        return out
+    }
+
+    private static func encodeVarintField(field: UInt64, value: UInt64) -> Data {
+        var out = encodeTag(field: field, wire: 0)
+        out.append(encodeVarint(value))
+        return out
+    }
+
+    private static func encodeTimestamp(seconds: Int64, nanos: Int32 = 0) -> Data {
+        var msg = Data()
+        msg.append(encodeVarintField(field: 1, value: UInt64(bitPattern: seconds)))
+        if nanos != 0 {
+            msg.append(encodeVarintField(field: 2, value: UInt64(bitPattern: Int64(nanos))))
+        }
+        return msg
+    }
+
+    private static func encodeTokenUsage(
+        input: Int = 0,
+        output: Int = 0,
+        cacheRead: Int = 0,
+        thinking: Int = 0,
+        response: Int = 0
+    ) -> Data {
+        var msg = Data()
+        if input > 0 { msg.append(encodeVarintField(field: 2, value: UInt64(input))) }
+        if output > 0 { msg.append(encodeVarintField(field: 3, value: UInt64(output))) }
+        if cacheRead > 0 { msg.append(encodeVarintField(field: 5, value: UInt64(cacheRead))) }
+        if thinking > 0 { msg.append(encodeVarintField(field: 9, value: UInt64(thinking))) }
+        if response > 0 { msg.append(encodeVarintField(field: 10, value: UInt64(response))) }
+        return msg
+    }
+
+    private static func encodeMetadata(
+        createdAt: (Int64, Int32)? = nil,
+        streamStartedAt: (Int64, Int32)? = nil,
+        completedAt: (Int64, Int32)? = nil,
+        completedAtFallback: (Int64, Int32)? = nil,
+        usage: Data? = nil,
+        transitions: [(status: Int, ts: (Int64, Int32))] = []
+    ) -> Data {
+        var msg = Data()
+        if let c = createdAt {
+            msg.append(encodeLengthDelimited(field: 1, payload: encodeTimestamp(seconds: c.0, nanos: c.1)))
+        }
+        if let s = streamStartedAt {
+            msg.append(encodeLengthDelimited(field: 6, payload: encodeTimestamp(seconds: s.0, nanos: s.1)))
+        }
+        if let done = completedAt {
+            msg.append(encodeLengthDelimited(field: 7, payload: encodeTimestamp(seconds: done.0, nanos: done.1)))
+        }
+        if let fb = completedAtFallback {
+            msg.append(encodeLengthDelimited(field: 8, payload: encodeTimestamp(seconds: fb.0, nanos: fb.1)))
+        }
+        if let u = usage {
+            msg.append(encodeLengthDelimited(field: 9, payload: u))
+        }
+        if !transitions.isEmpty {
+            var wrapper = Data()
+            for tr in transitions {
+                var item = Data()
+                item.append(encodeVarintField(field: 1, value: UInt64(tr.status)))
+                item.append(encodeLengthDelimited(field: 2, payload: encodeTimestamp(seconds: tr.ts.0, nanos: tr.ts.1)))
+                wrapper.append(encodeLengthDelimited(field: 1, payload: item))
+            }
+            msg.append(encodeLengthDelimited(field: 26, payload: wrapper))
+        }
+        return msg
+    }
+
+    private static func encodePlannerStepPayload(
+        thinkingBytes: Int = 0,
+        responseBytes: Int = 0,
+        ignoredIdBytes: Int = 0
+    ) -> Data {
+        var planner = Data()
+        if thinkingBytes > 0 {
+            planner.append(encodeLengthDelimited(field: 3, payload: Data(repeating: 0x61, count: thinkingBytes)))
+        }
+        if ignoredIdBytes > 0 {
+            planner.append(encodeLengthDelimited(field: 6, payload: Data(repeating: 0x39, count: ignoredIdBytes)))
+            planner.append(encodeLengthDelimited(field: 15, payload: Data(repeating: 0x38, count: ignoredIdBytes)))
+        }
+        if responseBytes > 0 {
+            planner.append(encodeLengthDelimited(field: 7, payload: Data(repeating: 0x62, count: responseBytes)))
+        }
+        return encodeLengthDelimited(field: 20, payload: planner)
+    }
+
+    // MARK: - ConversationDBStepDecoder & Sample Merging
+
+    @Test("Decodes DB protobuf completed steps with f6->f7 duration guard, f8/f26 fallbacks, status=8 streamedBytes, and malformed safety")
+    func conversationDBStepDecoderCompleteMatrix() throws {
+        let baseSec: Int64 = 1_795_000_000
+
+        // Row 1: Normal TTFT + decode: out=593, d17=32.9s, d67=5.7s -> uses dStream = 5.7s (104.0 t/s)
+        let meta1 = Self.encodeMetadata(
+            createdAt: (baseSec, 0),
+            streamStartedAt: (baseSec + 27, 200_000_000),
+            completedAt: (baseSec + 32, 900_000_000),
+            usage: Self.encodeTokenUsage(input: 5000, output: 593, cacheRead: 12000)
+        )
+
+        // Row 2: Buffered/late f6 real capture: out=19110, d17=265.2s, d67=0.184s -> falls back to dTotal = 265.2s!
+        let meta2 = Self.encodeMetadata(
+            createdAt: (baseSec + 100, 0),
+            streamStartedAt: (baseSec + 365, 16_000_000),
+            completedAt: (baseSec + 365, 200_000_000),
+            usage: Self.encodeTokenUsage(output: 19_110)
+        )
+
+        // Row 3: Late f6 with dStream >= 1.0s BUT implausible rate (>450 t/s): out=10000, d17=120s, d67=2.0s -> falls back to dTotal = 120s!
+        let meta3 = Self.encodeMetadata(
+            createdAt: (baseSec + 500, 0),
+            streamStartedAt: (baseSec + 618, 0),
+            completedAt: (baseSec + 620, 0),
+            usage: Self.encodeTokenUsage(output: 10_000)
+        )
+
+        // Row 4: f6 absent -> uses f26 transition (status=8) fallback, f7 absent -> uses f8 fallback, f3=0 -> uses f9+f10!
+        let meta4 = Self.encodeMetadata(
+            createdAt: (baseSec + 700, 0),
+            completedAtFallback: (baseSec + 740, 0),
+            usage: Self.encodeTokenUsage(thinking: 600, response: 200),
+            transitions: [
+                (status: 2, ts: (baseSec + 701, 0)),
+                (status: 8, ts: (baseSec + 730, 0)),
+            ]
+        )
+
+        // Row 5: Ultra-fast short reply: out=40, d17=0.6s, d67=0.4s -> clamps duration to 1.0s
+        let meta5 = Self.encodeMetadata(
+            createdAt: (baseSec + 800, 0),
+            streamStartedAt: (baseSec + 800, 200_000_000),
+            completedAt: (baseSec + 800, 600_000_000),
+            usage: Self.encodeTokenUsage(output: 40)
+        )
+
+        // Row 6: Active GENERATING (status=8) step with streamedBytes in f20.(f3 + f7) ignoring f6/f15 IDs
+        let metaGen = Self.encodeMetadata(
+            createdAt: (baseSec + 900, 0),
+            streamStartedAt: (baseSec + 904, 500_000_000)
+        )
+        let payloadGen = Self.encodePlannerStepPayload(thinkingBytes: 1200, responseBytes: 800, ignoredIdBytes: 500)
+
+        // Pass in DESC order like SQL `ORDER BY idx DESC LIMIT 8`
+        let rows = [
+            ConversationDBStepRow(stepIndex: 6, status: 8, metadata: metaGen, stepPayload: payloadGen),
+            ConversationDBStepRow(stepIndex: 5, status: 4, metadata: meta5),
+            ConversationDBStepRow(stepIndex: 4, status: 4, metadata: meta4),
+            ConversationDBStepRow(stepIndex: 3, status: 4, metadata: meta3),
+            ConversationDBStepRow(stepIndex: 2, status: 4, metadata: meta2),
+            ConversationDBStepRow(stepIndex: 1, status: 4, metadata: meta1),
+        ]
+
+        let telemetry = ConversationDBStepDecoder.decode(
+            rows: rows,
+            modelHint: "gemini-4-neon-high",
+            lastObservedActivityAt: Double(baseSec + 910)
+        )
+
+        #expect(telemetry.completedSamples.count == 5)
+        #expect(telemetry.completedSamples.map(\.stepIndex) == [1, 2, 3, 4, 5])
+
+        let r1 = telemetry.completedSamples[0]
+        #expect(r1.outputTokens == 593)
+        #expect(abs((r1.durationSeconds ?? 0) - 5.7) < 1e-4)
+
+        let r2 = telemetry.completedSamples[1]
+        #expect(r2.outputTokens == 19_110)
+        #expect(abs((r2.durationSeconds ?? 0) - 265.2) < 1e-4)
+
+        let r3 = telemetry.completedSamples[2]
+        #expect(r3.outputTokens == 10_000)
+        #expect(abs((r3.durationSeconds ?? 0) - 120.0) < 1e-4)
+
+        let r4 = telemetry.completedSamples[3]
+        #expect(r4.outputTokens == 800)
+        #expect(abs((r4.durationSeconds ?? 0) - 10.0) < 1e-4)
+
+        let r5 = telemetry.completedSamples[4]
+        #expect(r5.outputTokens == 40)
+        #expect(abs((r5.durationSeconds ?? 0) - 1.0) < 1e-4)
+
+        let gen = try #require(telemetry.activeGeneratingStep)
+        #expect(gen.stepIndex == 6)
+        #expect(abs(gen.startedAt - Double(baseSec + 900)) < 1e-6)
+        #expect(abs((gen.streamStartedAt ?? 0) - (Double(baseSec + 904) + 0.5)) < 1e-6)
+        #expect(gen.streamedBytes == 2000) // 1200 + 800, excludes 500+500 ignored IDs
+        #expect(gen.modelHint == "gemini-4-neon-high")
+        #expect(gen.lastObservedActivityAt == Double(baseSec + 910))
+
+        // Corrupt/truncated/overflow protobuf blobs never crash
+        let corruptRows = [
+            ConversationDBStepRow(stepIndex: 1, status: 4, metadata: Data([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF])),
+            ConversationDBStepRow(stepIndex: 2, status: 4, metadata: Data([0x0A, 0x7F, 0x01, 0x02])), // length > remaining
+            ConversationDBStepRow(stepIndex: 3, status: 8, metadata: Data([0x00, 0x07, 0x03]), stepPayload: Data([0xA2, 0x01, 0xFF, 0xFF, 0xFF, 0x0F])),
+        ]
+        let corruptTelemetry = ConversationDBStepDecoder.decode(rows: corruptRows)
+        #expect(corruptTelemetry.completedSamples.isEmpty)
+        #expect(corruptTelemetry.activeGeneratingStep == nil)
+    }
+
+    @Test("LiveTPSTracker.mergeSamples lets DB override matching stepIndex, preserves transcript-only steps, and caps to last 12")
+    func liveTPSMergeSamples() {
+        var transcript: [OutputTokenSample] = []
+        for i in 1...14 {
+            transcript.append(OutputTokenSample(stepIndex: i, timestamp: Double(1000 + i * 10), outputTokens: 100 * i, durationSeconds: 20.0))
+        }
+        let db = [
+            OutputTokenSample(stepIndex: 10, timestamp: 1105.0, outputTokens: 1000, durationSeconds: 10.0), // overrides step 10
+            OutputTokenSample(stepIndex: 15, timestamp: 1200.0, outputTokens: 2000, durationSeconds: 15.0), // brand new step 15
+        ]
+        let merged = LiveTPSTracker.mergeSamples(transcript: transcript, db: db)
+        #expect(merged.count == 12)
+        #expect(merged.map(\.stepIndex) == Array(4...15))
+        let step10 = merged.first(where: { $0.stepIndex == 10 })
+        #expect(step10?.durationSeconds == 10.0)
+        #expect(step10?.timestamp == 1105.0)
+        let step14 = merged.first(where: { $0.stepIndex == 14 })
+        #expect(step14?.durationSeconds == 20.0)
+        let step15 = merged.last
+        #expect(step15?.stepIndex == 15)
+        #expect(step15?.outputTokens == 2000)
+    }
+
+    // MARK: - Live In-Flight status==8 Generation & Branch 1 Explicit-Duration Fix
+
+    @Test("Tracks live status==8 byte deltas, blends with session baseline, holds baseline during silent tool streaming, and enforces hung-stream guard")
+    func liveTPSInFlightGeneratingAndHungGuard() {
+        var tracker = LiveTPSTracker(sparklineCapacity: 20, windowSeconds: 30.0)
+
+        // Session has 2 completed samples with baseline = (800 + 1200) / (10 + 15) = 80.0 t/s
+        let completed = [
+            OutputTokenSample(stepIndex: 1, timestamp: 900.0, outputTokens: 800, durationSeconds: 10.0),
+            OutputTokenSample(stepIndex: 2, timestamp: 950.0, outputTokens: 1200, durationSeconds: 15.0),
+        ]
+
+        // Tick 1 (t=1000): status=8 starts streaming -> zero phase lag, immediately holds session baseline 80.0 t/s!
+        let gen1 = LiveGeneratingStep(
+            stepIndex: 3,
+            startedAt: 996.0,
+            streamStartedAt: 1000.0,
+            streamedBytes: 0,
+            modelHint: "gemini-4-carbon-high",
+            lastObservedActivityAt: 1000.0
+        )
+        let s1 = tracker.update(
+            busySessionIds: ["s1"],
+            samplesBySession: ["s1": completed],
+            generatingBySession: ["s1": gen1],
+            now: 1000.0
+        )
+        #expect(abs(s1.currentTPS - 80.0) < 1e-6)
+
+        // Tick 2 (t=1002): streamedBytes grew by 720 bytes in 2.0s -> byteRate = 720 / 3.6 / 2.0 = 100.0 t/s
+        // Blended cleanly with baseline 80.0 -> 0.65 * 100 + 0.35 * 80 = 93.0 t/s
+        let gen2 = LiveGeneratingStep(
+            stepIndex: 3,
+            startedAt: 996.0,
+            streamStartedAt: 1000.0,
+            streamedBytes: 720,
+            modelHint: "gemini-4-carbon-high",
+            lastObservedActivityAt: 1002.0
+        )
+        let s2 = tracker.update(
+            busySessionIds: ["s1"],
+            samplesBySession: ["s1": completed],
+            generatingBySession: ["s1": gen2],
+            now: 1002.0
+        )
+        #expect(abs(s2.currentTPS - 93.0) < 1e-6)
+
+        // Tick 3 (t=1200, 200s later): silent 5-min write_file tool streaming (bytes plateaued at 720, DB still active)
+        // Must NOT decay to 0 after 12s -> holds session's own decode baseline 80.0 t/s!
+        let genPlateau = LiveGeneratingStep(
+            stepIndex: 3,
+            startedAt: 996.0,
+            streamStartedAt: 1000.0,
+            streamedBytes: 720,
+            modelHint: "gemini-4-carbon-high",
+            lastObservedActivityAt: 1190.0
+        )
+        let s3 = tracker.update(
+            busySessionIds: ["s1"],
+            samplesBySession: ["s1": completed],
+            generatingBySession: ["s1": genPlateau],
+            now: 1200.0
+        )
+        #expect(abs(s3.currentTPS - 80.0) < 1e-6)
+
+        // Tick 4 (t=1650): hung-stream soft guard (streamElapsed=650s > 600s AND activityAge=460s > 300s) -> decays smoothly!
+        let sHung = tracker.update(
+            busySessionIds: ["s1"],
+            samplesBySession: ["s1": completed],
+            generatingBySession: ["s1": genPlateau],
+            now: 1650.0
+        )
+        #expect(sHung.currentTPS < 80.0)
+
+        // Cold start on hard-limit hung stream (streamElapsed = 1900s > 1800s) -> returns 0.0
+        var coldHungTracker = LiveTPSTracker()
+        let genVeryHung = LiveGeneratingStep(
+            stepIndex: 1,
+            startedAt: 100.0,
+            streamStartedAt: 100.0,
+            streamedBytes: 500,
+            modelHint: "gemini-4-neon-high",
+            lastObservedActivityAt: 1995.0
+        )
+        let sColdHung = coldHungTracker.update(
+            busySessionIds: ["hung"],
+            samplesBySession: [:],
+            generatingBySession: ["hung": genVeryHung],
+            now: 2000.0
+        )
+        #expect(sColdHung.currentTPS == 0.0)
+
+        // 1st turn with zero completed samples: cumulative byte rate <= 45s, then model-family decode prior
+        var firstTurnTracker = LiveTPSTracker()
+        let firstGenCum = LiveGeneratingStep(
+            stepIndex: 1,
+            startedAt: 100.0,
+            streamStartedAt: 100.0,
+            streamedBytes: 1800, // 1800 / 3.6 / 10s = 50.0 t/s
+            modelHint: "gemini-4-neon-high",
+            lastObservedActivityAt: 110.0
+        )
+        let f1 = firstTurnTracker.update(
+            busySessionIds: ["first"],
+            samplesBySession: [:],
+            generatingBySession: ["first": firstGenCum],
+            now: 110.0
+        )
+        #expect(abs(f1.currentTPS - 50.0) < 1e-6)
+
+        // Past 45s with plateaued bytes on 1st turn -> model-family decode prior (neon = 95.0 t/s)
+        let f2 = firstTurnTracker.update(
+            busySessionIds: ["first"],
+            samplesBySession: [:],
+            generatingBySession: ["first": firstGenCum],
+            now: 150.0
+        )
+        #expect(abs(f2.currentTPS - 95.0) < 1e-6)
+
+        // Model prior lookup via modelHintBySession when gen.modelHint == nil
+        var priorTracker = LiveTPSTracker()
+        let silentGen = LiveGeneratingStep(stepIndex: 1, startedAt: 200.0, streamStartedAt: 200.0, streamedBytes: 0)
+        let pSnap = priorTracker.update(
+            busySessionIds: ["h", "c", "o"],
+            samplesBySession: [:],
+            generatingBySession: ["h": silentGen, "c": silentGen, "o": silentGen],
+            modelHintBySession: [
+                "h": "gemini-4-hydrogen-tiered-high",
+                "c": "claude-opus-4-6",
+                "o": "unknown-model",
+            ],
+            now: 202.0
+        )
+        #expect(abs((pSnap.perSessionTPS["h"] ?? 0) - 90.0) < 1e-6)
+        #expect(abs((pSnap.perSessionTPS["c"] ?? 0) - 65.0) < 1e-6)
+        #expect(abs((pSnap.perSessionTPS["o"] ?? 0) - 55.0) < 1e-6)
+        #expect(abs(pSnap.currentTPS - 210.0) < 1e-6)
+
+        // When status == 8 ends, immediately switches to completed sample / decay mode, and idle resets to 0
+        let finishedSamples = [
+            OutputTokenSample(stepIndex: 1, timestamp: 210.0, outputTokens: 1000, durationSeconds: 10.0),
+        ]
+        let afterDone = priorTracker.update(
+            busySessionIds: ["h"],
+            samplesBySession: ["h": finishedSamples],
+            generatingBySession: [:],
+            now: 211.0
+        )
+        #expect(abs(afterDone.currentTPS - 100.0) < 1e-6)
+
+        let afterIdle = priorTracker.update(
+            busySessionIds: [],
+            samplesBySession: ["h": finishedSamples],
+            generatingBySession: [:],
+            now: 212.0
+        )
+        #expect(afterIdle == .idle)
+    }
+
+    @Test("Branch 1 uses sum(outputTokens)/sum(durationSeconds) when all in-window samples have explicit durationSeconds, eliminating tool-gap pollution")
+    func liveTPSBranch1ExplicitDurationNoToolGapPollution() {
+        var tracker = LiveTPSTracker(sparklineCapacity: 20, windowSeconds: 30.0)
+
+        // Two fast 100 t/s turns separated by a 15s tool-execution gap inside the 30s window:
+        // Step 1: 500 tok / 5s at t=100; Step 2: 500 tok / 5s at t=120 (wall span=20s, true decode=10s)
+        let samples = [
+            OutputTokenSample(stepIndex: 1, timestamp: 100.0, outputTokens: 500, durationSeconds: 5.0),
+            OutputTokenSample(stepIndex: 2, timestamp: 120.0, outputTokens: 500, durationSeconds: 5.0),
+        ]
+        let snap = tracker.update(
+            busySessionIds: ["tool-heavy"],
+            samplesBySession: ["tool-heavy": samples],
+            now: 122.0
+        )
+        // Must be (500 + 500) / (5 + 5) = 100.0 t/s, NOT polluted 500 / 20 = 25.0 t/s!
+        #expect(abs(snap.currentTPS - 100.0) < 1e-6)
+    }
+
+    @Test("Holds live byte rate cleanly across rapid 0.5s FSEvents polls between 2s WAL flushes without spikes, then transitions to baseline after >6s plateau")
+    func liveTPSFSEventsPollingBetweenWALFlushesAndPlateauTransition() {
+        var tracker = LiveTPSTracker(sparklineCapacity: 20, windowSeconds: 30.0)
+        let completed = [
+            OutputTokenSample(stepIndex: 1, timestamp: 950.0, outputTokens: 800, durationSeconds: 10.0), // baseline = 80 t/s
+        ]
+
+        func gen(bytes: Int, activityAt: Double) -> LiveGeneratingStep {
+            LiveGeneratingStep(
+                stepIndex: 2,
+                startedAt: 998.0,
+                streamStartedAt: 1000.0,
+                streamedBytes: bytes,
+                modelHint: "gemini-4-carbon-high",
+                lastObservedActivityAt: activityAt
+            )
+        }
+
+        // t=1000.0: initial observation (0 bytes) -> baseline 80.0
+        let t0 = tracker.update(
+            busySessionIds: ["s1"],
+            samplesBySession: ["s1": completed],
+            generatingBySession: ["s1": gen(bytes: 0, activityAt: 1000.0)],
+            now: 1000.0
+        )
+        #expect(abs(t0.currentTPS - 80.0) < 1e-6)
+
+        // t=1002.0: first 2.0s WAL flush (+720 bytes -> 100 t/s byte rate -> blended 0.65*100 + 0.35*80 = 93.0)
+        let t2 = tracker.update(
+            busySessionIds: ["s1"],
+            samplesBySession: ["s1": completed],
+            generatingBySession: ["s1": gen(bytes: 720, activityAt: 1002.0)],
+            now: 1002.0
+        )
+        #expect(abs(t2.currentTPS - 93.0) < 1e-6)
+
+        // Rapid 0.5s FSEvents polls with unchanged bytes before next WAL flush at t=1004.0:
+        // Must hold 93.0 smoothly (no sawtooth flicker) and NOT advance anchor timestamp!
+        for pollTime in [1002.5, 1003.0, 1003.5] {
+            let mid = tracker.update(
+                busySessionIds: ["s1"],
+                samplesBySession: ["s1": completed],
+                generatingBySession: ["s1": gen(bytes: 720, activityAt: 1002.0)],
+                now: pollTime
+            )
+            #expect(abs(mid.currentTPS - 93.0) < 1e-6)
+        }
+
+        // t=1004.0: next 2.0s WAL flush (+720 bytes = 1440 total):
+        // Must divide by full 2.0s flush span (100 t/s -> 93.0 blended), NOT 0.5s (which would spike to 400 t/s)!
+        let t4 = tracker.update(
+            busySessionIds: ["s1"],
+            samplesBySession: ["s1": completed],
+            generatingBySession: ["s1": gen(bytes: 1440, activityAt: 1004.0)],
+            now: 1004.0
+        )
+        #expect(abs(t4.currentTPS - 93.0) < 1e-6)
+
+        // t=1010.5 (dt = 6.5s > 6.0s plateau grace): genuine silent tool-call plateau -> transitions cleanly to sessionBaseline 80.0
+        let tPlateau = tracker.update(
+            busySessionIds: ["s1"],
+            samplesBySession: ["s1": completed],
+            generatingBySession: ["s1": gen(bytes: 1440, activityAt: 1010.0)],
+            now: 1010.5
+        )
+        #expect(abs(tPlateau.currentTPS - 80.0) < 1e-6)
+    }
+
+    @Test("Guards malformed protobuf TokenUsage overflow (f9=Int.max, f10=1), invalid wire types inside Timestamp, and large multi-sample token sums")
+    func conversationDBDecoderOverflowAndCorruptTimestampSafety() {
+        let baseSec: Int64 = 1_795_000_000
+
+        // 1. TokenUsage with f3=0, f9=Int.max, f10=1 must saturate cleanly without integer overflow trap
+        var overflowUsage = Data()
+        overflowUsage.append(Self.encodeVarintField(field: 9, value: UInt64(Int.max)))
+        overflowUsage.append(Self.encodeVarintField(field: 10, value: 1))
+        let overflowMeta = Self.encodeMetadata(
+            createdAt: (baseSec, 0),
+            completedAt: (baseSec + 10, 0),
+            usage: overflowUsage
+        )
+        let decodedOverflow = ConversationDBStepDecoder.decode(rows: [
+            ConversationDBStepRow(stepIndex: 1, status: 4, metadata: overflowMeta),
+        ])
+        #expect(decodedOverflow.completedSamples.count == 1)
+        #expect(decodedOverflow.completedSamples[0].outputTokens == Int.max)
+
+        // Multi-sample accumulation in LiveTPSTracker with Int.max tokens must not trap either
+        var tracker = LiveTPSTracker()
+        let hugeSamples = [
+            OutputTokenSample(stepIndex: 1, timestamp: 100.0, outputTokens: Int.max, durationSeconds: 10.0),
+            OutputTokenSample(stepIndex: 2, timestamp: 110.0, outputTokens: Int.max, durationSeconds: 10.0),
+        ]
+        let hugeSnap = tracker.update(
+            busySessionIds: ["huge"],
+            samplesBySession: ["huge": hugeSamples],
+            now: 112.0
+        )
+        #expect(hugeSnap.currentTPS == 1200.0)
+
+        // 2. Timestamp containing an invalid wire type (wireType 6) must reject and return nil instead of looping/misparsing
+        var corruptTs = Data()
+        corruptTs.append(Self.encodeTag(field: 3, wire: 6)) // invalid wire type 6
+        corruptTs.append(Self.encodeVarintField(field: 1, value: UInt64(baseSec))) // trailing bytes must NOT be misparsed
+        let corruptTsMeta = Self.encodeLengthDelimited(field: 1, payload: corruptTs)
+            + Self.encodeLengthDelimited(field: 7, payload: corruptTs)
+            + Self.encodeLengthDelimited(field: 9, payload: Self.encodeTokenUsage(output: 500))
+        let decodedCorruptTs = ConversationDBStepDecoder.decode(rows: [
+            ConversationDBStepRow(stepIndex: 1, status: 4, metadata: corruptTsMeta),
+        ])
+        #expect(decodedCorruptTs.completedSamples.isEmpty)
+    }
 }

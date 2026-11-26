@@ -14,9 +14,13 @@ public enum SessionPollCadence {
         started: Bool,
         fsHealthy: Bool,
         isActive: Bool,
-        liveCount: Int
+        liveCount: Int,
+        anyBusy: Bool = false
     ) -> TimeInterval? {
         guard started else { return nil }
+        if anyBusy {
+            return 2.0
+        }
         if liveCount > 0 {
             return isActive ? 2.0 : 6.0
         }
@@ -48,6 +52,7 @@ public struct SessionMonitorLifecycleState: Equatable, Sendable {
     public var lastFSAttemptAt: Date?
     public var pollInterval: TimeInterval?
     public var lastLiveCount: Int
+    public var lastAnyBusy: Bool
     /// Monotonic generation bumped on `stop()` so in-flight async `onChange` / `markSeen`
     /// dispatches can NEVER publish stale snapshots after shutdown.
     public var runGeneration: Int
@@ -65,6 +70,7 @@ public struct SessionMonitorLifecycleState: Equatable, Sendable {
         lastFSAttemptAt: Date? = nil,
         pollInterval: TimeInterval? = nil,
         lastLiveCount: Int = 0,
+        lastAnyBusy: Bool = false,
         runGeneration: Int = 0,
         watchedDirs: [String] = [],
         lastAttemptedDirs: [String] = []
@@ -75,6 +81,7 @@ public struct SessionMonitorLifecycleState: Equatable, Sendable {
         self.lastFSAttemptAt = lastFSAttemptAt
         self.pollInterval = pollInterval
         self.lastLiveCount = lastLiveCount
+        self.lastAnyBusy = lastAnyBusy
         self.runGeneration = runGeneration
         self.watchedDirs = Array(Set(watchedDirs)).sorted()
         self.lastAttemptedDirs = Array(Set(lastAttemptedDirs)).sorted()
@@ -90,7 +97,7 @@ public enum SessionMonitorLifecycleEvent: Equatable, Sendable {
     case fsEventReceived
     case fsCoalesceFired(now: Date)
     case pollTimerFired(now: Date)
-    case scanCompleted(liveCount: Int)
+    case scanCompleted(liveCount: Int, anyBusy: Bool = false)
 }
 
 public enum SessionMonitorLifecycleEffect: Equatable, Sendable {
@@ -126,6 +133,7 @@ public enum SessionMonitorLifecycleMachine {
             state.isStarted = false
             state.fsHealthy = false
             state.pollInterval = nil
+            state.lastAnyBusy = false
             state.watchedDirs = []
             state.lastAttemptedDirs = []
             state.runGeneration += 1
@@ -212,9 +220,10 @@ public enum SessionMonitorLifecycleMachine {
             effects.append(.runScan)
             return effects
 
-        case .scanCompleted(let liveCount):
+        case .scanCompleted(let liveCount, let anyBusy):
             guard state.isStarted else { return [] }
             state.lastLiveCount = max(0, liveCount)
+            state.lastAnyBusy = anyBusy
             return reconcilePollEffects(&state)
         }
     }
@@ -226,7 +235,8 @@ public enum SessionMonitorLifecycleMachine {
             started: state.isStarted,
             fsHealthy: state.fsHealthy,
             isActive: state.isActive,
-            liveCount: state.lastLiveCount
+            liveCount: state.lastLiveCount,
+            anyBusy: state.lastAnyBusy
         )
         if state.pollInterval != desired {
             state.pollInterval = desired
