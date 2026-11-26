@@ -914,7 +914,9 @@ public enum SessionLogic {
         transcriptFileMtime: Double?,
         now: Double,
         hasLiveRoot: Bool = true,
-        metaUpdatedAt: Double? = nil
+        metaUpdatedAt: Double? = nil,
+        hasLiveGeneratingDBStep: Bool = false,
+        dbActivityMtime: Double? = nil
     ) -> Bool {
         if killed {
             return false
@@ -932,8 +934,16 @@ public enum SessionLogic {
             }
         }
         considerTimestamp(transcriptFileMtime)
+        considerTimestamp(dbActivityMtime)
         considerTimestamp(transcriptSummary?.lastStepAt?.timeIntervalSince1970)
         considerTimestamp(transcriptSummary?.recentOutputSamples.last?.timestamp)
+
+        if hasLiveGeneratingDBStep {
+            let age = bestActivityAge ?? 0.0
+            if age >= -5.0 && age <= 1800.0 {
+                return true
+            }
+        }
 
         let normalizedStatus = rawStatus?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         if notFullyIdle || normalizedStatus == "CASCADE_RUN_STATUS_RUNNING" {
@@ -961,6 +971,12 @@ public enum SessionLogic {
             if let mtime = transcriptFileMtime,
                mtime.isFinite, now.isFinite, mtime > validEpochFloor,
                (now - mtime) >= -5.0 && (now - mtime) <= 35.0,
+               transcriptSummary?.lastStepStatus != .error {
+                return true
+            }
+            if let dbMtime = dbActivityMtime,
+               dbMtime.isFinite, now.isFinite, dbMtime > validEpochFloor,
+               (now - dbMtime) >= -5.0 && (now - dbMtime) <= 35.0,
                transcriptSummary?.lastStepStatus != .error {
                 return true
             }
@@ -1140,10 +1156,31 @@ public enum SessionLogic {
     public static func isOrphanSubagentFresh(
         transcriptSummary: TranscriptSummary?,
         transcriptFileMtime: Double?,
-        now: Double
+        now: Double,
+        hasLiveGeneratingDBStep: Bool = false,
+        dbActivityMtime: Double? = nil
     ) -> Bool {
         guard now.isFinite else { return false }
         let validEpochFloor = 946_684_800.0
+        if hasLiveGeneratingDBStep {
+            if let dbMtime = dbActivityMtime,
+               dbMtime.isFinite, dbMtime > validEpochFloor,
+               (now - dbMtime) >= -5.0 && (now - dbMtime) <= 600.0 {
+                return true
+            }
+            if dbActivityMtime == nil,
+               let mtime = transcriptFileMtime,
+               mtime.isFinite, mtime > validEpochFloor,
+               (now - mtime) >= -5.0 && (now - mtime) <= 600.0 {
+                return true
+            }
+        }
+        if let dbMtime = dbActivityMtime,
+           dbMtime.isFinite, dbMtime > validEpochFloor,
+           (now - dbMtime) >= -5.0 && (now - dbMtime) <= 300.0,
+           transcriptSummary?.lastStepStatus != .error {
+            return true
+        }
         if let mtime = transcriptFileMtime,
            mtime.isFinite, mtime > validEpochFloor,
            (now - mtime) >= -5.0 && (now - mtime) <= 300.0,

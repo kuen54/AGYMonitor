@@ -10,6 +10,8 @@ struct MonitorStateTests {
         #expect(SessionPollCadence.interval(started: false, fsHealthy: true, isActive: true, liveCount: 2) == nil)
         #expect(SessionPollCadence.interval(started: true, fsHealthy: true, isActive: true, liveCount: 1) == 2.0)
         #expect(SessionPollCadence.interval(started: true, fsHealthy: true, isActive: false, liveCount: 1) == 6.0)
+        #expect(SessionPollCadence.interval(started: true, fsHealthy: true, isActive: false, liveCount: 1, anyBusy: true) == 2.0)
+        #expect(SessionPollCadence.interval(started: true, fsHealthy: true, isActive: false, liveCount: 0, anyBusy: true) == 2.0)
         #expect(SessionPollCadence.interval(started: true, fsHealthy: true, isActive: false, liveCount: 0) == 15.0)
         #expect(SessionPollCadence.interval(started: true, fsHealthy: false, isActive: false, liveCount: 0) == 6.0)
 
@@ -238,6 +240,25 @@ struct MonitorStateTests {
         _ = SessionMonitorLifecycleMachine.reduce(&cold, event: .start(now: t0))
         _ = SessionMonitorLifecycleMachine.reduce(&cold, event: .scanCompleted(liveCount: 1))
         #expect(cold.pollInterval == 2.0)
+
+        // Busy session keeps 2.0s poll cadence even when panel is closed, and relaxes to 6.0s when idle
+        var busyState = SessionMonitorLifecycleState()
+        _ = SessionMonitorLifecycleMachine.reduce(&busyState, event: .start(now: t0))
+        _ = SessionMonitorLifecycleMachine.reduce(&busyState, event: .fsWatcherAttempted(healthy: true, watchedDirs: ["/cli"], at: t0))
+        let busyEffects = SessionMonitorLifecycleMachine.reduce(&busyState, event: .scanCompleted(liveCount: 2, anyBusy: true))
+        #expect(busyState.lastAnyBusy == true)
+        #expect(busyEffects == [.setPollTimer(2.0)])
+        #expect(busyState.pollInterval == 2.0)
+
+        let idleEffects = SessionMonitorLifecycleMachine.reduce(&busyState, event: .scanCompleted(liveCount: 2, anyBusy: false))
+        #expect(busyState.lastAnyBusy == false)
+        #expect(idleEffects == [.setPollTimer(6.0)])
+        #expect(busyState.pollInterval == 6.0)
+
+        _ = SessionMonitorLifecycleMachine.reduce(&busyState, event: .scanCompleted(liveCount: 1, anyBusy: true))
+        #expect(busyState.lastAnyBusy == true)
+        _ = SessionMonitorLifecycleMachine.reduce(&busyState, event: .stop)
+        #expect(busyState.lastAnyBusy == false)
     }
 
     @Test("BrainWatcherLifecycleMachine cancels pending debounce on manual refresh, reconciles new surfaces, and cleans up on terminate")

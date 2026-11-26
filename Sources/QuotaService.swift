@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 
 /// App version, single-sourced from Info.plist (CFBundleShortVersionString).
-let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "2.0.1"
+let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "2.0.2"
 
 /// UI-facing subset of QuotaFetchResult (shared with AGYCore `CoreQuotaError`).
 typealias QuotaError = CoreQuotaError
@@ -217,14 +217,47 @@ private enum AGYStateStore {
         return nil
     }
 
+    /// Child environment for passive `agy` CLI subprocesses — explicitly disables
+    /// self-update checks (`AGY_CLI_DISABLE_AUTO_UPDATE=true`; lowercase `"true"`
+    /// is required because `agy` ignores `"1"`).
+    private static func cliChildEnvironment() -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        env["AGY_CLI_DISABLE_AUTO_UPDATE"] = "true"
+        return env
+    }
+
     /// Non-interactive CLI auth/model probe (`agy models`) used when neither live PA HTTP
     /// nor `state.vscdb` buckets were available, confirming active CLI login.
     static func probeAGYModelsAvailable(home: String = NSHomeDirectory()) -> Bool {
         guard let bin = resolveAGYBinary(home: home),
-              let res = ProcessRunner.run(bin, ["models"], timeout: 6.0) else {
+              let res = ProcessRunner.run(
+                  bin,
+                  ["models"],
+                  timeout: 6.0,
+                  environment: cliChildEnvironment()
+              ) else {
             return false
         }
         return res.status == 0 && res.output.contains("gemini")
+    }
+
+    /// Fetch live quota JSON via `agy -p "/usage" --output-format json` as a fallback
+    /// when Cloud Code PA omits `gemini_weekly` or when no local OAuth bearer token is
+    /// directly accessible.
+    static func fetchCLIUsageJSON(home: String = NSHomeDirectory()) -> Data? {
+        guard let bin = resolveAGYBinary(home: home),
+              let res = ProcessRunner.run(
+                  bin,
+                  ["-p", "/usage", "--output-format", "json", "--print-timeout", "15s"],
+                  timeout: 18.0,
+                  environment: cliChildEnvironment()
+              ),
+              res.status == 0 else {
+            return nil
+        }
+        let trimmed = res.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return Data(res.output.utf8)
     }
 
     /// Read `agy` CLI's live OAuth payload stored in macOS Keychain under
@@ -267,7 +300,12 @@ private enum AGYStateStore {
                 return (tok, kc.email)
             }
             if let bin = resolveAGYBinary(home: home),
-               let res = ProcessRunner.run(bin, ["models"], timeout: 8.0),
+               let res = ProcessRunner.run(
+                   bin,
+                   ["models"],
+                   timeout: 8.0,
+                   environment: cliChildEnvironment()
+               ),
                res.status == 0,
                let refreshed = readCLIKeychainAuth(),
                let tok = refreshed.accessToken,
@@ -327,13 +365,14 @@ private enum AGYStateStore {
 
 /// Reads Google Antigravity quota buckets, plan tier, account email, and AI Credits:
 /// 1. Live Cloud Code PA endpoints (`v1internal:retrieveUserQuotaSummary` / `fetchAvailableModels`
-///    + `loadCodeAssist`) whenever a local OAuth bearer token is accessible.
+///    + `loadCodeAssist`) whenever a local OAuth bearer token is accessible, with a targeted
+///    `agy -p "/usage" --output-format json` fallback if Gemini weekly quota is omitted or no
+///    direct bearer token is readable.
 /// 2. Seamless offline/desktop fallback from `state.vscdb` (`antigravityUnifiedStateSync.userStatus`
 ///    & `modelCredits`) + `~/.gemini/antigravity-cli/log/cli-*.log` + `agy models` liveness check.
 final class SubscriptionQuotaService {
     static let shared = SubscriptionQuotaService()
 
-    private let aicodeQuotaURL = URL(string: "https://aicode.googleapis.com/v1alpha:fetchQuotaStatus")!
     private let quotaSummaryURL = URL(string: "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary")!
     private let availableModelsURL = URL(string: "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels")!
     private let loadCodeAssistURL = URL(string: "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist")!
@@ -592,7 +631,28 @@ final class SubscriptionQuotaService {
             return
         }
 
-        // 2. Seamless local `state.vscdb` + `cli-*.log` + `agy models` path
+        // 2. If no direct OAuth token was readable, try live CLI `/usage` JSON before
+        // falling back to potentially stale `state.vscdb`.
+        if let cliData = AGYStateStore.fetchCLIUsageJSON() {
+            let cliBuckets = AGYQuotaParser.parseCLIUsageJSON(cliData)
+            if !cliBuckets.isEmpty {
+                let snapshot = Self.buildQuotaSnapshot(
+                    buckets: cliBuckets,
+                    email: mergedEmail,
+                    rawTier: mergedRawTier,
+                    promptCredits: promptCredits,
+                    flowCredits: flowCredits,
+                    flexCredits: flexCredits,
+                    isOfflineCached: false,
+                    now: now
+                )
+                storeLiveSuccess(snapshot)
+                completion(.success(snapshot))
+                return
+            }
+        }
+
+        // 3. Seamless local `state.vscdb` + `cli-*.log` + `agy models` path
         completeWithLocalFallback(
             desktop: desktop,
             email: mergedEmail,
@@ -710,27 +770,11 @@ final class SubscriptionQuotaService {
 
             let group = DispatchGroup()
             let stateLock = NSLock()
-            var aicodeData: Data?
             var modelsData: Data?
             var summaryData: Data?
-            var aicodeStatus = -1
             var modelsStatus = -1
             var summaryStatus = -1
             var rateLimitDeadline: Date?
-
-            group.enter()
-            self.getJSON(url: self.aicodeQuotaURL, bearerToken: bearerToken) { data, http in
-                stateLock.lock()
-                aicodeStatus = http?.statusCode ?? -1
-                if aicodeStatus == 200 {
-                    aicodeData = data
-                } else if aicodeStatus == 429 {
-                    let dl = Self.retryDeadline(from: http, default: 60)
-                    rateLimitDeadline = rateLimitDeadline.map { max($0, dl) } ?? dl
-                }
-                stateLock.unlock()
-                group.leave()
-            }
 
             group.enter()
             self.postJSON(url: self.availableModelsURL, bearerToken: bearerToken, bodyObject: projectBody) { data, http in
@@ -764,15 +808,13 @@ final class SubscriptionQuotaService {
                 stateLock.lock()
                 let snapModelsData = modelsData
                 let snapSummaryData = summaryData
-                let snapAicodeData = aicodeData
-                let snapStatuses = [aicodeStatus, modelsStatus, summaryStatus]
+                let snapStatuses = [modelsStatus, summaryStatus]
                 let snapDeadline = rateLimitDeadline
                 stateLock.unlock()
 
-                let merged = AGYQuotaParser.mergeLiveQuotaBuckets(
+                var merged = AGYQuotaParser.mergeLiveQuotaBuckets(
                     availableModelsData: snapModelsData,
-                    quotaSummaryData: snapSummaryData,
-                    aicodeQuotaData: snapAicodeData
+                    quotaSummaryData: snapSummaryData
                 )
                 let outcome = LiveQuotaHTTPOutcome.classifyLiveHTTP(
                     hasMergedBuckets: !merged.isEmpty,
@@ -781,6 +823,19 @@ final class SubscriptionQuotaService {
                 )
                 switch outcome {
                 case .live:
+                    // Fast path: when retrieveUserQuotaSummary already includes gemini_weekly,
+                    // avoid spawning the CLI. Only invoke `agy -p "/usage"` if Google omitted
+                    // gemini_weekly and neither endpoint returned HTTP 429.
+                    if !AGYQuotaParser.hasGeminiWeeklyBucket(merged),
+                       !snapStatuses.contains(429),
+                       let cliData = AGYStateStore.fetchCLIUsageJSON() {
+                        merged = AGYQuotaParser.mergeLiveQuotaBuckets(
+                            availableModelsData: snapModelsData,
+                            quotaSummaryData: snapSummaryData,
+                            aicodeQuotaData: nil,
+                            cliUsageData: cliData
+                        )
+                    }
                     completion(.live(buckets: merged, tier: lcaInfo.tier))
                 case .rateLimited(let deadline):
                     completion(.rateLimited(deadline))
@@ -798,31 +853,11 @@ final class SubscriptionQuotaService {
     private static let ephemeralSession = URLSession(configuration: .ephemeral)
     private static let userAgent: String = {
         #if arch(arm64)
-        return "antigravity/1.5.9 darwin/arm64"
+        return "antigravity/hub/2.24.0 (aidev_client; os_type=darwin; arch=arm64; cl=963137146)"
         #else
-        return "antigravity/1.5.9 darwin/x86_64"
+        return "antigravity/hub/2.24.0 (aidev_client; os_type=darwin; arch=amd64; cl=963137146)"
         #endif
     }()
-
-    private func getJSON(
-        url: URL,
-        bearerToken: String,
-        completion: @escaping (Data?, HTTPURLResponse?) -> Void
-    ) {
-        guard url.scheme == "https" else {
-            completion(nil, nil)
-            return
-        }
-        var req = URLRequest(url: url)
-        req.httpMethod = "GET"
-        req.timeoutInterval = 8
-        req.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
-        req.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
-
-        Self.ephemeralSession.dataTask(with: req) { data, resp, _ in
-            completion(data, resp as? HTTPURLResponse)
-        }.resume()
-    }
 
     private func postJSON(
         url: URL,
