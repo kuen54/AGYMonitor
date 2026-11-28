@@ -974,4 +974,85 @@ struct QuotaParserTests {
         #expect(merged[1].remainingPercent == 26)
         #expect(merged[1].resetAt == AppDate.parseISO8601("2026-11-30T00:52:12Z"))
     }
+
+    @Test("Rejects stale state.vscdb Desktop OAuth tokens older than 55m while honoring explicit expiry")
+    func desktopOAuthTokenFreshnessGuard() throws {
+        let now = try #require(AppDate.parseISO8601("2026-11-28T13:45:00Z"))
+        let freshMtime = now.addingTimeInterval(-10 * 60)      // 10m ago -> fresh
+        let staleMtime = now.addingTimeInterval(-2 * 3600)     // 2h ago -> guaranteed expired
+        let ancientMtime = try #require(AppDate.parseISO8601("2026-07-10T09:04:00Z"))
+
+        let plainJSON = #"{"apiKey":"ya29.desktop-token-123","email":"user@example.com"}"#
+
+        // Fresh state.vscdb (<55m) -> accepted
+        #expect(
+            AGYQuotaParser.extractDesktopOAuthAccessToken(
+                from: plainJSON,
+                fileModifiedAt: freshMtime,
+                now: now
+            ) == "ya29.desktop-token-123"
+        )
+
+        // Stale (2h) or ancient (4 months) state.vscdb without explicit future expiry -> rejected
+        #expect(
+            AGYQuotaParser.extractDesktopOAuthAccessToken(
+                from: plainJSON,
+                fileModifiedAt: staleMtime,
+                now: now
+            ) == nil
+        )
+        #expect(
+            AGYQuotaParser.extractDesktopOAuthAccessToken(
+                from: plainJSON,
+                fileModifiedAt: ancientMtime,
+                now: now
+            ) == nil
+        )
+        #expect(
+            AGYQuotaParser.extractDesktopOAuthAccessToken(
+                from: plainJSON,
+                fileModifiedAt: nil,
+                now: now
+            ) == nil
+        )
+
+        // Explicit future ISO expiry overrides stale file mtime; explicit past expiry overrides fresh file mtime
+        let futureExpJSON = #"{"accessToken":"ya29.explicit-fresh","expiry":"2026-11-28T14:30:00Z"}"#
+        #expect(
+            AGYQuotaParser.extractDesktopOAuthAccessToken(
+                from: futureExpJSON,
+                fileModifiedAt: staleMtime,
+                now: now
+            ) == "ya29.explicit-fresh"
+        )
+
+        let pastExpJSON = #"{"accessToken":"ya29.explicit-expired","expiry":"2026-11-28T13:40:00Z"}"#
+        #expect(
+            AGYQuotaParser.extractDesktopOAuthAccessToken(
+                from: pastExpJSON,
+                fileModifiedAt: freshMtime,
+                now: now
+            ) == nil
+        )
+
+        // Explicit ms epoch expiry_date respected and non-ya29 tokens rejected
+        let futureMs = Int((now.timeIntervalSince1970 + 1800) * 1000)
+        let msExpJSON = #"{"access_token":"ya29.ms-fresh","expiry_date":\#(futureMs)}"#
+        #expect(
+            AGYQuotaParser.extractDesktopOAuthAccessToken(
+                from: msExpJSON,
+                fileModifiedAt: staleMtime,
+                now: now
+            ) == "ya29.ms-fresh"
+        )
+
+        let nonOAuthJSON = #"{"apiKey":"not-a-google-oauth-token"}"#
+        #expect(
+            AGYQuotaParser.extractDesktopOAuthAccessToken(
+                from: nonOAuthJSON,
+                fileModifiedAt: freshMtime,
+                now: now
+            ) == nil
+        )
+    }
 }
