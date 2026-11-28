@@ -594,6 +594,79 @@ public enum AGYQuotaParser {
         return (accessToken: accessToken, expiry: expiry, email: email)
     }
 
+    // MARK: 3c) Desktop `antigravityAuthStatus` token freshness guard
+
+    /// Google OAuth2 `ya29.` access tokens expire after 60 minutes. When Desktop/IDE
+    /// `state.vscdb` has not been updated recently (e.g. an idle Desktop install from
+    /// weeks ago while the user works in `agy` CLI), its cached `antigravityAuthStatus`
+    /// token is guaranteed expired and must not be sent as a live bearer token.
+    public static func isDesktopAuthTokenFresh(
+        fileModifiedAt: Date?,
+        now: Date = Date(),
+        maxAgeSeconds: TimeInterval = 3300
+    ) -> Bool {
+        guard let modifiedAt = fileModifiedAt,
+              maxAgeSeconds.isFinite,
+              maxAgeSeconds > 0 else {
+            return false
+        }
+        let age = now.timeIntervalSince(modifiedAt)
+        return age >= -300 && age <= maxAgeSeconds
+    }
+
+    /// Extract a still-valid `ya29.` OAuth access token from Desktop/IDE `state.vscdb`
+    /// `antigravityAuthStatus` JSON. Honors any explicit expiry field inside the JSON,
+    /// otherwise requires the backing `state.vscdb` file mtime to be within `maxAgeSeconds`
+    /// (default 55 minutes).
+    public static func extractDesktopOAuthAccessToken(
+        from rawJSON: String,
+        fileModifiedAt: Date?,
+        now: Date = Date(),
+        maxAgeSeconds: TimeInterval = 3300
+    ) -> String? {
+        guard let data = rawJSON.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+
+        var token: String? = nil
+        for key in ["accessToken", "access_token", "apiKey", "oauthToken"] {
+            if let candidate = nonEmptyTrimmed(obj[key] as? String),
+               candidate.hasPrefix("ya29.") {
+                token = candidate
+                break
+            }
+        }
+        guard let resolvedToken = token else { return nil }
+
+        // Check explicit expiry metadata if present inside `antigravityAuthStatus`.
+        let expiryKeys = ["expiry", "expiryDate", "expiry_date", "expiresAt", "expires_at"]
+        for key in expiryKeys {
+            guard let rawExp = obj[key] else { continue }
+            if let expStr = rawExp as? String, let parsed = AppDate.parseISO8601(expStr) {
+                return parsed > now.addingTimeInterval(30) ? resolvedToken : nil
+            }
+            if let num = rawExp as? NSNumber,
+               CFGetTypeID(num) != CFBooleanGetTypeID() {
+                let rawVal = num.doubleValue
+                if rawVal.isFinite && rawVal > 0 {
+                    let epochSeconds = rawVal > 10_000_000_000 ? rawVal / 1000.0 : rawVal
+                    let parsed = Date(timeIntervalSince1970: epochSeconds)
+                    return parsed > now.addingTimeInterval(30) ? resolvedToken : nil
+                }
+            }
+        }
+
+        guard isDesktopAuthTokenFresh(
+            fileModifiedAt: fileModifiedAt,
+            now: now,
+            maxAgeSeconds: maxAgeSeconds
+        ) else {
+            return nil
+        }
+        return resolvedToken
+    }
+
     // MARK: 4) `~/.gemini/antigravity-cli/log/cli-*.log` account info
 
     /// Extract the newest `(email, tier)` pair logged by `agy` in `cli-*.log`.

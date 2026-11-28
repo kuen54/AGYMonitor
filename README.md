@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kuen54/AGYMonitor/releases/tag/v2.0.2"><img src="https://img.shields.io/badge/release-v2.0.2-1D4ED8?style=flat-square" alt="Release v2.0.2"/></a>
+  <a href="https://github.com/kuen54/AGYMonitor/releases/tag/v2.0.3"><img src="https://img.shields.io/badge/release-v2.0.3-1D4ED8?style=flat-square" alt="Release v2.0.3"/></a>
   <img src="https://img.shields.io/badge/macOS-13%2B%20Universal-111111?style=flat-square" alt="macOS 13+ Universal"/>
   <img src="https://img.shields.io/badge/tokens-0%20extra-0F766E?style=flat-square" alt="Zero Extra Tokens"/>
   <img src="https://img.shields.io/badge/busy%20CPU-0%25%20idle%20ticks-111111?style=flat-square" alt="0% Idle Ticks"/>
@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <a href="#english">English</a> · <a href="#中文">中文</a> · <a href="https://github.com/kuen54/AGYMonitor/releases/tag/v2.0.2">Download v2.0.2</a>
+  <a href="#english">English</a> · <a href="#中文">中文</a> · <a href="https://github.com/kuen54/AGYMonitor/releases/tag/v2.0.3">Download v2.0.3</a>
 </p>
 
 <p align="center">
@@ -228,7 +228,7 @@ setup_signing.sh              ← optional one-time self-signed certificate setu
 fix_swift.sh                  ← Command Line Tools SwiftBridging modulemap workaround
 .github/workflows/build.yml   ← CI: plist lint → py_compile & unittest → swift test → DMG build
 AGENTS.md                     ← developer & coding-agent architecture contract
-Info.plist                    ← LSUIElement=true; single source of app version (2.0.2)
+Info.plist                    ← LSUIElement=true; single source of app version (2.0.3)
 ```
 
 ### On pricing accuracy

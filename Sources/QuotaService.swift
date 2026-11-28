@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 
 /// App version, single-sourced from Info.plist (CFBundleShortVersionString).
-let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "2.0.2"
+let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "2.0.3"
 
 /// UI-facing subset of QuotaFetchResult (shared with AGYCore `CoreQuotaError`).
 typealias QuotaError = CoreQuotaError
@@ -70,9 +70,12 @@ private enum AGYStateStore {
     }
 
     /// Read `antigravityUnifiedStateSync.userStatus`, `antigravityUnifiedStateSync.modelCredits`,
-    /// and any plain OAuth access token from Desktop/IDE `state.vscdb` (using `immutable=1`
+    /// and any fresh OAuth access token from Desktop/IDE `state.vscdb` (using `immutable=1`
     /// read-only SQLite fallback so missing `-wal`/`-shm` files never fail).
-    static func readCachedDesktopState(home: String = NSHomeDirectory()) -> (
+    static func readCachedDesktopState(
+        home: String = NSHomeDirectory(),
+        now: Date = Date()
+    ) -> (
         userStatus: AGYDecodedUserStatus?,
         modelCredits: Int?,
         accessToken: String?
@@ -80,8 +83,19 @@ private enum AGYStateStore {
         var bestStatus: AGYDecodedUserStatus? = nil
         var bestCredits: Int? = nil
         var foundToken: String? = nil
+        let fm = FileManager.default
 
         for dbPath in candidateStateDBPaths(home: home) {
+            let dbModifiedAt: Date? = {
+                let mainDate = (try? fm.attributesOfItem(atPath: dbPath)[.modificationDate]) as? Date
+                let walDate = (try? fm.attributesOfItem(atPath: dbPath + "-wal")[.modificationDate]) as? Date
+                switch (mainDate, walDate) {
+                case let (a?, b?): return max(a, b)
+                case let (a?, nil): return a
+                case let (nil, b?): return b
+                case (nil, nil): return nil
+                }
+            }()
             guard let db = SessionMonitor.openReadOnlySQLite(at: dbPath) else { continue }
             defer { sqlite3_close_v2(db) }
 
@@ -138,7 +152,12 @@ private enum AGYStateStore {
                         bestCredits = credits
                     }
                 case "antigravityAuthStatus":
-                    if foundToken == nil, let tok = extractOAuthAccessToken(from: trimmed) {
+                    if foundToken == nil,
+                       let tok = AGYQuotaParser.extractDesktopOAuthAccessToken(
+                           from: trimmed,
+                           fileModifiedAt: dbModifiedAt,
+                           now: now
+                       ) {
                         foundToken = tok
                     }
                 default:
@@ -241,23 +260,35 @@ private enum AGYStateStore {
         return res.status == 0 && res.output.contains("gemini")
     }
 
+    enum CLIUsageFetchResult {
+        case data(Data)
+        case timedOut
+        case unavailable
+    }
+
     /// Fetch live quota JSON via `agy -p "/usage" --output-format json` as a fallback
-    /// when Cloud Code PA omits `gemini_weekly` or when no local OAuth bearer token is
-    /// directly accessible.
-    static func fetchCLIUsageJSON(home: String = NSHomeDirectory()) -> Data? {
+    /// when Cloud Code PA omits `gemini_weekly`, rejects a stale access token (HTTP 401/403),
+    /// or when the Keychain access token expired (since `agy` refreshes via refresh token in
+    /// memory without always rewriting Keychain).
+    static func fetchCLIUsageJSON(home: String = NSHomeDirectory()) -> CLIUsageFetchResult {
         guard let bin = resolveAGYBinary(home: home),
-              let res = ProcessRunner.run(
+              let res = ProcessRunner.runDetailed(
                   bin,
-                  ["-p", "/usage", "--output-format", "json", "--print-timeout", "15s"],
-                  timeout: 18.0,
+                  ["-p", "/usage", "--output-format", "json", "--print-timeout", "20s"],
+                  timeout: 24.0,
                   environment: cliChildEnvironment()
-              ),
-              res.status == 0 else {
-            return nil
+              ) else {
+            return .unavailable
+        }
+        if res.timedOut {
+            return .timedOut
+        }
+        guard res.status == 0 else {
+            return .unavailable
         }
         let trimmed = res.output.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        return Data(res.output.utf8)
+        guard !trimmed.isEmpty else { return .unavailable }
+        return .data(Data(res.output.utf8))
     }
 
     /// Read `agy` CLI's live OAuth payload stored in macOS Keychain under
@@ -276,18 +307,20 @@ private enum AGYStateStore {
 
     /// Resolve an active OAuth bearer token (and account email when known):
     /// 1. Explicit environment override (`AGY_ACCESS_TOKEN`, etc.)
-    /// 2. `agy` CLI Keychain entry (`service="gemini", account="antigravity"`),
-    ///    auto-refreshing once via `agy models` if expired or near expiry.
-    /// 3. `~/.gemini/oauth_creds.json` or Desktop `antigravityAuthStatus` fallback.
+    /// 2. Fresh `agy` CLI Keychain entry (`service="gemini", account="antigravity"`).
+    ///    When the Keychain `access_token` is expired, skip spawning `agy models` (newer `agy`
+    ///    refreshes in memory via refresh token without rewriting Keychain) and signal
+    ///    `hadExpiredAuth = true` so `performAGYFetch` goes straight to `agy -p "/usage"` once.
+    /// 3. Fresh `~/.gemini/oauth_creds.json` or fresh (`<55m`) Desktop `antigravityAuthStatus`.
     static func resolveLiveAuth(
         cachedDesktopToken: String?,
         now: Date = Date(),
         home: String = NSHomeDirectory()
-    ) -> (token: String?, email: String?) {
+    ) -> (token: String?, email: String?, hadExpiredAuth: Bool) {
         let env = ProcessInfo.processInfo.environment
         for key in ["AGY_ACCESS_TOKEN", "CLOUDCODE_ACCESS_TOKEN", "GOOGLE_OAUTH_ACCESS_TOKEN"] {
             if let v = env[key]?.trimmingCharacters(in: .whitespacesAndNewlines), !v.isEmpty {
-                return (v, nil)
+                return (v, nil, false)
             }
         }
 
@@ -297,49 +330,15 @@ private enum AGYStateStore {
                 return exp > now.addingTimeInterval(30)
             }()
             if let tok = kc.accessToken, !tok.isEmpty, freshEnough {
-                return (tok, kc.email)
+                return (tok, kc.email, false)
             }
-            if let bin = resolveAGYBinary(home: home),
-               let res = ProcessRunner.run(
-                   bin,
-                   ["models"],
-                   timeout: 8.0,
-                   environment: cliChildEnvironment()
-               ),
-               res.status == 0,
-               let refreshed = readCLIKeychainAuth(),
-               let tok = refreshed.accessToken,
-               !tok.isEmpty {
-                let refreshedValid: Bool = {
-                    guard let exp = refreshed.expiry else { return true }
-                    return exp > Date().addingTimeInterval(5)
-                }()
-                if refreshedValid {
-                    return (tok, refreshed.email ?? kc.email)
-                }
+            if let fallback = resolveAccessibleOAuthToken(cachedToken: cachedDesktopToken, home: home) {
+                return (fallback, kc.email, false)
             }
-            if let mail = kc.email, !mail.isEmpty {
-                if let fallback = resolveAccessibleOAuthToken(cachedToken: cachedDesktopToken, home: home) {
-                    return (fallback, mail)
-                }
-                return (nil, mail)
-            }
+            return (nil, kc.email, true)
         }
 
-        return (resolveAccessibleOAuthToken(cachedToken: cachedDesktopToken, home: home), nil)
-    }
-
-    private static func extractOAuthAccessToken(from text: String) -> String? {
-        guard let data = text.data(using: .utf8),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return nil
-        }
-        for k in ["accessToken", "access_token", "apiKey", "oauthToken"] {
-            if let tok = obj[k] as? String, tok.hasPrefix("ya29.") {
-                return tok
-            }
-        }
-        return nil
+        return (resolveAccessibleOAuthToken(cachedToken: cachedDesktopToken, home: home), nil, false)
     }
 
     private static func readBoundedLogText(at path: String, maxBytes: Int) -> String? {
@@ -535,7 +534,7 @@ final class SubscriptionQuotaService {
 
     private func performAGYFetch(forceRefresh: Bool, completion: @escaping (QuotaFetchResult) -> Void) {
         let now = Date()
-        let desktop = AGYStateStore.readCachedDesktopState()
+        let desktop = AGYStateStore.readCachedDesktopState(now: now)
         let cliAccount = AGYStateStore.readCLILogAccountInfo()
         let liveAuth = AGYStateStore.resolveLiveAuth(cachedDesktopToken: desktop.accessToken, now: now)
 
@@ -547,7 +546,7 @@ final class SubscriptionQuotaService {
         let flowCredits = desktop.userStatus?.flowCredits
         let flexCredits = desktop.userStatus?.flexCredits
 
-        // 1. Attempt live Cloud Code PA HTTP fetch if an OAuth token is accessible
+        // 1. Attempt live Cloud Code PA HTTP fetch if a fresh OAuth token is accessible
         if let token = liveAuth.token {
             fetchLiveCloudCodeQuota(bearerToken: token) { [weak self] liveOutcome in
                 guard let self = self else { return }
@@ -584,16 +583,18 @@ final class SubscriptionQuotaService {
                             completion: completion
                         )
                     case .unauthorized:
-                        self.completeWithLocalFallback(
+                        // Direct bearer token was rejected (e.g. revoked or expired early).
+                        // Recover via `agy -p "/usage" --output-format json` (which uses `agy`'s
+                        // own refresh-token flow) before reporting "Auth expired".
+                        self.completeViaCLIUsageFallback(
                             desktop: desktop,
                             email: mergedEmail,
                             rawTier: mergedRawTier,
                             promptCredits: promptCredits,
                             flowCredits: flowCredits,
                             flexCredits: flexCredits,
-                            allowCLIProbe: false,
-                            liveError: .unauthorized,
-                            retryAt: nil,
+                            onUnavailableError: .unauthorized,
+                            allowLocalFallbackCLIProbe: false,
                             now: now,
                             completion: completion
                         )
@@ -631,15 +632,43 @@ final class SubscriptionQuotaService {
             return
         }
 
-        // 2. If no direct OAuth token was readable, try live CLI `/usage` JSON before
-        // falling back to potentially stale `state.vscdb`.
-        if let cliData = AGYStateStore.fetchCLIUsageJSON() {
+        // 2. No fresh direct bearer token (e.g. Keychain access_token expired while `agy`
+        // refreshes in memory, or Keychain ACL inaccessible) -> run live CLI `/usage` JSON
+        // once before falling back to local `state.vscdb`.
+        completeViaCLIUsageFallback(
+            desktop: desktop,
+            email: mergedEmail,
+            rawTier: mergedRawTier,
+            promptCredits: promptCredits,
+            flowCredits: flowCredits,
+            flexCredits: flexCredits,
+            onUnavailableError: liveAuth.hadExpiredAuth ? .unauthorized : nil,
+            allowLocalFallbackCLIProbe: !liveAuth.hadExpiredAuth && (forceRefresh || desktop.userStatus == nil),
+            now: now,
+            completion: completion
+        )
+    }
+
+    private func completeViaCLIUsageFallback(
+        desktop: (userStatus: AGYDecodedUserStatus?, modelCredits: Int?, accessToken: String?),
+        email: String?,
+        rawTier: String?,
+        promptCredits: Int?,
+        flowCredits: Int?,
+        flexCredits: Int?,
+        onUnavailableError: CoreQuotaError?,
+        allowLocalFallbackCLIProbe: Bool,
+        now: Date,
+        completion: @escaping (QuotaFetchResult) -> Void
+    ) {
+        switch AGYStateStore.fetchCLIUsageJSON() {
+        case .data(let cliData):
             let cliBuckets = AGYQuotaParser.parseCLIUsageJSON(cliData)
             if !cliBuckets.isEmpty {
                 let snapshot = Self.buildQuotaSnapshot(
                     buckets: cliBuckets,
-                    email: mergedEmail,
-                    rawTier: mergedRawTier,
+                    email: email,
+                    rawTier: rawTier,
                     promptCredits: promptCredits,
                     flowCredits: flowCredits,
                     flexCredits: flexCredits,
@@ -650,22 +679,49 @@ final class SubscriptionQuotaService {
                 completion(.success(snapshot))
                 return
             }
+            completeWithLocalFallback(
+                desktop: desktop,
+                email: email,
+                rawTier: rawTier,
+                promptCredits: promptCredits,
+                flowCredits: flowCredits,
+                flexCredits: flexCredits,
+                allowCLIProbe: allowLocalFallbackCLIProbe,
+                liveError: onUnavailableError,
+                retryAt: nil,
+                now: now,
+                completion: completion
+            )
+        case .timedOut:
+            // Do not falsely blame auth when `agy -p "/usage"` timed out (e.g. offline/slow network).
+            completeWithLocalFallback(
+                desktop: desktop,
+                email: email,
+                rawTier: rawTier,
+                promptCredits: promptCredits,
+                flowCredits: flowCredits,
+                flexCredits: flexCredits,
+                allowCLIProbe: false,
+                liveError: .networkFailure,
+                retryAt: nil,
+                now: now,
+                completion: completion
+            )
+        case .unavailable:
+            completeWithLocalFallback(
+                desktop: desktop,
+                email: email,
+                rawTier: rawTier,
+                promptCredits: promptCredits,
+                flowCredits: flowCredits,
+                flexCredits: flexCredits,
+                allowCLIProbe: allowLocalFallbackCLIProbe,
+                liveError: onUnavailableError,
+                retryAt: nil,
+                now: now,
+                completion: completion
+            )
         }
-
-        // 3. Seamless local `state.vscdb` + `cli-*.log` + `agy models` path
-        completeWithLocalFallback(
-            desktop: desktop,
-            email: mergedEmail,
-            rawTier: mergedRawTier,
-            promptCredits: promptCredits,
-            flowCredits: flowCredits,
-            flexCredits: flexCredits,
-            allowCLIProbe: forceRefresh || desktop.userStatus == nil,
-            liveError: nil,
-            retryAt: nil,
-            now: now,
-            completion: completion
-        )
     }
 
     private func completeWithLocalFallback(
@@ -828,7 +884,7 @@ final class SubscriptionQuotaService {
                     // gemini_weekly and neither endpoint returned HTTP 429.
                     if !AGYQuotaParser.hasGeminiWeeklyBucket(merged),
                        !snapStatuses.contains(429),
-                       let cliData = AGYStateStore.fetchCLIUsageJSON() {
+                       case .data(let cliData) = AGYStateStore.fetchCLIUsageJSON() {
                         merged = AGYQuotaParser.mergeLiveQuotaBuckets(
                             availableModelsData: snapModelsData,
                             quotaSummaryData: snapSummaryData,
